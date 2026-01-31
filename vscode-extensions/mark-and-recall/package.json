@@ -10,7 +10,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -37,6 +39,22 @@
       {
         "command": "mark-and-recall.appendNamedMark",
         "title": "Mark and Recall: Add Named Mark (append)"
+      },
+      {
+        "command": "mark-and-recall.deleteMarkAtCursor",
+        "title": "Mark and Recall: Delete Mark at Cursor"
+      },
+      {
+        "command": "mark-and-recall.deleteAllMarksInFile",
+        "title": "Mark and Recall: Delete All Marks in File"
+      },
+      {
+        "command": "mark-and-recall.gotoPreviousMark",
+        "title": "Mark and Recall: Go to Previous Mark in File"
+      },
+      {
+        "command": "mark-and-recall.gotoNextMark",
+        "title": "Mark and Recall: Go to Next Mark in File"
       },
       {
         "command": "mark-and-recall.recallByIndex",

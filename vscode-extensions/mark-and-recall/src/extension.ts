@@ -528,6 +528,251 @@ async function appendNamedMark(): Promise<void> {
     await addMark(false, true);
 }
 
+async function deleteMarkAtCursor(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+
+    const marksFilePath = getMarksFilePathQuiet();
+    if (!marksFilePath || !fs.existsSync(marksFilePath)) {
+        vscode.window.showWarningMessage('No marks.md file found');
+        return;
+    }
+
+    const currentFilePath = editor.document.uri.fsPath;
+    const currentLine = editor.selection.active.line + 1; // Convert to 1-based
+
+    const marks = getMarksQuiet();
+
+    // Find mark at current position
+    const markToDelete = marks.find(
+        (m) => m.filePath === currentFilePath && m.line === currentLine
+    );
+
+    if (!markToDelete) {
+        vscode.window.showInformationMessage('No mark at current line');
+        return;
+    }
+
+    // Read and modify marks.md
+    let content: string;
+    try {
+        content = fs.readFileSync(marksFilePath, 'utf-8');
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to read marks.md: ${err}`);
+        return;
+    }
+
+    const lines = content.split('\n');
+    let markIndex = 0;
+    let lineToDelete = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+            continue;
+        }
+
+        // Check if this is a valid mark line
+        const lastColonIndex = trimmed.lastIndexOf(':');
+        if (lastColonIndex === -1) {
+            continue;
+        }
+
+        const lineStr = trimmed.substring(lastColonIndex + 1).trim();
+        const lineNum = parseInt(lineStr, 10);
+        if (isNaN(lineNum)) {
+            continue;
+        }
+
+        if (markIndex === markToDelete.index) {
+            lineToDelete = i;
+            break;
+        }
+        markIndex++;
+    }
+
+    if (lineToDelete === -1) {
+        vscode.window.showErrorMessage('Could not find mark in marks.md');
+        return;
+    }
+
+    // Remove the line
+    lines.splice(lineToDelete, 1);
+    const newContent = lines.join('\n');
+
+    try {
+        isUpdatingMarksFile = true;
+        fs.writeFileSync(marksFilePath, newContent, 'utf-8');
+        vscode.window.showInformationMessage('Mark deleted');
+        updateAllDecorations();
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to write marks.md: ${err}`);
+    } finally {
+        isUpdatingMarksFile = false;
+    }
+}
+
+async function deleteAllMarksInFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+
+    const marksFilePath = getMarksFilePathQuiet();
+    if (!marksFilePath || !fs.existsSync(marksFilePath)) {
+        vscode.window.showWarningMessage('No marks.md file found');
+        return;
+    }
+
+    const currentFilePath = editor.document.uri.fsPath;
+    const marks = getMarksQuiet();
+
+    // Find all marks in current file
+    const marksToDelete = marks.filter((m) => m.filePath === currentFilePath);
+
+    if (marksToDelete.length === 0) {
+        vscode.window.showInformationMessage('No marks in current file');
+        return;
+    }
+
+    // Get the indices to delete (in reverse order to maintain correct indices)
+    const indicesToDelete = new Set(marksToDelete.map((m) => m.index));
+
+    // Read and modify marks.md
+    let content: string;
+    try {
+        content = fs.readFileSync(marksFilePath, 'utf-8');
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to read marks.md: ${err}`);
+        return;
+    }
+
+    const lines = content.split('\n');
+    const newLines: string[] = [];
+    let markIndex = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+            newLines.push(lines[i]);
+            continue;
+        }
+
+        // Check if this is a valid mark line
+        const lastColonIndex = trimmed.lastIndexOf(':');
+        if (lastColonIndex === -1) {
+            newLines.push(lines[i]);
+            continue;
+        }
+
+        const lineStr = trimmed.substring(lastColonIndex + 1).trim();
+        const lineNum = parseInt(lineStr, 10);
+        if (isNaN(lineNum)) {
+            newLines.push(lines[i]);
+            continue;
+        }
+
+        // This is a valid mark - only keep if not in delete set
+        if (!indicesToDelete.has(markIndex)) {
+            newLines.push(lines[i]);
+        }
+        markIndex++;
+    }
+
+    const newContent = newLines.join('\n');
+
+    try {
+        isUpdatingMarksFile = true;
+        fs.writeFileSync(marksFilePath, newContent, 'utf-8');
+        vscode.window.showInformationMessage(
+            `Deleted ${marksToDelete.length} mark(s) from current file`
+        );
+        updateAllDecorations();
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to write marks.md: ${err}`);
+    } finally {
+        isUpdatingMarksFile = false;
+    }
+}
+
+async function gotoPreviousMark(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+
+    const currentFilePath = editor.document.uri.fsPath;
+    const currentLine = editor.selection.active.line + 1; // Convert to 1-based
+
+    const marks = getMarksQuiet();
+    const fileMarks = marks
+        .filter((m) => m.filePath === currentFilePath)
+        .sort((a, b) => a.line - b.line);
+
+    if (fileMarks.length === 0) {
+        vscode.window.showInformationMessage('No marks in current file');
+        return;
+    }
+
+    // Find nearest mark above current line
+    let targetMark: MarkWithIndex | undefined;
+    for (let i = fileMarks.length - 1; i >= 0; i--) {
+        if (fileMarks[i].line < currentLine) {
+            targetMark = fileMarks[i];
+            break;
+        }
+    }
+
+    // Wrap to bottom if none above
+    if (!targetMark) {
+        targetMark = fileMarks[fileMarks.length - 1];
+    }
+
+    await navigateToMark(targetMark);
+}
+
+async function gotoNextMark(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+
+    const currentFilePath = editor.document.uri.fsPath;
+    const currentLine = editor.selection.active.line + 1; // Convert to 1-based
+
+    const marks = getMarksQuiet();
+    const fileMarks = marks
+        .filter((m) => m.filePath === currentFilePath)
+        .sort((a, b) => a.line - b.line);
+
+    if (fileMarks.length === 0) {
+        vscode.window.showInformationMessage('No marks in current file');
+        return;
+    }
+
+    // Find nearest mark below current line
+    let targetMark: MarkWithIndex | undefined;
+    for (const mark of fileMarks) {
+        if (mark.line > currentLine) {
+            targetMark = mark;
+            break;
+        }
+    }
+
+    // Wrap to top if none below
+    if (!targetMark) {
+        targetMark = fileMarks[0];
+    }
+
+    await navigateToMark(targetMark);
+}
+
 function handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
     // Skip if we're currently updating marks.md ourselves
     if (isUpdatingMarksFile) {
@@ -687,6 +932,10 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark),
         vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark),
         vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark),
+        vscode.commands.registerCommand('mark-and-recall.deleteMarkAtCursor', deleteMarkAtCursor),
+        vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile),
+        vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark),
+        vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark),
         vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex)
     );
 

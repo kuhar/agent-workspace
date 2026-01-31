@@ -1,0 +1,53 @@
+{
+  "name": "mark-and-recall",
+  "displayName": "Mark and Recall",
+  "description": "Quick navigation to bookmarked locations defined in marks.md",
+  "version": "0.0.1",
+  "publisher": "jakub",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mark-and-recall.recall",
+        "title": "Recall: Go to Mark"
+      },
+      {
+        "command": "mark-and-recall.openMarks",
+        "title": "Recall: Open marks.md"
+      },
+      {
+        "command": "mark-and-recall.prependMark",
+        "title": "Recall: Add Mark (prepend)"
+      },
+      {
+        "command": "mark-and-recall.appendMark",
+        "title": "Recall: Add Mark (append)"
+      },
+      {
+        "command": "mark-and-recall.recallByIndex",
+        "title": "Recall: Go to Mark by Index"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0"
+  }
+}

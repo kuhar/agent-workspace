@@ -3,9 +3,202 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 interface Mark {
-    name: string;
+    name: string | undefined; // undefined for anonymous marks
     filePath: string;
     line: number;
+}
+
+interface MarkWithIndex extends Mark {
+    index: number;
+}
+
+// Decoration types for marks 1-9
+const markDecorationTypes: vscode.TextEditorDecorationType[] = [];
+
+// Decoration type for marks 10+ (star)
+let starDecorationType: vscode.TextEditorDecorationType;
+
+// Line highlight decoration
+let lineHighlightDecoration: vscode.TextEditorDecorationType;
+
+// File watcher for marks.md
+let marksFileWatcher: vscode.FileSystemWatcher | undefined;
+
+// Debounce timer for updating marks.md
+let updateMarksDebounceTimer: NodeJS.Timeout | undefined;
+
+// Flag to prevent recursive updates when we write to marks.md
+let isUpdatingMarksFile = false;
+
+// Pending mark updates - tracks modified line numbers before writing to file
+// Map from mark index to new line number
+let pendingMarkUpdates: Map<number, number> | undefined;
+
+function createNumberSvg(num: number): string {
+    // Create a smaller SVG with a blue circle and white number
+    const svg = `<svg width="12" height="12" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="6" cy="6" r="5.5" fill="#2196F3"/>
+        <text x="6" y="9" font-size="8" font-family="Arial, sans-serif" font-weight="bold" fill="white" text-anchor="middle">${num}</text>
+    </svg>`;
+    return 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
+}
+
+function createStarSvg(): string {
+    // Create a smaller SVG with a blue circle and white asterisk
+    const svg = `<svg width="12" height="12" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="6" cy="6" r="5.5" fill="#2196F3"/>
+        <text x="6" y="9.5" font-size="10" font-family="Arial, sans-serif" font-weight="bold" fill="white" text-anchor="middle">*</text>
+    </svg>`;
+    return 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
+}
+
+function initializeDecorations(): void {
+    // Create decoration types for marks 1-9
+    for (let i = 1; i <= 9; i++) {
+        const decorationType = vscode.window.createTextEditorDecorationType({
+            gutterIconPath: vscode.Uri.parse(createNumberSvg(i)),
+            gutterIconSize: 'contain',
+        });
+        markDecorationTypes.push(decorationType);
+    }
+
+    // Create decoration type for marks 10+
+    starDecorationType = vscode.window.createTextEditorDecorationType({
+        gutterIconPath: vscode.Uri.parse(createStarSvg()),
+        gutterIconSize: 'contain',
+    });
+
+    // Create line highlight decoration
+    lineHighlightDecoration = vscode.window.createTextEditorDecorationType({
+        backgroundColor: 'rgba(33, 150, 243, 0.15)', // Light blue background
+        isWholeLine: true,
+    });
+}
+
+function disposeDecorations(): void {
+    for (const decorationType of markDecorationTypes) {
+        decorationType.dispose();
+    }
+    markDecorationTypes.length = 0;
+
+    if (starDecorationType) {
+        starDecorationType.dispose();
+    }
+
+    if (lineHighlightDecoration) {
+        lineHighlightDecoration.dispose();
+    }
+}
+
+function getMarksQuiet(): MarkWithIndex[] {
+    const marksFilePath = getMarksFilePathQuiet();
+    if (!marksFilePath) {
+        return [];
+    }
+
+    const workspaceRoot = path.dirname(marksFilePath);
+
+    if (!fs.existsSync(marksFilePath)) {
+        return [];
+    }
+
+    let content: string;
+    try {
+        content = fs.readFileSync(marksFilePath, 'utf-8');
+    } catch {
+        return [];
+    }
+
+    const marks = parseMarksFile(content, workspaceRoot);
+    return marks.map((mark, index) => ({ ...mark, index }));
+}
+
+function getMarksFilePathQuiet(): string | undefined {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        return undefined;
+    }
+
+    const workspaceRoot = workspaceFolders[0].uri.fsPath;
+    return path.join(workspaceRoot, 'marks.md');
+}
+
+function updateDecorationsForEditor(editor: vscode.TextEditor): void {
+    if (!editor) {
+        return;
+    }
+
+    const marks = getMarksQuiet();
+    const filePath = editor.document.uri.fsPath;
+
+    // Find all marks for this file
+    const fileMarks = marks.filter((mark) => mark.filePath === filePath);
+
+    // Clear all decorations first
+    for (const decorationType of markDecorationTypes) {
+        editor.setDecorations(decorationType, []);
+    }
+    editor.setDecorations(starDecorationType, []);
+    editor.setDecorations(lineHighlightDecoration, []);
+
+    // Collect decorations
+    const lineHighlights: vscode.DecorationOptions[] = [];
+    const starDecorations: vscode.DecorationOptions[] = [];
+
+    for (const mark of fileMarks) {
+        const line = mark.line - 1; // Convert to 0-based
+        if (line < 0 || line >= editor.document.lineCount) {
+            continue;
+        }
+
+        const range = new vscode.Range(line, 0, line, 0);
+        const hoverMessage = mark.name
+            ? `Mark ${mark.index + 1}: ${mark.name}`
+            : `Mark ${mark.index + 1}`;
+
+        if (mark.index < 9) {
+            // Marks 1-9 get numbered icons
+            const decorationType = markDecorationTypes[mark.index];
+            if (decorationType) {
+                editor.setDecorations(decorationType, [{ range, hoverMessage }]);
+            }
+        } else {
+            // Marks 10+ get star icons
+            starDecorations.push({ range, hoverMessage });
+        }
+
+        lineHighlights.push({ range });
+    }
+
+    editor.setDecorations(starDecorationType, starDecorations);
+    editor.setDecorations(lineHighlightDecoration, lineHighlights);
+}
+
+function updateAllDecorations(): void {
+    for (const editor of vscode.window.visibleTextEditors) {
+        updateDecorationsForEditor(editor);
+    }
+}
+
+function setupFileWatcher(context: vscode.ExtensionContext): void {
+    const marksFilePath = getMarksFilePathQuiet();
+    if (!marksFilePath) {
+        return;
+    }
+
+    // Watch for changes to marks.md
+    marksFileWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(
+            vscode.workspace.workspaceFolders![0],
+            'marks.md'
+        )
+    );
+
+    marksFileWatcher.onDidChange(() => updateAllDecorations());
+    marksFileWatcher.onDidCreate(() => updateAllDecorations());
+    marksFileWatcher.onDidDelete(() => updateAllDecorations());
+
+    context.subscriptions.push(marksFileWatcher);
 }
 
 function parseMarksFile(content: string, workspaceRoot: string): Mark[] {
@@ -19,27 +212,55 @@ function parseMarksFile(content: string, workspaceRoot: string): Mark[] {
             continue;
         }
 
-        // Format: name: <path>:<line>
-        const colonIndex = trimmed.indexOf(':');
-        if (colonIndex === -1) {
-            continue;
-        }
+        // Try to parse as named mark first: name: <path>:<line>
+        // Then try anonymous mark: <path>:<line>
 
-        const name = trimmed.substring(0, colonIndex).trim();
-        const rest = trimmed.substring(colonIndex + 1).trim();
-
-        // Find the last colon to separate path from line number
-        const lastColonIndex = rest.lastIndexOf(':');
+        // Find the last colon (before the line number)
+        const lastColonIndex = trimmed.lastIndexOf(':');
         if (lastColonIndex === -1) {
             continue;
         }
 
-        const filePath = rest.substring(0, lastColonIndex).trim();
-        const lineStr = rest.substring(lastColonIndex + 1).trim();
+        const lineStr = trimmed.substring(lastColonIndex + 1).trim();
         const lineNum = parseInt(lineStr, 10);
-
         if (isNaN(lineNum)) {
             continue;
+        }
+
+        const beforeLineNum = trimmed.substring(0, lastColonIndex).trim();
+
+        // Now check if there's a name: prefix
+        // A named mark has format "name: path" before the line number
+        // We need to find the first colon that separates name from path
+        const firstColonIndex = beforeLineNum.indexOf(':');
+
+        let name: string | undefined;
+        let filePath: string;
+
+        if (firstColonIndex !== -1) {
+            // Could be named or could just be an absolute path like /home/user/file
+            // Check if what's before the first colon looks like a path component
+            const potentialName = beforeLineNum.substring(0, firstColonIndex).trim();
+            const potentialPath = beforeLineNum.substring(firstColonIndex + 1).trim();
+
+            // If potentialPath starts with / or looks like a relative path, it's named
+            // If potentialName contains / or \, it's probably part of a path (Windows drive letter case)
+            if (potentialName.length > 0 &&
+                !potentialName.includes('/') &&
+                !potentialName.includes('\\') &&
+                potentialPath.length > 0) {
+                // This is a named mark
+                name = potentialName;
+                filePath = potentialPath;
+            } else {
+                // This is an anonymous mark with the full path
+                name = undefined;
+                filePath = beforeLineNum;
+            }
+        } else {
+            // No colon in the path part - anonymous relative path
+            name = undefined;
+            filePath = beforeLineNum;
         }
 
         // Resolve relative paths against workspace root
@@ -115,10 +336,16 @@ async function recall(): Promise<void> {
         return;
     }
 
-    const items: vscode.QuickPickItem[] = marks.map((mark) => ({
-        label: mark.name,
-        description: `${mark.filePath}:${mark.line}`,
-    }));
+    // Create items with index for identification
+    const items: (vscode.QuickPickItem & { markIndex: number })[] = marks.map((mark, index) => {
+        const displayName = mark.name || path.basename(mark.filePath);
+        const indexLabel = index < 9 ? `[${index + 1}] ` : '[*] ';
+        return {
+            label: indexLabel + displayName,
+            description: `${mark.filePath}:${mark.line}`,
+            markIndex: index,
+        };
+    });
 
     const selected = await vscode.window.showQuickPick(items, {
         placeHolder: 'Select a mark to navigate to',
@@ -129,12 +356,7 @@ async function recall(): Promise<void> {
         return;
     }
 
-    const mark = marks.find((m) => m.name === selected.label);
-    if (!mark) {
-        return;
-    }
-
-    await navigateToMark(mark);
+    await navigateToMark(marks[selected.markIndex]);
 }
 
 async function navigateToMark(mark: Mark): Promise<void> {
@@ -201,7 +423,7 @@ async function recallByIndex(args: { index: number }): Promise<void> {
     await navigateToMark(marks[index]);
 }
 
-async function addMark(prepend: boolean): Promise<void> {
+async function addMark(prepend: boolean, named: boolean): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
         vscode.window.showErrorMessage('No active editor');
@@ -222,28 +444,35 @@ async function addMark(prepend: boolean): Promise<void> {
     const isWithinWorkspace = !relativePath.startsWith('..');
     const displayPath = isWithinWorkspace ? relativePath : filePath;
 
-    // Suggest a name based on the filename
-    const suggestedName = path.basename(filePath, path.extname(filePath));
+    let markEntry: string;
 
-    const name = await vscode.window.showInputBox({
-        prompt: 'Enter a name for this mark',
-        value: suggestedName,
-        validateInput: (value) => {
-            if (!value.trim()) {
-                return 'Name cannot be empty';
-            }
-            if (value.includes(':')) {
-                return 'Name cannot contain colons';
-            }
-            return null;
-        },
-    });
+    if (named) {
+        // Suggest a name based on the filename
+        const suggestedName = path.basename(filePath, path.extname(filePath));
 
-    if (!name) {
-        return;
+        const name = await vscode.window.showInputBox({
+            prompt: 'Enter a name for this mark',
+            value: suggestedName,
+            validateInput: (value) => {
+                if (!value.trim()) {
+                    return 'Name cannot be empty';
+                }
+                if (value.includes(':')) {
+                    return 'Name cannot contain colons';
+                }
+                return null;
+            },
+        });
+
+        if (!name) {
+            return;
+        }
+
+        markEntry = `${name}: ${displayPath}:${line}\n`;
+    } else {
+        // Anonymous mark - just path:line
+        markEntry = `${displayPath}:${line}\n`;
     }
-
-    const markEntry = `${name}: ${displayPath}:${line}\n`;
 
     // Read existing content or create new file
     let content = '';
@@ -275,30 +504,238 @@ async function addMark(prepend: boolean): Promise<void> {
 
     try {
         fs.writeFileSync(marksFilePath, newContent, 'utf-8');
-        vscode.window.showInformationMessage(`Mark "${name}" added`);
+        vscode.window.showInformationMessage('Mark added');
+        // Update decorations immediately
+        updateAllDecorations();
     } catch (err) {
         vscode.window.showErrorMessage(`Failed to write marks.md: ${err}`);
     }
 }
 
 async function prependMark(): Promise<void> {
-    await addMark(true);
+    await addMark(true, false);
+}
+
+async function prependNamedMark(): Promise<void> {
+    await addMark(true, true);
 }
 
 async function appendMark(): Promise<void> {
-    await addMark(false);
+    await addMark(false, false);
+}
+
+async function appendNamedMark(): Promise<void> {
+    await addMark(false, true);
+}
+
+function handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
+    // Skip if we're currently updating marks.md ourselves
+    if (isUpdatingMarksFile) {
+        return;
+    }
+
+    const marksFilePath = getMarksFilePathQuiet();
+    if (!marksFilePath) {
+        return;
+    }
+
+    // Don't track changes to marks.md itself
+    if (event.document.uri.fsPath === marksFilePath) {
+        return;
+    }
+
+    const changedFilePath = event.document.uri.fsPath;
+
+    // Initialize pending updates from file if not already tracking
+    if (!pendingMarkUpdates) {
+        const marks = getMarksQuiet();
+        pendingMarkUpdates = new Map();
+        for (const mark of marks) {
+            pendingMarkUpdates.set(mark.index, mark.line);
+        }
+    }
+
+    // Get original marks to know which ones point to this file
+    const marks = getMarksQuiet();
+    const affectedMarkIndices = marks
+        .filter((m) => m.filePath === changedFilePath)
+        .map((m) => m.index);
+
+    if (affectedMarkIndices.length === 0) {
+        return;
+    }
+
+    // Calculate line adjustments for each change
+    let needsUpdate = false;
+    for (const change of event.contentChanges) {
+        const startLine = change.range.start.line;
+        const endLine = change.range.end.line;
+        const newLineCount = (change.text.match(/\n/g) || []).length;
+        const oldLineCount = endLine - startLine;
+        const lineDelta = newLineCount - oldLineCount;
+
+        if (lineDelta === 0) {
+            continue;
+        }
+
+        // Adjust mark line numbers in pending updates
+        for (const markIndex of affectedMarkIndices) {
+            const currentLine = pendingMarkUpdates.get(markIndex);
+            if (currentLine === undefined) {
+                continue;
+            }
+
+            const markLine = currentLine - 1; // Convert to 0-based
+
+            if (markLine > endLine) {
+                // Mark is after the change - shift it
+                pendingMarkUpdates.set(markIndex, currentLine + lineDelta);
+                needsUpdate = true;
+            } else if (markLine >= startLine && markLine <= endLine && lineDelta < 0) {
+                // Mark is within a deleted range - move to start of deletion
+                pendingMarkUpdates.set(markIndex, startLine + 1); // Convert back to 1-based
+                needsUpdate = true;
+            }
+        }
+    }
+
+    if (needsUpdate) {
+        // Debounce the update to avoid too many writes
+        if (updateMarksDebounceTimer) {
+            clearTimeout(updateMarksDebounceTimer);
+        }
+        updateMarksDebounceTimer = setTimeout(() => {
+            updateMarksFileWithNewLines(marksFilePath);
+            pendingMarkUpdates = undefined; // Reset after writing
+        }, 500);
+    }
+}
+
+function updateMarksFileWithNewLines(marksFilePath: string): void {
+    if (!pendingMarkUpdates || !fs.existsSync(marksFilePath)) {
+        return;
+    }
+
+    let content: string;
+    try {
+        content = fs.readFileSync(marksFilePath, 'utf-8');
+    } catch {
+        return;
+    }
+
+    const lines = content.split('\n');
+    let markIndex = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+            continue;
+        }
+
+        // Parse this line to see if it's a valid mark
+        const colonIndex = trimmed.indexOf(':');
+        if (colonIndex === -1) {
+            continue;
+        }
+
+        const rest = trimmed.substring(colonIndex + 1).trim();
+        const lastColonIndex = rest.lastIndexOf(':');
+        if (lastColonIndex === -1) {
+            continue;
+        }
+
+        const lineStr = rest.substring(lastColonIndex + 1).trim();
+        const lineNum = parseInt(lineStr, 10);
+        if (isNaN(lineNum)) {
+            continue;
+        }
+
+        // This is a valid mark - check if we need to update it
+        const newLine = pendingMarkUpdates.get(markIndex);
+        if (newLine !== undefined && newLine !== lineNum) {
+            const name = trimmed.substring(0, colonIndex).trim();
+            const filePath = rest.substring(0, lastColonIndex).trim();
+
+            // Reconstruct the line with the new line number
+            lines[i] = `${name}: ${filePath}:${newLine}`;
+        }
+        markIndex++;
+    }
+
+    const newContent = lines.join('\n');
+    if (newContent !== content) {
+        try {
+            isUpdatingMarksFile = true;
+            fs.writeFileSync(marksFilePath, newContent, 'utf-8');
+        } catch {
+            // Silently fail - don't interrupt user's work
+        } finally {
+            isUpdatingMarksFile = false;
+        }
+    }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+    // Initialize decorations
+    initializeDecorations();
+
+    // Register commands
     context.subscriptions.push(
         vscode.commands.registerCommand('mark-and-recall.recall', recall),
         vscode.commands.registerCommand('mark-and-recall.openMarks', openMarks),
         vscode.commands.registerCommand('mark-and-recall.prependMark', prependMark),
+        vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark),
         vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark),
+        vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark),
         vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex)
     );
+
+    // Set up file watcher for marks.md
+    setupFileWatcher(context);
+
+    // Update decorations when active editor changes
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor((editor) => {
+            if (editor) {
+                updateDecorationsForEditor(editor);
+            }
+        })
+    );
+
+    // Update decorations when visible editors change
+    context.subscriptions.push(
+        vscode.window.onDidChangeVisibleTextEditors(() => {
+            updateAllDecorations();
+        })
+    );
+
+    // Update decorations when document is saved (in case marks.md is edited)
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((document) => {
+            const marksFilePath = getMarksFilePathQuiet();
+            if (marksFilePath && document.uri.fsPath === marksFilePath) {
+                updateAllDecorations();
+            }
+        })
+    );
+
+    // Track line changes to update marks.md
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument((event) => {
+            handleDocumentChange(event);
+        })
+    );
+
+    // Initial decoration update
+    updateAllDecorations();
 }
 
 export function deactivate(): void {
-    // Nothing to clean up
+    disposeDecorations();
+    if (marksFileWatcher) {
+        marksFileWatcher.dispose();
+    }
+    if (updateMarksDebounceTimer) {
+        clearTimeout(updateMarksDebounceTimer);
+    }
 }

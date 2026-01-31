@@ -16,23 +16,31 @@
     "commands": [
       {
         "command": "mark-and-recall.recall",
-        "title": "Recall: Go to Mark"
+        "title": "Mark and Recall: Go to Mark"
       },
       {
         "command": "mark-and-recall.openMarks",
-        "title": "Recall: Open marks.md"
+        "title": "Mark and Recall: Open marks.md"
       },
       {
         "command": "mark-and-recall.prependMark",
-        "title": "Recall: Add Mark (prepend)"
+        "title": "Mark and Recall: Add Anonymous Mark (prepend)"
+      },
+      {
+        "command": "mark-and-recall.prependNamedMark",
+        "title": "Mark and Recall: Add Named Mark (prepend)"
       },
       {
         "command": "mark-and-recall.appendMark",
-        "title": "Recall: Add Mark (append)"
+        "title": "Mark and Recall: Add Anonymous Mark (append)"
+      },
+      {
+        "command": "mark-and-recall.appendNamedMark",
+        "title": "Mark and Recall: Add Named Mark (append)"
       },
       {
         "command": "mark-and-recall.recallByIndex",
-        "title": "Recall: Go to Mark by Index"
+        "title": "Mark and Recall: Go to Mark by Index"
       }
     ]
   },

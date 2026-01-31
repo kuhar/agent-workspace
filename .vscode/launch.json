@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run mark-and-recall Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extensions/mark-and-recall"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/vscode-extensions/mark-and-recall/out/**/*.js"
+      ]
+    }
+  ]
+}

@@ -16,11 +16,11 @@ Fortunately, Recall works perfectly fine in VS Code, thanks to this extension. I
 Create a `marks.md` file in your workspace root:
 
 ```md
-# Named marks
+# Named marks (name: path:line)
 tester: agents/llvm-tester.md:11
 config: /home/user/project/config.json:5
 
-# Anonymous marks (name optional)
+# Anonymous marks (path:line)
 src/utils.ts:42
 lib/helpers.ts:18
 ```
@@ -51,7 +51,7 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 
 ```json
 {"before": ["<leader>", "m", "r"], "commands": ["mark-and-recall.recall"]},
-{"before": ["<leader>", "m", "0"], "commands": ["mark-and-recall.openMarks"]},
+{"before": ["<leader>", "m", "e"], "commands": ["mark-and-recall.openMarks"]},
 {"before": ["<leader>", "m", "a"], "commands": ["mark-and-recall.prependMark"]},
 {"before": ["<leader>", "m", "A"], "commands": ["mark-and-recall.prependNamedMark"]},
 {"before": ["<leader>", "m", "d"], "commands": ["mark-and-recall.deleteMarkAtCursor"]},

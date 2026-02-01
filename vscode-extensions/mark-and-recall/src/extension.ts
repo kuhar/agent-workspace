@@ -299,7 +299,15 @@ async function openMarks(): Promise<void> {
 
     // Create the file if it doesn't exist
     if (!fs.existsSync(marksFilePath)) {
-        fs.writeFileSync(marksFilePath, '# Marks\n\n', 'utf-8');
+        const template = `# Mark and Recall File
+
+# Named marks (name: path:line)
+# mymark: src/utils.ts:42
+
+# Anonymous marks (path:line)
+# src/helpers.ts:18
+`;
+        fs.writeFileSync(marksFilePath, template, 'utf-8');
     }
 
     const document = await vscode.workspace.openTextDocument(uri);

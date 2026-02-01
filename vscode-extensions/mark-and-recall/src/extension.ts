@@ -423,6 +423,42 @@ async function recallByIndex(args: { index: number }): Promise<void> {
     await navigateToMark(marks[index]);
 }
 
+async function getSymbolAtPosition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+): Promise<string | undefined> {
+    try {
+        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider',
+            document.uri
+        );
+
+        if (!symbols || symbols.length === 0) {
+            return undefined;
+        }
+
+        // Find the innermost symbol containing the cursor position
+        function findSymbolAtPosition(
+            syms: vscode.DocumentSymbol[],
+            pos: vscode.Position
+        ): vscode.DocumentSymbol | undefined {
+            for (const sym of syms) {
+                if (sym.range.contains(pos)) {
+                    // Check children for a more specific match
+                    const childMatch = findSymbolAtPosition(sym.children, pos);
+                    return childMatch || sym;
+                }
+            }
+            return undefined;
+        }
+
+        const symbol = findSymbolAtPosition(symbols, position);
+        return symbol?.name;
+    } catch {
+        return undefined;
+    }
+}
+
 async function addMark(prepend: boolean, named: boolean): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -447,8 +483,12 @@ async function addMark(prepend: boolean, named: boolean): Promise<void> {
     let markEntry: string;
 
     if (named) {
-        // Suggest a name based on the filename
-        const suggestedName = path.basename(filePath, path.extname(filePath));
+        // Try to get symbol at cursor, fall back to filename
+        const symbolName = await getSymbolAtPosition(
+            editor.document,
+            editor.selection.active
+        );
+        const suggestedName = symbolName || path.basename(filePath, path.extname(filePath));
 
         const name = await vscode.window.showInputBox({
             prompt: 'Enter a name for this mark',

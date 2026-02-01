@@ -300,12 +300,16 @@ async function openMarks(): Promise<void> {
     // Create the file if it doesn't exist
     if (!fs.existsSync(marksFilePath)) {
         const template = `# Mark and Recall File
-
-# Named marks (name: path:line)
-# mymark: src/utils.ts:42
-
+#
+# Named marks (name: path:line) - user-specified
+# mymark: src/utils.ts:10
+#
+# Symbol marks (@symbol: path:line) - auto-detected from code
+# @parseConfig: src/utils.ts:42
+#
 # Anonymous marks (path:line)
 # src/helpers.ts:18
+
 `;
         fs.writeFileSync(marksFilePath, template, 'utf-8');
     }
@@ -486,6 +490,19 @@ async function addMark(prepend: boolean, named: boolean): Promise<void> {
     const workspaceRoot = path.dirname(marksFilePath);
     const filePath = editor.document.uri.fsPath;
     const line = editor.selection.active.line + 1; // Convert to 1-based
+
+    // Check for duplicate mark at same location
+    const existingMarks = getMarksQuiet();
+    const duplicate = existingMarks.find(
+        (m) => m.filePath === filePath && m.line === line
+    );
+    if (duplicate) {
+        const markName = duplicate.name || `${duplicate.filePath}:${duplicate.line}`;
+        vscode.window.showInformationMessage(
+            `Mark already exists at this location: ${markName}`
+        );
+        return;
+    }
 
     // Use relative path if within workspace, otherwise absolute
     const relativePath = path.relative(workspaceRoot, filePath);
@@ -837,6 +854,158 @@ async function gotoNextMark(): Promise<void> {
     await navigateToMark(targetMark);
 }
 
+async function updateSymbolMarksInFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+
+    const marksFilePath = getMarksFilePathQuiet();
+    if (!marksFilePath || !fs.existsSync(marksFilePath)) {
+        vscode.window.showWarningMessage('No marks.md file found');
+        return;
+    }
+
+    const currentFilePath = editor.document.uri.fsPath;
+    const marks = getMarksQuiet();
+
+    // Find symbol marks (starting with @) in current file
+    const symbolMarks = marks.filter(
+        (m) => m.filePath === currentFilePath && m.name && m.name.startsWith('@')
+    );
+
+    if (symbolMarks.length === 0) {
+        vscode.window.showInformationMessage('No symbol marks in current file');
+        return;
+    }
+
+    // Get all symbols in the document
+    let symbols: vscode.DocumentSymbol[] | undefined;
+    try {
+        symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider',
+            editor.document.uri
+        );
+    } catch {
+        vscode.window.showErrorMessage('Could not get symbols for this file');
+        return;
+    }
+
+    if (!symbols || symbols.length === 0) {
+        vscode.window.showWarningMessage('No symbols found in current file');
+        return;
+    }
+
+    // Flatten all symbols with their definition lines
+    interface FlatSymbol {
+        name: string;
+        line: number; // 1-based
+    }
+    const flatSymbols: FlatSymbol[] = [];
+
+    function collectSymbols(syms: vscode.DocumentSymbol[]): void {
+        for (const sym of syms) {
+            flatSymbols.push({
+                name: sym.name,
+                line: sym.selectionRange.start.line + 1, // Convert to 1-based
+            });
+            collectSymbols(sym.children);
+        }
+    }
+    collectSymbols(symbols);
+
+    // Track updates
+    const updates: Map<number, number> = new Map(); // markIndex -> newLine
+
+    for (const mark of symbolMarks) {
+        const symbolName = mark.name!.substring(1); // Remove @ prefix
+
+        // Find all symbols with matching name
+        const matchingSymbols = flatSymbols.filter((s) => s.name === symbolName);
+
+        if (matchingSymbols.length === 0) {
+            // Symbol not found - keep old line
+            continue;
+        }
+
+        // Pick the closest one to the mark's current line
+        let closest = matchingSymbols[0];
+        let closestDistance = Math.abs(closest.line - mark.line);
+
+        for (const sym of matchingSymbols) {
+            const distance = Math.abs(sym.line - mark.line);
+            if (distance < closestDistance) {
+                closest = sym;
+                closestDistance = distance;
+            }
+        }
+
+        if (closest.line !== mark.line) {
+            updates.set(mark.index, closest.line);
+        }
+    }
+
+    if (updates.size === 0) {
+        vscode.window.showInformationMessage('All symbol marks are up to date');
+        return;
+    }
+
+    // Read and update marks.md
+    let content: string;
+    try {
+        content = fs.readFileSync(marksFilePath, 'utf-8');
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to read marks.md: ${err}`);
+        return;
+    }
+
+    const lines = content.split('\n');
+    let markIndex = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+            continue;
+        }
+
+        // Check if this is a valid mark line
+        const lastColonIndex = trimmed.lastIndexOf(':');
+        if (lastColonIndex === -1) {
+            continue;
+        }
+
+        const lineStr = trimmed.substring(lastColonIndex + 1).trim();
+        const lineNum = parseInt(lineStr, 10);
+        if (isNaN(lineNum)) {
+            continue;
+        }
+
+        // Check if we need to update this mark
+        const newLine = updates.get(markIndex);
+        if (newLine !== undefined) {
+            const beforeLine = trimmed.substring(0, lastColonIndex);
+            lines[i] = `${beforeLine}:${newLine}`;
+        }
+        markIndex++;
+    }
+
+    const newContent = lines.join('\n');
+
+    try {
+        isUpdatingMarksFile = true;
+        fs.writeFileSync(marksFilePath, newContent, 'utf-8');
+        vscode.window.showInformationMessage(
+            `Updated ${updates.size} symbol mark(s)`
+        );
+        updateAllDecorations();
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to write marks.md: ${err}`);
+    } finally {
+        isUpdatingMarksFile = false;
+    }
+}
+
 function handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
     // Skip if we're currently updating marks.md ourselves
     if (isUpdatingMarksFile) {
@@ -1000,6 +1169,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile),
         vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark),
         vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark),
+        vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile),
         vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex)
     );
 

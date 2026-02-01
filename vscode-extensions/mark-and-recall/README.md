@@ -9,6 +9,7 @@ Fortunately, Recall works perfectly fine in VS Code, thanks to this extension. I
 - **Numbered marks (1-9)** with quick-access keybindings
 - **Visual indicators**: blue gutter icons and line highlighting
 - **Automatic line tracking**: marks update when you insert/delete lines
+- **Symbol marks**: auto-named from function/class definitions with `@` prefix
 - **Anonymous and named marks**: name is optional
 
 ## marks.md Format
@@ -16,15 +17,19 @@ Fortunately, Recall works perfectly fine in VS Code, thanks to this extension. I
 Create a `marks.md` file in your workspace root:
 
 ```md
-# Named marks (name: path:line)
+# Named marks (name: path:line) - user-specified
 tester: agents/llvm-tester.md:11
 config: /home/user/project/config.json:5
 
+# Symbol marks (@symbol: path:line) - auto-detected from code
+@parseConfig: src/utils.ts:42
+@UserController: src/api/users.ts:15
+
 # Anonymous marks (path:line)
-src/utils.ts:42
-lib/helpers.ts:18
+src/helpers.ts:18
 ```
 
+- `@` prefix indicates auto-detected symbol names (can be updated with `updateSymbolMarks`)
 - Paths can be relative (to workspace root) or absolute
 - Line numbers are 1-based
 - Lines starting with `#` are comments
@@ -36,14 +41,15 @@ lib/helpers.ts:18
 | `recall` | Show picker to jump to any mark |
 | `recallByIndex` | Jump to mark by index (use with args) |
 | `openMarks` | Open marks.md for editing |
-| `prependMark` | Add anonymous mark at cursor (top of list) |
-| `prependNamedMark` | Add named mark at cursor (top of list) |
-| `appendMark` | Add anonymous mark at cursor (bottom of list) |
-| `appendNamedMark` | Add named mark at cursor (bottom of list) |
+| `prependMark` | Add mark at cursor (top of list, auto-names with @symbol if on definition) |
+| `prependNamedMark` | Add named mark at cursor with prompt (top of list) |
+| `appendMark` | Add mark at cursor (bottom of list, auto-names with @symbol if on definition) |
+| `appendNamedMark` | Add named mark at cursor with prompt (bottom of list) |
 | `deleteMarkAtCursor` | Delete mark at current line |
 | `deleteAllMarksInFile` | Delete all marks in current file |
 | `gotoPreviousMark` | Jump to previous mark in file (wraps) |
 | `gotoNextMark` | Jump to next mark in file (wraps) |
+| `updateSymbolMarks` | Update @symbol mark line numbers in current file |
 
 ## Vim Keybindings
 
@@ -58,6 +64,7 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 {"before": ["<leader>", "m", "D"], "commands": ["mark-and-recall.deleteAllMarksInFile"]},
 {"before": ["<leader>", "m", "g"], "commands": ["mark-and-recall.gotoPreviousMark"]},
 {"before": ["<leader>", "m", "G"], "commands": ["mark-and-recall.gotoNextMark"]},
+{"before": ["<leader>", "m", "u"], "commands": ["mark-and-recall.updateSymbolMarks"]},
 {"before": ["<leader>", "m", "1"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 0}}]},
 {"before": ["<leader>", "m", "2"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 1}}]},
 {"before": ["<leader>", "m", "3"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 2}}]},

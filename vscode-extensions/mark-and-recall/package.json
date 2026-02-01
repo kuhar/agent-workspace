@@ -57,6 +57,10 @@
         "title": "Mark and Recall: Go to Next Mark in File"
       },
       {
+        "command": "mark-and-recall.updateSymbolMarks",
+        "title": "Mark and Recall: Update Symbol Marks in File"
+      },
+      {
         "command": "mark-and-recall.recallByIndex",
         "title": "Mark and Recall: Go to Mark by Index"
       }

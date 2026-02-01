@@ -4,6 +4,13 @@
 
 Fortunately, Recall works perfectly fine in VS Code, thanks to this extension. Inspired by the Mark and Recall spells from Morrowind, it lets you define marks in a `marks.md` file and teleport to them instantly.
 
+Unlike native vim marks which are ephemeral and stored in binary format, these marks are:
+
+- **Persistent**: Saved in a plain text `marks.md` file that survives editor restarts
+- **Human-readable**: Easy to view, edit, and share with your team
+- **Maintainable**: Symbol marks (`@function`) can be updated via LSP when code shifts (e.g., after pulling from upstream)
+- **LLM-friendly**: Feed `marks.md` to an AI to point it to key locations in your codebase, or have the LLM explore your code and generate marks for important entry points, APIs, or architectural boundaries
+
 ## Features
 
 - **Numbered marks (1-9)** with quick-access keybindings

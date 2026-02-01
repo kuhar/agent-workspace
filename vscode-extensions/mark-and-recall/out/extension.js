@@ -377,18 +377,22 @@ async function getSymbolAtPosition(document, position) {
         if (!symbols || symbols.length === 0) {
             return undefined;
         }
-        // Find the innermost symbol containing the cursor position
-        function findSymbolAtPosition(syms, pos) {
+        // Find symbol whose definition line matches the cursor line
+        function findSymbolOnDefinitionLine(syms, line) {
             for (const sym of syms) {
-                if (sym.range.contains(pos)) {
-                    // Check children for a more specific match
-                    const childMatch = findSymbolAtPosition(sym.children, pos);
-                    return childMatch || sym;
+                // Check if cursor is on the symbol's definition line
+                if (sym.selectionRange.start.line === line) {
+                    return sym;
+                }
+                // Check children recursively
+                const childMatch = findSymbolOnDefinitionLine(sym.children, line);
+                if (childMatch) {
+                    return childMatch;
                 }
             }
             return undefined;
         }
-        const symbol = findSymbolAtPosition(symbols, position);
+        const symbol = findSymbolOnDefinitionLine(symbols, position.line);
         return symbol?.name;
     }
     catch {
@@ -416,7 +420,10 @@ async function addMark(prepend, named) {
     if (named) {
         // Try to get symbol at cursor, fall back to filename
         const symbolName = await getSymbolAtPosition(editor.document, editor.selection.active);
-        const suggestedName = symbolName || path.basename(filePath, path.extname(filePath));
+        // Prefix symbol names with @ to distinguish from user-specified names
+        const suggestedName = symbolName
+            ? `@${symbolName}`
+            : path.basename(filePath, path.extname(filePath));
         const name = await vscode.window.showInputBox({
             prompt: 'Enter a name for this mark',
             value: suggestedName,
@@ -436,8 +443,15 @@ async function addMark(prepend, named) {
         markEntry = `${name}: ${displayPath}:${line}\n`;
     }
     else {
-        // Anonymous mark - just path:line
-        markEntry = `${displayPath}:${line}\n`;
+        // Auto-named if symbol available, otherwise anonymous
+        const symbolName = await getSymbolAtPosition(editor.document, editor.selection.active);
+        if (symbolName) {
+            // Prefix with @ to indicate it's a symbol name
+            markEntry = `@${symbolName}: ${displayPath}:${line}\n`;
+        }
+        else {
+            markEntry = `${displayPath}:${line}\n`;
+        }
     }
     // Read existing content or create new file
     let content = '';

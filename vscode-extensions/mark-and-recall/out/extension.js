@@ -53,6 +53,8 @@ let isUpdatingMarksFile = false;
 // Pending mark updates - tracks modified line numbers before writing to file
 // Map from mark index to new line number
 let pendingMarkUpdates;
+// Last navigated mark index - used for global next/previous navigation
+let lastNavigatedMarkIndex;
 function createNumberSvg(num) {
     // Create a smaller SVG with a blue circle and white number
     const svg = `<svg width="12" height="12" xmlns="http://www.w3.org/2000/svg">
@@ -211,10 +213,25 @@ function setupFileWatcher(context) {
 function parseMarksFile(content, workspaceRoot) {
     const marks = [];
     const lines = content.split('\n');
+    let inHtmlComment = false;
     for (const line of lines) {
         const trimmed = line.trim();
+        // Handle HTML-style markdown comments (<!-- ... -->)
+        if (inHtmlComment) {
+            if (trimmed.includes('-->')) {
+                inHtmlComment = false;
+            }
+            continue;
+        }
+        if (trimmed.startsWith('<!--')) {
+            // Check if comment closes on same line
+            if (!trimmed.includes('-->')) {
+                inHtmlComment = true;
+            }
+            continue;
+        }
         if (!trimmed || trimmed.startsWith('#')) {
-            // Skip empty lines and comments
+            // Skip empty lines and # comments
             continue;
         }
         // Try to parse as named mark first: name: <path>:<line>
@@ -352,6 +369,7 @@ async function recall() {
     if (!selected) {
         return;
     }
+    lastNavigatedMarkIndex = selected.markIndex;
     await navigateToMark(marks[selected.markIndex]);
 }
 async function navigateToMark(mark) {
@@ -398,6 +416,7 @@ async function recallByIndex(args) {
         vscode.window.showWarningMessage(`Mark index ${index + 1} out of range (have ${marks.length} marks)`);
         return;
     }
+    lastNavigatedMarkIndex = index;
     await navigateToMark(marks[index]);
 }
 async function getSymbolAtPosition(document, position) {
@@ -743,6 +762,68 @@ async function gotoNextMark() {
         targetMark = fileMarks[0];
     }
     await navigateToMark(targetMark);
+}
+function getCurrentMarkIndex(marks) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        return undefined;
+    }
+    const currentFilePath = editor.document.uri.fsPath;
+    const currentLine = editor.selection.active.line + 1; // Convert to 1-based
+    // First, check if cursor is exactly on a mark
+    const currentMark = marks.find((m) => m.filePath === currentFilePath && m.line === currentLine);
+    if (currentMark) {
+        // Update the remembered mark when cursor is on a mark
+        lastNavigatedMarkIndex = currentMark.index;
+        return currentMark.index;
+    }
+    // Fall back to the last navigated mark if it's still valid
+    if (lastNavigatedMarkIndex !== undefined && lastNavigatedMarkIndex < marks.length) {
+        return lastNavigatedMarkIndex;
+    }
+    return undefined;
+}
+async function gotoNextMarkGlobal() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+    const marks = getMarksQuiet();
+    if (marks.length === 0) {
+        vscode.window.showInformationMessage('No marks defined');
+        return;
+    }
+    const currentIndex = getCurrentMarkIndex(marks);
+    if (currentIndex === undefined) {
+        vscode.window.showInformationMessage('Cursor is not at a mark');
+        return;
+    }
+    // Go to the next mark (by index), wrapping to start if at the end
+    const nextIndex = (currentIndex + 1) % marks.length;
+    lastNavigatedMarkIndex = nextIndex;
+    await navigateToMark(marks[nextIndex]);
+}
+async function gotoPreviousMarkGlobal() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage('No active editor');
+        return;
+    }
+    const marks = getMarksQuiet();
+    if (marks.length === 0) {
+        vscode.window.showInformationMessage('No marks defined');
+        return;
+    }
+    const currentIndex = getCurrentMarkIndex(marks);
+    if (currentIndex === undefined) {
+        vscode.window.showInformationMessage('Cursor is not at a mark');
+        return;
+    }
+    // Go to the previous mark (by index), wrapping to end if at the start
+    const prevIndex = (currentIndex - 1 + marks.length) % marks.length;
+    lastNavigatedMarkIndex = prevIndex;
+    await navigateToMark(marks[prevIndex]);
 }
 async function updateSymbolMarksInFile() {
     const editor = vscode.window.activeTextEditor;
@@ -1119,7 +1200,7 @@ function activate(context) {
     // Initialize decorations
     initializeDecorations();
     // Register commands
-    context.subscriptions.push(vscode.commands.registerCommand('mark-and-recall.recall', recall), vscode.commands.registerCommand('mark-and-recall.openMarks', openMarks), vscode.commands.registerCommand('mark-and-recall.prependMark', prependMark), vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark), vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark), vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark), vscode.commands.registerCommand('mark-and-recall.deleteMarkAtCursor', deleteMarkAtCursor), vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark), vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile), vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex), vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile));
+    context.subscriptions.push(vscode.commands.registerCommand('mark-and-recall.recall', recall), vscode.commands.registerCommand('mark-and-recall.openMarks', openMarks), vscode.commands.registerCommand('mark-and-recall.prependMark', prependMark), vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark), vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark), vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark), vscode.commands.registerCommand('mark-and-recall.deleteMarkAtCursor', deleteMarkAtCursor), vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMarkGlobal', gotoNextMarkGlobal), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMarkGlobal', gotoPreviousMarkGlobal), vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile), vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex), vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile));
     // Set up file watcher for marks file
     setupFileWatcher(context);
     // Handle configuration changes

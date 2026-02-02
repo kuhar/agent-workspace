@@ -40,6 +40,7 @@ src/helpers.ts:18
 - Paths can be relative (to workspace root) or absolute
 - Line numbers are 1-based
 - Lines starting with `#` are comments
+- HTML-style comments (`<!-- ... -->`) are also supported, including multi-line
 
 ## Commands
 
@@ -56,6 +57,8 @@ src/helpers.ts:18
 | `deleteAllMarksInFile` | Delete all marks in current file |
 | `gotoPreviousMark` | Jump to previous mark in file (wraps) |
 | `gotoNextMark` | Jump to next mark in file (wraps) |
+| `gotoPreviousMarkGlobal` | Jump to previous mark globally by index (requires being at a mark or having navigated to one) |
+| `gotoNextMarkGlobal` | Jump to next mark globally by index (requires being at a mark or having navigated to one) |
 | `updateSymbolMarks` | Update @symbol mark line numbers in current file |
 | `selectMarksFile` | Pick a different marks file (browse, enter path, or select from existing) |
 
@@ -78,6 +81,8 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 {"before": ["<leader>", "m", "D"], "commands": ["mark-and-recall.deleteAllMarksInFile"]},
 {"before": ["<leader>", "m", "g"], "commands": ["mark-and-recall.gotoPreviousMark"]},
 {"before": ["<leader>", "m", "G"], "commands": ["mark-and-recall.gotoNextMark"]},
+{"before": ["<leader>", "m", "m"], "commands": ["mark-and-recall.gotoNextMarkGlobal"]},
+{"before": ["<leader>", "m", "M"], "commands": ["mark-and-recall.gotoPreviousMarkGlobal"]},
 {"before": ["<leader>", "m", "u"], "commands": ["mark-and-recall.updateSymbolMarks"]},
 {"before": ["<leader>", "m", "o"], "commands": ["mark-and-recall.selectMarksFile"]},
 {"before": ["<leader>", "m", "1"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 0}}]},

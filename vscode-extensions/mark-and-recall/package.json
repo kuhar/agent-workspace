@@ -63,8 +63,22 @@
       {
         "command": "mark-and-recall.recallByIndex",
         "title": "Mark and Recall: Go to Mark by Index"
+      },
+      {
+        "command": "mark-and-recall.selectMarksFile",
+        "title": "Mark and Recall: Select Marks File"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Mark and Recall",
+      "properties": {
+        "markAndRecall.marksFilePath": {
+          "type": "string",
+          "default": "marks.md",
+          "description": "Path to the marks file. Can be a filename, relative path (e.g., '.vscode/marks.md'), or absolute path."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

@@ -57,6 +57,13 @@ src/helpers.ts:18
 | `gotoPreviousMark` | Jump to previous mark in file (wraps) |
 | `gotoNextMark` | Jump to next mark in file (wraps) |
 | `updateSymbolMarks` | Update @symbol mark line numbers in current file |
+| `selectMarksFile` | Pick a different marks file (browse, enter path, or select from existing) |
+
+## Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `markAndRecall.marksFilePath` | `marks.md` | Path to the marks file. Can be a filename, relative path (e.g., `.vscode/marks.md`), or absolute path. |
 
 ## Vim Keybindings
 
@@ -72,6 +79,7 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 {"before": ["<leader>", "m", "g"], "commands": ["mark-and-recall.gotoPreviousMark"]},
 {"before": ["<leader>", "m", "G"], "commands": ["mark-and-recall.gotoNextMark"]},
 {"before": ["<leader>", "m", "u"], "commands": ["mark-and-recall.updateSymbolMarks"]},
+{"before": ["<leader>", "m", "o"], "commands": ["mark-and-recall.selectMarksFile"]},
 {"before": ["<leader>", "m", "1"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 0}}]},
 {"before": ["<leader>", "m", "2"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 1}}]},
 {"before": ["<leader>", "m", "3"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 2}}]},

@@ -113,6 +113,11 @@ function getMarksQuiet(): MarkWithIndex[] {
     return marks.map((mark, index) => ({ ...mark, index }));
 }
 
+function getConfiguredMarksFileName(): string {
+    const config = vscode.workspace.getConfiguration('markAndRecall');
+    return config.get<string>('marksFilePath', 'marks.md');
+}
+
 function getMarksFilePathQuiet(): string | undefined {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -120,7 +125,12 @@ function getMarksFilePathQuiet(): string | undefined {
     }
 
     const workspaceRoot = workspaceFolders[0].uri.fsPath;
-    return path.join(workspaceRoot, 'marks.md');
+    const configuredPath = getConfiguredMarksFileName();
+
+    if (path.isAbsolute(configuredPath)) {
+        return configuredPath;
+    }
+    return path.join(workspaceRoot, configuredPath);
 }
 
 function updateDecorationsForEditor(editor: vscode.TextEditor): void {
@@ -181,18 +191,37 @@ function updateAllDecorations(): void {
 }
 
 function setupFileWatcher(context: vscode.ExtensionContext): void {
+    // Dispose existing watcher if any
+    if (marksFileWatcher) {
+        marksFileWatcher.dispose();
+        marksFileWatcher = undefined;
+    }
+
     const marksFilePath = getMarksFilePathQuiet();
     if (!marksFilePath) {
         return;
     }
 
-    // Watch for changes to marks.md
-    marksFileWatcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(
-            vscode.workspace.workspaceFolders![0],
-            'marks.md'
-        )
-    );
+    const configuredPath = getConfiguredMarksFileName();
+
+    // Watch for changes to the configured marks file
+    if (path.isAbsolute(configuredPath)) {
+        // For absolute paths, watch the specific file
+        marksFileWatcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(
+                vscode.Uri.file(path.dirname(configuredPath)),
+                path.basename(configuredPath)
+            )
+        );
+    } else {
+        // For relative paths, watch relative to workspace
+        marksFileWatcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(
+                vscode.workspace.workspaceFolders![0],
+                configuredPath
+            )
+        );
+    }
 
     marksFileWatcher.onDidChange(() => updateAllDecorations());
     marksFileWatcher.onDidCreate(() => updateAllDecorations());
@@ -286,7 +315,12 @@ function getMarksFilePath(): string | undefined {
     }
 
     const workspaceRoot = workspaceFolders[0].uri.fsPath;
-    return path.join(workspaceRoot, 'marks.md');
+    const configuredPath = getConfiguredMarksFileName();
+
+    if (path.isAbsolute(configuredPath)) {
+        return configuredPath;
+    }
+    return path.join(workspaceRoot, configuredPath);
 }
 
 async function openMarks(): Promise<void> {
@@ -1006,6 +1040,146 @@ async function updateSymbolMarksInFile(): Promise<void> {
     }
 }
 
+async function selectMarksFile(): Promise<void> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showErrorMessage('No workspace folder open');
+        return;
+    }
+
+    const workspaceRoot = workspaceFolders[0].uri.fsPath;
+    const currentPath = getConfiguredMarksFileName();
+
+    interface MarksFileOption extends vscode.QuickPickItem {
+        action: 'browse' | 'enter' | 'reset' | 'select';
+        filePath?: string;
+    }
+
+    const options: MarksFileOption[] = [
+        {
+            label: '$(folder-opened) Browse for file...',
+            description: 'Select an existing file or create a new one',
+            action: 'browse',
+        },
+        {
+            label: '$(edit) Enter path manually...',
+            description: 'Type a relative or absolute path',
+            action: 'enter',
+        },
+        {
+            label: '$(discard) Reset to default',
+            description: 'Use marks.md in workspace root',
+            action: 'reset',
+        },
+    ];
+
+    // Add separator and current file info
+    options.push({
+        label: '',
+        kind: vscode.QuickPickItemKind.Separator,
+        action: 'select',
+    });
+
+    options.push({
+        label: `$(file) Current: ${currentPath}`,
+        description: path.isAbsolute(currentPath)
+            ? currentPath
+            : path.join(workspaceRoot, currentPath),
+        action: 'select',
+        filePath: currentPath,
+    });
+
+    // Find existing .md files that could be marks files
+    try {
+        const mdFiles = await vscode.workspace.findFiles('**/*.md', '**/node_modules/**', 20);
+        const existingFiles = mdFiles
+            .map((uri) => {
+                const relativePath = path.relative(workspaceRoot, uri.fsPath);
+                return {
+                    label: `$(file) ${relativePath}`,
+                    description: uri.fsPath,
+                    action: 'select' as const,
+                    filePath: relativePath,
+                };
+            })
+            .filter((item) => item.filePath !== currentPath)
+            .sort((a, b) => a.filePath!.localeCompare(b.filePath!));
+
+        if (existingFiles.length > 0) {
+            options.push({
+                label: 'Existing markdown files',
+                kind: vscode.QuickPickItemKind.Separator,
+                action: 'select',
+            });
+            options.push(...existingFiles);
+        }
+    } catch {
+        // Ignore errors finding files
+    }
+
+    const selected = await vscode.window.showQuickPick(options, {
+        placeHolder: 'Select marks file location',
+        matchOnDescription: true,
+    });
+
+    if (!selected) {
+        return;
+    }
+
+    let newPath: string | undefined;
+
+    switch (selected.action) {
+        case 'browse': {
+            const result = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(path.join(workspaceRoot, 'marks.md')),
+                filters: {
+                    'Markdown files': ['md'],
+                    'All files': ['*'],
+                },
+                title: 'Select Marks File',
+            });
+            if (result) {
+                // Use relative path if within workspace
+                const relativePath = path.relative(workspaceRoot, result.fsPath);
+                newPath = relativePath.startsWith('..')
+                    ? result.fsPath
+                    : relativePath;
+            }
+            break;
+        }
+        case 'enter': {
+            const input = await vscode.window.showInputBox({
+                prompt: 'Enter path to marks file (relative to workspace or absolute)',
+                value: currentPath,
+                validateInput: (value) => {
+                    if (!value.trim()) {
+                        return 'Path cannot be empty';
+                    }
+                    return null;
+                },
+            });
+            if (input) {
+                newPath = input.trim();
+            }
+            break;
+        }
+        case 'reset':
+            newPath = 'marks.md';
+            break;
+        case 'select':
+            if (selected.filePath && selected.filePath !== currentPath) {
+                newPath = selected.filePath;
+            }
+            break;
+    }
+
+    if (newPath !== undefined) {
+        const config = vscode.workspace.getConfiguration('markAndRecall');
+        await config.update('marksFilePath', newPath, vscode.ConfigurationTarget.Workspace);
+        vscode.window.showInformationMessage(`Marks file set to: ${newPath}`);
+    }
+}
+
 function handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
     // Skip if we're currently updating marks.md ourselves
     if (isUpdatingMarksFile) {
@@ -1170,11 +1344,24 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark),
         vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark),
         vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile),
-        vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex)
+        vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex),
+        vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile)
     );
 
-    // Set up file watcher for marks.md
+    // Set up file watcher for marks file
     setupFileWatcher(context);
+
+    // Handle configuration changes
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('markAndRecall.marksFilePath')) {
+                // Recreate file watcher for new path
+                setupFileWatcher(context);
+                // Update decorations with new marks file
+                updateAllDecorations();
+            }
+        })
+    );
 
     // Update decorations when active editor changes
     context.subscriptions.push(

@@ -794,11 +794,8 @@ async function gotoNextMarkGlobal() {
         vscode.window.showInformationMessage('No marks defined');
         return;
     }
-    const currentIndex = getCurrentMarkIndex(marks);
-    if (currentIndex === undefined) {
-        vscode.window.showInformationMessage('Cursor is not at a mark');
-        return;
-    }
+    // Fall back to mark 0 if no current index (no history or cursor not on mark)
+    const currentIndex = getCurrentMarkIndex(marks) ?? -1;
     // Go to the next mark (by index), wrapping to start if at the end
     const nextIndex = (currentIndex + 1) % marks.length;
     lastNavigatedMarkIndex = nextIndex;
@@ -815,11 +812,8 @@ async function gotoPreviousMarkGlobal() {
         vscode.window.showInformationMessage('No marks defined');
         return;
     }
-    const currentIndex = getCurrentMarkIndex(marks);
-    if (currentIndex === undefined) {
-        vscode.window.showInformationMessage('Cursor is not at a mark');
-        return;
-    }
+    // Fall back to mark 0 if no current index (no history or cursor not on mark)
+    const currentIndex = getCurrentMarkIndex(marks) ?? 0;
     // Go to the previous mark (by index), wrapping to end if at the start
     const prevIndex = (currentIndex - 1 + marks.length) % marks.length;
     lastNavigatedMarkIndex = prevIndex;

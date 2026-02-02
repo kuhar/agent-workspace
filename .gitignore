@@ -1,3 +1,4 @@
 .vscode/*
+.cursor/*
 !.vscode/launch.json
 marks.md

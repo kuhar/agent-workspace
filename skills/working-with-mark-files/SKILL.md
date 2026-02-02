@@ -19,6 +19,7 @@ src/config.ts:1                 # Anonymous mark
 - Line numbers are 1-based
 - Paths are relative to workspace root (or absolute)
 - `@` prefix indicates a symbol name (function, class, method, variable)
+- Mark names should be unique (duplicates work but are discouraged)
 
 ## Workflow A: Reading Marks for Exploration
 

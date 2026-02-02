@@ -51,6 +51,6 @@ Prioritize locations that help someone understand or modify the codebase:
 ## Output
 
 After exploration:
-1. Create or update marks.md with discovered locations
+1. Create or update marks.md with discovered locations (prefer unique mark names)
 2. Summarize what you found (architecture overview, key patterns)
 3. Highlight any areas that need attention or are particularly complex

@@ -11,6 +11,12 @@ Unlike native vim marks which are ephemeral and stored in binary format, these m
 - **Maintainable**: Symbol marks (`@function`) can be updated via LSP when code shifts (e.g., after pulling from upstream)
 - **LLM-friendly**: Feed `marks.md` to an AI to point it to key locations in your codebase, or have the LLM explore your code and generate marks for important entry points, APIs, or architectural boundaries
 
+## Screenshots
+
+![Example 1 - Gutter icons and line highlighting](https://raw.githubusercontent.com/kuhar/agent-workspace/main/vscode-extensions/mark-and-recall/assets/example_1.png)
+
+![Example 2 - Quick pick navigation](https://raw.githubusercontent.com/kuhar/agent-workspace/main/vscode-extensions/mark-and-recall/assets/example_2.png)
+
 ## Features
 
 - **Numbered marks (1-9)** with quick-access keybindings

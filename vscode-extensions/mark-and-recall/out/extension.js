@@ -38,6 +38,7 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const parser_1 = require("./parser");
 // Decoration types for marks 1-9
 const markDecorationTypes = [];
 // Decoration type for marks 10+ (star)
@@ -119,7 +120,7 @@ function getMarksQuiet() {
     catch {
         return [];
     }
-    const marks = parseMarksFile(content, workspaceRoot);
+    const marks = (0, parser_1.parseMarksFile)(content, workspaceRoot);
     return marks.map((mark, index) => ({ ...mark, index }));
 }
 function getConfiguredMarksFileName() {
@@ -210,87 +211,6 @@ function setupFileWatcher(context) {
     marksFileWatcher.onDidDelete(() => updateAllDecorations());
     context.subscriptions.push(marksFileWatcher);
 }
-function parseMarksFile(content, workspaceRoot) {
-    const marks = [];
-    const lines = content.split('\n');
-    let inHtmlComment = false;
-    for (const line of lines) {
-        const trimmed = line.trim();
-        // Handle HTML-style markdown comments (<!-- ... -->)
-        if (inHtmlComment) {
-            if (trimmed.includes('-->')) {
-                inHtmlComment = false;
-            }
-            continue;
-        }
-        if (trimmed.startsWith('<!--')) {
-            // Check if comment closes on same line
-            if (!trimmed.includes('-->')) {
-                inHtmlComment = true;
-            }
-            continue;
-        }
-        if (!trimmed || trimmed.startsWith('#')) {
-            // Skip empty lines and # comments
-            continue;
-        }
-        // Try to parse as named mark first: name: <path>:<line>
-        // Then try anonymous mark: <path>:<line>
-        // Find the last colon (before the line number)
-        const lastColonIndex = trimmed.lastIndexOf(':');
-        if (lastColonIndex === -1) {
-            continue;
-        }
-        const lineStr = trimmed.substring(lastColonIndex + 1).trim();
-        const lineNum = parseInt(lineStr, 10);
-        if (isNaN(lineNum)) {
-            continue;
-        }
-        const beforeLineNum = trimmed.substring(0, lastColonIndex).trim();
-        // Now check if there's a name: prefix
-        // A named mark has format "name: path" before the line number
-        // We need to find the first colon that separates name from path
-        const firstColonIndex = beforeLineNum.indexOf(':');
-        let name;
-        let filePath;
-        if (firstColonIndex !== -1) {
-            // Could be named or could just be an absolute path like /home/user/file
-            // Check if what's before the first colon looks like a path component
-            const potentialName = beforeLineNum.substring(0, firstColonIndex).trim();
-            const potentialPath = beforeLineNum.substring(firstColonIndex + 1).trim();
-            // If potentialPath starts with / or looks like a relative path, it's named
-            // If potentialName contains / or \, it's probably part of a path (Windows drive letter case)
-            if (potentialName.length > 0 &&
-                !potentialName.includes('/') &&
-                !potentialName.includes('\\') &&
-                potentialPath.length > 0) {
-                // This is a named mark
-                name = potentialName;
-                filePath = potentialPath;
-            }
-            else {
-                // This is an anonymous mark with the full path
-                name = undefined;
-                filePath = beforeLineNum;
-            }
-        }
-        else {
-            // No colon in the path part - anonymous relative path
-            name = undefined;
-            filePath = beforeLineNum;
-        }
-        // Resolve relative paths against workspace root
-        const resolvedPath = path.isAbsolute(filePath)
-            ? filePath
-            : path.join(workspaceRoot, filePath);
-        marks.push({
-            name,
-            filePath: resolvedPath,
-            line: lineNum,
-        });
-    }
-    return marks;
-}
 function getMarksFilePath() {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -347,7 +267,7 @@ async function recall() {
         vscode.window.showErrorMessage(`Failed to read marks.md: ${err}`);
         return;
     }
-    const marks = parseMarksFile(content, workspaceRoot);
+    const marks = (0, parser_1.parseMarksFile)(content, workspaceRoot);
     if (marks.length === 0) {
         vscode.window.showInformationMessage('No marks found in marks.md');
         return;
@@ -404,7 +324,7 @@ function getMarks() {
         vscode.window.showErrorMessage(`Failed to read marks.md: ${err}`);
         return undefined;
     }
-    return parseMarksFile(content, workspaceRoot);
+    return (0, parser_1.parseMarksFile)(content, workspaceRoot);
 }
 async function recallByIndex(args) {
     const marks = getMarks();
@@ -487,8 +407,8 @@ async function addMark(prepend, named) {
                 if (!value.trim()) {
                     return 'Name cannot be empty';
                 }
-                if (value.includes(':')) {
-                    return 'Name cannot contain colons';
+                if (value.includes(': ')) {
+                    return 'Name cannot contain ": " (colon-space)';
                 }
                 return null;
             },
@@ -1152,11 +1072,12 @@ function updateMarksFileWithNewLines(marksFilePath) {
             continue;
         }
         // Parse this line to see if it's a valid mark
-        const colonIndex = trimmed.indexOf(':');
-        if (colonIndex === -1) {
+        // Use ": " (colon-space) to support C++ namespaces like mlir::foo in names
+        const colonSpaceIndex = trimmed.indexOf(': ');
+        if (colonSpaceIndex === -1) {
             continue;
         }
-        const rest = trimmed.substring(colonIndex + 1).trim();
+        const rest = trimmed.substring(colonSpaceIndex + 2).trim();
         const lastColonIndex = rest.lastIndexOf(':');
         if (lastColonIndex === -1) {
             continue;
@@ -1169,7 +1090,7 @@ function updateMarksFileWithNewLines(marksFilePath) {
         // This is a valid mark - check if we need to update it
         const newLine = pendingMarkUpdates.get(markIndex);
         if (newLine !== undefined && newLine !== lineNum) {
-            const name = trimmed.substring(0, colonIndex).trim();
+            const name = trimmed.substring(0, colonSpaceIndex).trim();
             const filePath = rest.substring(0, lastColonIndex).trim();
             // Reconstruct the line with the new line number
             lines[i] = `${name}: ${filePath}:${newLine}`;

@@ -2,7 +2,9 @@
 .vscode-test/**
 src/**
 .gitignore
-*.map
+**/*.map
 **/*.ts
+**/*.test.*
 tsconfig.json
+vitest.config.ts
 node_modules/**

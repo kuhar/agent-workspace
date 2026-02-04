@@ -1,2 +1,4 @@
 node_modules/
 *.vsix
+out/*.test.js
+out/*.test.js.map

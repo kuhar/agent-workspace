@@ -28,6 +28,13 @@ npm run compile
 npm run watch  # for development
 ```
 
+## Testing
+
+```bash
+npm test          # run tests once
+npm run test:watch  # run tests in watch mode
+```
+
 ## Publishing
 
 ```bash

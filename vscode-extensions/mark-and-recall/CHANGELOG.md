@@ -4,7 +4,10 @@ All notable changes to the "Mark and Recall" extension will be documented in thi
 
 ## [0.0.3] - 2026-02-04
 
-- Added screenshots to the README
+### Added
+- Screenshots to the README
+- Unit tests for marks file parsing
+- `npm test` command for running tests
 
 ## [0.0.2] - 2026-02-04
 

@@ -2,7 +2,7 @@
   "name": "mark-and-recall",
   "displayName": "Mark and Recall",
   "description": "LLM-friendly bookmarks in plain text. Navigate to marks, or feed marks.md to AI agents to point them to key code locations.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "kuhar",
   "license": "Apache-2.0",
   "repository": {

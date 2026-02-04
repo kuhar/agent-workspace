@@ -81,8 +81,10 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 ```json
 {"before": ["<leader>", "m", "r"], "commands": ["mark-and-recall.recall"]},
 {"before": ["<leader>", "m", "e"], "commands": ["mark-and-recall.openMarks"]},
-{"before": ["<leader>", "m", "a"], "commands": ["mark-and-recall.prependMark"]},
-{"before": ["<leader>", "m", "A"], "commands": ["mark-and-recall.prependNamedMark"]},
+{"before": ["<leader>", "m", "a"], "commands": ["mark-and-recall.appendMark"]},
+{"before": ["<leader>", "m", "A"], "commands": ["mark-and-recall.appendNamedMark"]},
+{"before": ["<leader>", "m", "p"], "commands": ["mark-and-recall.prependMark"]},
+{"before": ["<leader>", "m", "P"], "commands": ["mark-and-recall.prependNamedMark"]},
 {"before": ["<leader>", "m", "d"], "commands": ["mark-and-recall.deleteMarkAtCursor"]},
 {"before": ["<leader>", "m", "D"], "commands": ["mark-and-recall.deleteAllMarksInFile"]},
 {"before": ["<leader>", "m", "g"], "commands": ["mark-and-recall.gotoPreviousMark"]},

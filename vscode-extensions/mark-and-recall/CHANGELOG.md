@@ -2,6 +2,12 @@
 
 All notable changes to the "Mark and Recall" extension will be documented in this file.
 
+## [0.0.4] - 2026-02-04
+
+### Fixed
+- Fixed suggested vim keybindings: `<leader>ma`/`A` now correctly map to append
+- Added `<leader>mp`/`P` bindings for prepend operations
+
 ## [0.0.3] - 2026-02-04
 
 ### Added

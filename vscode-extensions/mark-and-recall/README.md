@@ -82,7 +82,7 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 {"before": ["<leader>", "m", "g"], "commands": ["mark-and-recall.gotoPreviousMark"]},
 {"before": ["<leader>", "m", "G"], "commands": ["mark-and-recall.gotoNextMark"]},
 {"before": ["<leader>", "m", "m"], "commands": ["mark-and-recall.gotoNextMarkGlobal"]},
-{"before": ["<leader>", "m", "M"], "commands": ["mark-and-recall.gotoPreviousMarkGlobal"]},
+{"before": ["<leader>", "m", "n"], "commands": ["mark-and-recall.gotoPreviousMarkGlobal"]},
 {"before": ["<leader>", "m", "u"], "commands": ["mark-and-recall.updateSymbolMarks"]},
 {"before": ["<leader>", "m", "o"], "commands": ["mark-and-recall.selectMarksFile"]},
 {"before": ["<leader>", "m", "1"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 0}}]},
@@ -94,33 +94,5 @@ Add to `vim.normalModeKeyBindingsNonRecursive` in settings.json:
 {"before": ["<leader>", "m", "7"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 6}}]},
 {"before": ["<leader>", "m", "8"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 7}}]},
 {"before": ["<leader>", "m", "9"], "commands": [{"command": "mark-and-recall.recallByIndex", "args": {"index": 8}}]}
-```
-
-## Installing
-
-Clone the repo and symlink to your extensions directory:
-
-```bash
-# For VS Code (local)
-ln -s /path/to/mark-and-recall ~/.vscode/extensions/mark-and-recall
-
-# For Cursor (local)
-ln -s /path/to/mark-and-recall ~/.cursor/extensions/mark-and-recall
-
-# For VS Code (remote/SSH)
-ln -s /path/to/mark-and-recall ~/.vscode-server/extensions/mark-and-recall
-
-# For Cursor (remote/SSH)
-ln -s /path/to/mark-and-recall ~/.cursor-server/extensions/mark-and-recall
-```
-
-Restart VS Code / Cursor and you're done. The compiled extension is included in the repo.
-
-## Development
-
-```bash
-npm install
-npm run compile
-npm run watch  # for development
 ```
 

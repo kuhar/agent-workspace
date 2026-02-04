@@ -1,9 +1,19 @@
 {
   "name": "mark-and-recall",
   "displayName": "Mark and Recall",
-  "description": "Quick navigation to bookmarked locations defined in marks.md",
+  "description": "LLM-friendly bookmarks in plain text. Navigate to marks, or feed marks.md to AI agents to point them to key code locations.",
   "version": "0.0.1",
-  "publisher": "jakub",
+  "publisher": "kuhar",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kuhar/agent-workspace",
+    "directory": "vscode-extensions/mark-and-recall"
+  },
+  "homepage": "https://github.com/kuhar/agent-workspace/tree/main/vscode-extensions/mark-and-recall",
+  "bugs": {
+    "url": "https://github.com/kuhar/agent-workspace/issues"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

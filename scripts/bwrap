@@ -1,0 +1,55 @@
+#! /usr/bin/env bash
+# GPU-aware bwrap wrapper for Claude Code sandbox.
+#
+# Claude Code's sandbox uses bubblewrap but doesn't pass through GPU devices.
+# This wrapper injects --dev-bind-try flags for GPU access.
+#
+# CRITICAL: Device binds must come AFTER --dev /dev to avoid being shadowed
+# by the fresh devtmpfs mount. This wrapper parses args and injects at the
+# correct position.
+#
+# Devices passed through:
+#   /dev/dri/*     - DRM/Vulkan/OpenGL (all GPUs)
+#   /dev/kfd       - AMD ROCm/HIP kernel driver
+#   /dev/nvidia*   - NVIDIA CUDA driver
+#
+# --dev-bind-try gracefully skips missing devices (no error on non-GPU systems).
+#
+# See: https://github.com/anthropics/claude-code/issues/13108
+
+set -euo pipefail
+
+REAL_BWRAP=/usr/bin/bwrap
+
+# GPU devices to pass through.
+GPU_DEVICES=(
+    /dev/dri
+    /dev/kfd
+    /dev/nvidia0
+    /dev/nvidiactl
+    /dev/nvidia-uvm
+    /dev/nvidia-uvm-tools
+    /dev/nvidia-modeset
+)
+
+# Build new argument list, inserting GPU binds after --dev.
+args=()
+inject_next=false
+
+for arg in "$@"; do
+    args+=("$arg")
+
+    if [[ "$inject_next" == true ]]; then
+        # Just saw --dev and now its DEST arg; inject GPU devices after.
+        for dev in "${GPU_DEVICES[@]}"; do
+            args+=(--dev-bind-try "$dev" "$dev")
+        done
+        inject_next=false
+    fi
+
+    if [[ "$arg" == "--dev" ]]; then
+        inject_next=true
+    fi
+done
+
+exec "$REAL_BWRAP" "${args[@]}"

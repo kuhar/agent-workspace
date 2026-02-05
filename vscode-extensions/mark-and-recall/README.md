@@ -67,12 +67,17 @@ src/helpers.ts:18
 | `gotoNextMarkGlobal` | Jump to next mark globally by index (requires being at a mark or having navigated to one) |
 | `updateSymbolMarks` | Update @symbol mark line numbers in current file |
 | `selectMarksFile` | Pick a different marks file (browse, enter path, or select from existing) |
+| `installAgentSkills` | Install mark-and-recall skill and codebase-cartographer agent for detected AI coding tools |
 
 ## Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `markAndRecall.marksFilePath` | `marks.md` | Path to the marks file. Can be a filename, relative path (e.g., `.vscode/marks.md`), or absolute path. |
+
+## AI Agent Integration
+
+Run `Mark and Recall: Install AI Agent Skills` to install the mark-and-recall skill and codebase-cartographer agent for your AI coding tools. The command auto-detects Claude Code, Cursor, and Codex by looking for their config directories in your home folder, and lets you choose between project-level and global installation.
 
 ## Vim Keybindings
 

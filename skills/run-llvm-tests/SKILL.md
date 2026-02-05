@@ -1,6 +1,9 @@
-# Run Tests (LLVM)
+---
+name: run-llvm-tests
+description: Builds and runs LLVM/MLIR/Clang tests. Use when you need to verify changes to the LLVM project by running relevant test suites.
+---
 
-## Overview
+# Run Tests (LLVM)
 
 Build all the required targets and run tests.
 

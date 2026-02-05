@@ -85,6 +85,10 @@
       {
         "command": "mark-and-recall.selectMarksFile",
         "title": "Mark and Recall: Select Marks File"
+      },
+      {
+        "command": "mark-and-recall.installAgentSkills",
+        "title": "Mark and Recall: Install AI Agent Skills"
       }
     ],
     "configuration": {

@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { parseMarksFile, Mark } from './parser';
+import { AI_TOOLS, SKILL_FILES, ToolConfig, detectTools, getTargetDir } from './tools';
 
 interface MarkWithIndex extends Mark {
     index: number;
@@ -31,6 +33,9 @@ let pendingMarkUpdates: Map<number, number> | undefined;
 
 // Last navigated mark index - used for global next/previous navigation
 let lastNavigatedMarkIndex: number | undefined;
+
+// Extension path - set in activate()
+let extensionPath: string;
 
 function createNumberSvg(num: number): string {
     // Create a smaller SVG with a blue circle and white number
@@ -1323,7 +1328,98 @@ function updateMarksFileWithNewLines(marksFilePath: string): void {
     }
 }
 
+async function installAgentSkills(): Promise<void> {
+    const home = os.homedir();
+
+    // Detect which tools are available
+    const detectedTools = detectTools(home);
+
+    if (detectedTools.length === 0) {
+        vscode.window.showInformationMessage(
+            'No AI coding tools detected. Looked for: ' +
+                AI_TOOLS.map((t) => t.name).join(', ')
+        );
+        return;
+    }
+
+    // Ask for scope
+    const scope = await vscode.window.showQuickPick(
+        [
+            { label: 'Project', description: 'Install to current workspace' },
+            { label: 'Global', description: `Install to home directory (${home})` },
+        ],
+        { placeHolder: 'Where should the skills be installed?' }
+    );
+
+    if (!scope) {
+        return;
+    }
+
+    const isProject = scope.label === 'Project';
+
+    let baseDir: string;
+    if (isProject) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            vscode.window.showErrorMessage('No workspace folder open');
+            return;
+        }
+        baseDir = workspaceFolders[0].uri.fsPath;
+    } else {
+        baseDir = home;
+    }
+
+    // Read resource files
+    const resourceContents: Map<string, string> = new Map();
+    for (const fileName of SKILL_FILES) {
+        const resourcePath = path.join(extensionPath, 'resources', fileName);
+        try {
+            resourceContents.set(fileName, fs.readFileSync(resourcePath, 'utf-8'));
+        } catch (err) {
+            vscode.window.showErrorMessage(
+                `Failed to read resource ${fileName}: ${err}`
+            );
+            return;
+        }
+    }
+
+    // Write files to each detected tool's directory
+    let filesWritten = 0;
+    for (const tool of detectedTools) {
+        const scope = isProject ? 'project' as const : 'global' as const;
+        const targetDir = getTargetDir(tool, scope, baseDir);
+
+        try {
+            fs.mkdirSync(targetDir, { recursive: true });
+        } catch (err) {
+            vscode.window.showErrorMessage(
+                `Failed to create directory ${targetDir}: ${err}`
+            );
+            continue;
+        }
+
+        for (const fileName of SKILL_FILES) {
+            const targetPath = path.join(targetDir, fileName);
+            try {
+                fs.writeFileSync(targetPath, resourceContents.get(fileName)!, 'utf-8');
+                filesWritten++;
+            } catch (err) {
+                vscode.window.showErrorMessage(
+                    `Failed to write ${targetPath}: ${err}`
+                );
+            }
+        }
+    }
+
+    const toolNames = detectedTools.map((t) => t.name).join(', ');
+    const scopeLabel = isProject ? 'project' : 'global';
+    vscode.window.showInformationMessage(
+        `Installed ${SKILL_FILES.length} skill(s) for ${toolNames} (${scopeLabel})`
+    );
+}
+
 export function activate(context: vscode.ExtensionContext): void {
+    extensionPath = context.extensionPath;
     // Initialize decorations
     initializeDecorations();
 
@@ -1343,7 +1439,8 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('mark-and-recall.gotoPreviousMarkGlobal', gotoPreviousMarkGlobal),
         vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile),
         vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex),
-        vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile)
+        vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile),
+        vscode.commands.registerCommand('mark-and-recall.installAgentSkills', installAgentSkills)
     );
 
     // Set up file watcher for marks file

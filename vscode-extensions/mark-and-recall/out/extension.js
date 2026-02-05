@@ -38,7 +38,9 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const os = __importStar(require("os"));
 const parser_1 = require("./parser");
+const tools_1 = require("./tools");
 // Decoration types for marks 1-9
 const markDecorationTypes = [];
 // Decoration type for marks 10+ (star)
@@ -56,6 +58,8 @@ let isUpdatingMarksFile = false;
 let pendingMarkUpdates;
 // Last navigated mark index - used for global next/previous navigation
 let lastNavigatedMarkIndex;
+// Extension path - set in activate()
+let extensionPath;
 function createNumberSvg(num) {
     // Create a smaller SVG with a blue circle and white number
     const svg = `<svg width="12" height="12" xmlns="http://www.w3.org/2000/svg">
@@ -1111,11 +1115,81 @@ function updateMarksFileWithNewLines(marksFilePath) {
         }
     }
 }
+async function installAgentSkills() {
+    const home = os.homedir();
+    // Detect which tools are available
+    const detectedTools = (0, tools_1.detectTools)(home);
+    if (detectedTools.length === 0) {
+        vscode.window.showInformationMessage('No AI coding tools detected. Looked for: ' +
+            tools_1.AI_TOOLS.map((t) => t.name).join(', '));
+        return;
+    }
+    // Ask for scope
+    const scope = await vscode.window.showQuickPick([
+        { label: 'Project', description: 'Install to current workspace' },
+        { label: 'Global', description: `Install to home directory (${home})` },
+    ], { placeHolder: 'Where should the skills be installed?' });
+    if (!scope) {
+        return;
+    }
+    const isProject = scope.label === 'Project';
+    let baseDir;
+    if (isProject) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            vscode.window.showErrorMessage('No workspace folder open');
+            return;
+        }
+        baseDir = workspaceFolders[0].uri.fsPath;
+    }
+    else {
+        baseDir = home;
+    }
+    // Read resource files
+    const resourceContents = new Map();
+    for (const fileName of tools_1.SKILL_FILES) {
+        const resourcePath = path.join(extensionPath, 'resources', fileName);
+        try {
+            resourceContents.set(fileName, fs.readFileSync(resourcePath, 'utf-8'));
+        }
+        catch (err) {
+            vscode.window.showErrorMessage(`Failed to read resource ${fileName}: ${err}`);
+            return;
+        }
+    }
+    // Write files to each detected tool's directory
+    let filesWritten = 0;
+    for (const tool of detectedTools) {
+        const scope = isProject ? 'project' : 'global';
+        const targetDir = (0, tools_1.getTargetDir)(tool, scope, baseDir);
+        try {
+            fs.mkdirSync(targetDir, { recursive: true });
+        }
+        catch (err) {
+            vscode.window.showErrorMessage(`Failed to create directory ${targetDir}: ${err}`);
+            continue;
+        }
+        for (const fileName of tools_1.SKILL_FILES) {
+            const targetPath = path.join(targetDir, fileName);
+            try {
+                fs.writeFileSync(targetPath, resourceContents.get(fileName), 'utf-8');
+                filesWritten++;
+            }
+            catch (err) {
+                vscode.window.showErrorMessage(`Failed to write ${targetPath}: ${err}`);
+            }
+        }
+    }
+    const toolNames = detectedTools.map((t) => t.name).join(', ');
+    const scopeLabel = isProject ? 'project' : 'global';
+    vscode.window.showInformationMessage(`Installed ${tools_1.SKILL_FILES.length} skill(s) for ${toolNames} (${scopeLabel})`);
+}
 function activate(context) {
+    extensionPath = context.extensionPath;
     // Initialize decorations
     initializeDecorations();
     // Register commands
-    context.subscriptions.push(vscode.commands.registerCommand('mark-and-recall.recall', recall), vscode.commands.registerCommand('mark-and-recall.openMarks', openMarks), vscode.commands.registerCommand('mark-and-recall.prependMark', prependMark), vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark), vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark), vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark), vscode.commands.registerCommand('mark-and-recall.deleteMarkAtCursor', deleteMarkAtCursor), vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMarkGlobal', gotoNextMarkGlobal), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMarkGlobal', gotoPreviousMarkGlobal), vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile), vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex), vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile));
+    context.subscriptions.push(vscode.commands.registerCommand('mark-and-recall.recall', recall), vscode.commands.registerCommand('mark-and-recall.openMarks', openMarks), vscode.commands.registerCommand('mark-and-recall.prependMark', prependMark), vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark), vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark), vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark), vscode.commands.registerCommand('mark-and-recall.deleteMarkAtCursor', deleteMarkAtCursor), vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMarkGlobal', gotoNextMarkGlobal), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMarkGlobal', gotoPreviousMarkGlobal), vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile), vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex), vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile), vscode.commands.registerCommand('mark-and-recall.installAgentSkills', installAgentSkills));
     // Set up file watcher for marks file
     setupFileWatcher(context);
     // Handle configuration changes

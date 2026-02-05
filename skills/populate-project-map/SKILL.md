@@ -1,6 +1,9 @@
-# Populate project map
+---
+name: populate-project-map
+description: Creates or updates a human-readable directory map for the currently active workspace. Use when onboarding to a new project or when the workspace layout has changed.
+---
 
-## Overview
+# Populate project map
 
 Command to create a human-readable directory map for other the currently active VSCode/Cursor workspace.
 

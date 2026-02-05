@@ -9,44 +9,25 @@ When invoked:
 1. Explore the codebase structure (directories, key files)
 2. Identify architectural patterns and entry points
 3. Find important functions, classes, and utilities
-4. Write findings to marks.md using [/update-marks](/commands/update-marks.md)
+4. Write findings to marks.md using /mark-and-recall
 
-## Exploration Strategy
+## What to Explore and Mark
 
-Start broad, then drill into important areas:
+Start broad, then drill into important areas. Prioritize locations that help someone understand or modify the codebase.
 
 **Compiler projects (LLVM/MLIR):**
-- Pass definitions and registration
-- Op definitions (TableGen .td files and C++ implementations)
+- Pass entry points (`runOnOperation`, `matchAndRewrite`) and registration
+- Op definitions (TableGen .td files, C++ implementations, builders)
 - Patterns and rewrites (canonicalization, legalization, conversion)
-- Dialect definitions and types / attributes
-- Interfaces and traits
+- Dialect definitions, types, attributes, interfaces, and traits
 - Lowering and code generation paths
 - Test files (.mlir, lit tests) that demonstrate pass behavior
 
 **Other projects (web apps, VS Code extensions, etc.):**
 - Entry points (main functions, request handlers, CLI commands)
-- Core business logic and domain models
-- Utilities and helper functions
-- Configuration and initialization code
-
-## What to Mark
-
-Prioritize locations that help someone understand or modify the codebase:
-
-**Compiler projects:**
-- Pass entry points (`runOnOperation`, `matchAndRewrite`)
-- Op definitions and builders
-- Key patterns and rewrites
-- Dialect registration and type definitions
-- Utility functions for IR manipulation
-- Test cases that exercise the pass or pattern
-
-**Other projects:**
-- Entry points and request handlers
-- Core algorithms and business logic
+- Core business logic, algorithms, and domain models
 - Key interfaces and abstract classes
-- Test cases that exercise key logic
+- Configuration and initialization code
 
 ## Output
 

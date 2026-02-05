@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { detectTools, getTargetDir, AI_TOOLS } from './tools';
+import { detectTools, getTargetPath, AI_TOOLS, INSTALLABLES, Installable } from './tools';
+
+const skillInstallable: Installable = INSTALLABLES.find((i) => i.kind === 'skill')!;
+const agentInstallable: Installable = INSTALLABLES.find((i) => i.kind === 'agent')!;
 
 describe('detectTools', () => {
     let tmpDir: string;
@@ -57,35 +60,79 @@ describe('detectTools', () => {
 
     it('accepts custom tools list', () => {
         fs.mkdirSync(path.join(tmpDir, '.custom'));
-        const customTools = [
-            { name: 'Custom', detection: '.custom', projectDir: '.custom/rules', globalDir: '.custom/rules' },
-        ];
+        const customTools = [{
+            name: 'Custom',
+            detection: '.custom',
+            dirs: {
+                skill: { project: '.custom/skills', global: '.custom/skills', layout: 'subdirectory' as const },
+                agent: { project: '.custom/agents', global: '.custom/agents', layout: 'flat' as const },
+            },
+        }];
         const detected = detectTools(tmpDir, customTools);
         expect(detected).toHaveLength(1);
         expect(detected[0].name).toBe('Custom');
     });
 });
 
-describe('getTargetDir', () => {
-    it('returns project dir for project scope', () => {
-        const tool = AI_TOOLS[0]; // Claude Code
-        expect(getTargetDir(tool, 'project', '/my/project')).toBe('/my/project/.claude/commands');
+describe('getTargetPath', () => {
+    const claude = AI_TOOLS[0];
+    const cursor = AI_TOOLS[1];
+    const codex = AI_TOOLS[2];
+
+    describe('Claude Code', () => {
+        it('installs skills as subdirectory/SKILL.md', () => {
+            expect(getTargetPath(claude, 'project', '/proj', skillInstallable))
+                .toBe('/proj/.claude/skills/mark-and-recall/SKILL.md');
+        });
+
+        it('installs agents as flat .md files', () => {
+            expect(getTargetPath(claude, 'project', '/proj', agentInstallable))
+                .toBe('/proj/.claude/agents/codebase-cartographer.md');
+        });
+
+        it('uses same structure for global scope', () => {
+            expect(getTargetPath(claude, 'global', '/home/user', skillInstallable))
+                .toBe('/home/user/.claude/skills/mark-and-recall/SKILL.md');
+            expect(getTargetPath(claude, 'global', '/home/user', agentInstallable))
+                .toBe('/home/user/.claude/agents/codebase-cartographer.md');
+        });
     });
 
-    it('returns global dir for global scope', () => {
-        const tool = AI_TOOLS[0]; // Claude Code
-        expect(getTargetDir(tool, 'global', '/home/user')).toBe('/home/user/.claude/commands');
+    describe('Cursor', () => {
+        it('installs skills as subdirectory/SKILL.md', () => {
+            expect(getTargetPath(cursor, 'project', '/proj', skillInstallable))
+                .toBe('/proj/.cursor/skills/mark-and-recall/SKILL.md');
+        });
+
+        it('installs agents as flat .md files', () => {
+            expect(getTargetPath(cursor, 'project', '/proj', agentInstallable))
+                .toBe('/proj/.cursor/agents/codebase-cartographer.md');
+        });
+
+        it('uses same structure for global scope', () => {
+            expect(getTargetPath(cursor, 'global', '/home/user', skillInstallable))
+                .toBe('/home/user/.cursor/skills/mark-and-recall/SKILL.md');
+            expect(getTargetPath(cursor, 'global', '/home/user', agentInstallable))
+                .toBe('/home/user/.cursor/agents/codebase-cartographer.md');
+        });
     });
 
-    it('returns correct dirs for Cursor', () => {
-        const tool = AI_TOOLS[1]; // Cursor
-        expect(getTargetDir(tool, 'project', '/my/project')).toBe('/my/project/.cursor/rules');
-        expect(getTargetDir(tool, 'global', '/home/user')).toBe('/home/user/.cursor/rules');
-    });
+    describe('Codex', () => {
+        it('installs skills as subdirectory/SKILL.md under .agents/skills', () => {
+            expect(getTargetPath(codex, 'project', '/proj', skillInstallable))
+                .toBe('/proj/.agents/skills/mark-and-recall/SKILL.md');
+        });
 
-    it('returns correct dirs for Codex', () => {
-        const tool = AI_TOOLS[2]; // Codex
-        expect(getTargetDir(tool, 'project', '/my/project')).toBe('/my/project/.codex');
-        expect(getTargetDir(tool, 'global', '/home/user')).toBe('/home/user/.codex');
+        it('returns undefined for agents (not supported)', () => {
+            expect(getTargetPath(codex, 'project', '/proj', agentInstallable))
+                .toBeUndefined();
+        });
+
+        it('uses same structure for global scope', () => {
+            expect(getTargetPath(codex, 'global', '/home/user', skillInstallable))
+                .toBe('/home/user/.agents/skills/mark-and-recall/SKILL.md');
+            expect(getTargetPath(codex, 'global', '/home/user', agentInstallable))
+                .toBeUndefined();
+        });
     });
 });

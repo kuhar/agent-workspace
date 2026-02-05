@@ -1124,65 +1124,69 @@ async function installAgentSkills() {
             tools_1.AI_TOOLS.map((t) => t.name).join(', '));
         return;
     }
+    // Let the user pick which tools to install for
+    const toolItems = detectedTools.map((tool) => ({
+        label: tool.name,
+        picked: true,
+        tool,
+    }));
+    const selectedToolItems = await vscode.window.showQuickPick(toolItems, {
+        placeHolder: 'Select tools to install skills for',
+        canPickMany: true,
+    });
+    if (!selectedToolItems || selectedToolItems.length === 0) {
+        return;
+    }
+    const selectedTools = selectedToolItems.map((item) => item.tool);
+    // Resolve workspace path for the scope picker
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const workspaceRoot = workspaceFolders?.[0]?.uri.fsPath;
     // Ask for scope
-    const scope = await vscode.window.showQuickPick([
-        { label: 'Project', description: 'Install to current workspace' },
-        { label: 'Global', description: `Install to home directory (${home})` },
-    ], { placeHolder: 'Where should the skills be installed?' });
+    const scopeOptions = [];
+    if (workspaceRoot) {
+        scopeOptions.push({ label: 'Project', description: `Install to workspace (${workspaceRoot})` });
+    }
+    scopeOptions.push({ label: 'Global', description: `Install to home directory (${home})` });
+    const scope = await vscode.window.showQuickPick(scopeOptions, {
+        placeHolder: 'Where should the skills be installed?',
+    });
     if (!scope) {
         return;
     }
     const isProject = scope.label === 'Project';
-    let baseDir;
-    if (isProject) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            vscode.window.showErrorMessage('No workspace folder open');
-            return;
-        }
-        baseDir = workspaceFolders[0].uri.fsPath;
-    }
-    else {
-        baseDir = home;
-    }
+    const baseDir = isProject ? workspaceRoot : home;
     // Read resource files
     const resourceContents = new Map();
-    for (const fileName of tools_1.SKILL_FILES) {
-        const resourcePath = path.join(extensionPath, 'resources', fileName);
+    for (const installable of tools_1.INSTALLABLES) {
+        const resourcePath = path.join(extensionPath, 'resources', installable.resourceFile);
         try {
-            resourceContents.set(fileName, fs.readFileSync(resourcePath, 'utf-8'));
+            resourceContents.set(installable.name, fs.readFileSync(resourcePath, 'utf-8'));
         }
         catch (err) {
-            vscode.window.showErrorMessage(`Failed to read resource ${fileName}: ${err}`);
+            vscode.window.showErrorMessage(`Failed to read resource ${installable.resourceFile}: ${err}`);
             return;
         }
     }
-    // Write files to each detected tool's directory
-    let filesWritten = 0;
-    for (const tool of detectedTools) {
-        const scope = isProject ? 'project' : 'global';
-        const targetDir = (0, tools_1.getTargetDir)(tool, scope, baseDir);
-        try {
-            fs.mkdirSync(targetDir, { recursive: true });
-        }
-        catch (err) {
-            vscode.window.showErrorMessage(`Failed to create directory ${targetDir}: ${err}`);
-            continue;
-        }
-        for (const fileName of tools_1.SKILL_FILES) {
-            const targetPath = path.join(targetDir, fileName);
+    // Write to each selected tool's directory
+    const installScope = isProject ? 'project' : 'global';
+    for (const tool of selectedTools) {
+        for (const installable of tools_1.INSTALLABLES) {
+            const targetPath = (0, tools_1.getTargetPath)(tool, installScope, baseDir, installable);
+            if (!targetPath) {
+                continue;
+            }
             try {
-                fs.writeFileSync(targetPath, resourceContents.get(fileName), 'utf-8');
-                filesWritten++;
+                fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+                fs.writeFileSync(targetPath, resourceContents.get(installable.name), 'utf-8');
             }
             catch (err) {
                 vscode.window.showErrorMessage(`Failed to write ${targetPath}: ${err}`);
             }
         }
     }
-    const toolNames = detectedTools.map((t) => t.name).join(', ');
+    const toolNames = selectedTools.map((t) => t.name).join(', ');
     const scopeLabel = isProject ? 'project' : 'global';
-    vscode.window.showInformationMessage(`Installed ${tools_1.SKILL_FILES.length} skill(s) for ${toolNames} (${scopeLabel})`);
+    vscode.window.showInformationMessage(`Installed ${tools_1.INSTALLABLES.length} skill(s) for ${toolNames} (${scopeLabel})`);
 }
 function activate(context) {
     extensionPath = context.extensionPath;

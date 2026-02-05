@@ -2,6 +2,15 @@
 
 All notable changes to the "Mark and Recall" extension will be documented in this file.
 
+## [0.0.5] - 2026-02-05
+
+### Added
+- `Install AI Agent Skills` command: auto-detects Claude Code, Cursor, and Codex, and installs the mark-and-recall skill + codebase-cartographer agent to their config directories (project or global)
+- AI Agent Integration section in README
+
+### Changed
+- Excluded screenshot assets from vsix package (referenced via GitHub URLs)
+
 ## [0.0.4] - 2026-02-04
 
 ### Fixed

@@ -33,40 +33,56 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SKILL_FILES = exports.AI_TOOLS = void 0;
+exports.AI_TOOLS = exports.INSTALLABLES = void 0;
 exports.detectTools = detectTools;
-exports.getTargetDir = getTargetDir;
+exports.getTargetPath = getTargetPath;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+exports.INSTALLABLES = [
+    { name: 'mark-and-recall', kind: 'skill', resourceFile: 'mark-and-recall.md' },
+    { name: 'codebase-cartographer', kind: 'agent', resourceFile: 'codebase-cartographer.md' },
+];
 exports.AI_TOOLS = [
     {
         name: 'Claude Code',
         detection: '.claude',
-        projectDir: '.claude/commands',
-        globalDir: '.claude/commands',
+        dirs: {
+            skill: { project: '.claude/skills', global: '.claude/skills', layout: 'subdirectory' },
+            agent: { project: '.claude/agents', global: '.claude/agents', layout: 'flat' },
+        },
     },
     {
         name: 'Cursor',
         detection: '.cursor',
-        projectDir: '.cursor/rules',
-        globalDir: '.cursor/rules',
+        dirs: {
+            skill: { project: '.cursor/skills', global: '.cursor/skills', layout: 'subdirectory' },
+            agent: { project: '.cursor/agents', global: '.cursor/agents', layout: 'flat' },
+        },
     },
     {
         name: 'Codex',
         detection: '.codex',
-        projectDir: '.codex',
-        globalDir: '.codex',
+        dirs: {
+            skill: { project: '.agents/skills', global: '.agents/skills', layout: 'subdirectory' },
+        },
     },
 ];
-exports.SKILL_FILES = ['mark-and-recall.md', 'codebase-cartographer.md'];
 function detectTools(home, tools = exports.AI_TOOLS) {
     return tools.filter((tool) => {
         const configDir = path.join(home, tool.detection);
         return fs.existsSync(configDir);
     });
 }
-function getTargetDir(tool, scope, baseDir) {
-    const dir = scope === 'project' ? tool.projectDir : tool.globalDir;
-    return path.join(baseDir, dir);
+function getTargetPath(tool, scope, baseDir, installable) {
+    const dirConfig = tool.dirs[installable.kind];
+    if (!dirConfig) {
+        return undefined;
+    }
+    const dir = scope === 'project' ? dirConfig.project : dirConfig.global;
+    const base = path.join(baseDir, dir);
+    if (dirConfig.layout === 'subdirectory') {
+        return path.join(base, installable.name, 'SKILL.md');
+    }
+    return path.join(base, `${installable.name}.md`);
 }
 //# sourceMappingURL=tools.js.map

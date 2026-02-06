@@ -7,10 +7,11 @@ export interface Installable {
     name: string;
     kind: InstallableKind;
     resourceFile: string;
+    extraFiles?: string[];
 }
 
 export const INSTALLABLES: Installable[] = [
-    { name: 'mark-and-recall', kind: 'skill', resourceFile: 'mark-and-recall.md' },
+    { name: 'mark-and-recall', kind: 'skill', resourceFile: 'mark-and-recall.md', extraFiles: ['validate_marks.py'] },
     { name: 'codebase-cartographer', kind: 'agent', resourceFile: 'codebase-cartographer.md' },
 ];
 

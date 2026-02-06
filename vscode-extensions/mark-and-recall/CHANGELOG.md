@@ -2,6 +2,17 @@
 
 All notable changes to the "Mark and Recall" extension will be documented in this file.
 
+## [0.0.10] - 2026-02-06
+
+### Added
+- `validate_marks.py`: marks.md validator with actionable error messages for AI agents
+- Validator is bundled with the skill and installed alongside it via the Install command
+- 20 unit tests for the validator
+
+### Changed
+- Clarified marks.md format: explicit mark types, comment syntax rules
+- Added validation rules: no duplicate locations, no markdown tables
+
 ## [0.0.9] - 2026-02-06
 
 ### Changed

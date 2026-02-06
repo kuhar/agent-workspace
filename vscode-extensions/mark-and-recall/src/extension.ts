@@ -1441,8 +1441,16 @@ async function installAgentSkills(): Promise<void> {
                 continue;
             }
             try {
-                fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+                const targetDir = path.dirname(targetPath);
+                fs.mkdirSync(targetDir, { recursive: true });
                 fs.writeFileSync(targetPath, resourceContents.get(installable.name)!, 'utf-8');
+
+                // Copy extra files into the same directory
+                for (const extra of installable.extraFiles ?? []) {
+                    const extraSrc = path.join(extensionPath, 'resources', extra);
+                    const extraDst = path.join(targetDir, extra);
+                    fs.copyFileSync(extraSrc, extraDst);
+                }
             } catch (err) {
                 vscode.window.showErrorMessage(
                     `Failed to write ${targetPath}: ${err}`

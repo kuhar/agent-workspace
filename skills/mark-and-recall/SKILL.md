@@ -55,8 +55,10 @@ Then populate it with your findings.
 
 ## Validation
 
-After writing or updating marks, verify:
+After writing or updating marks, run `validate_marks.py` (in the same directory as this skill file):
 
-1. **Paths exist** — test each path with Read or Glob and remove or fix marks pointing to nonexistent files.
-2. **No duplicate locations** - path:line locations should be unique.
-3. **No markdown tables or other formatting** — marks.md is a simple line-oriented format, not markdown (despite the `.md` extension).
+```
+python3 path/to/validate_marks.py [marks.md]
+```
+
+The validator checks for missing files, duplicate locations, invalid format, and markdown formatting. Errors are printed as `file:line: error: message` — fix every reported error before finishing.

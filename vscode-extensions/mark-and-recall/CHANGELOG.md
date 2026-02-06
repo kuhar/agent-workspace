@@ -2,6 +2,11 @@
 
 All notable changes to the "Mark and Recall" extension will be documented in this file.
 
+## [0.0.9] - 2026-02-06
+
+### Changed
+- Clarified marks.md format: explicit mark types, comment syntax rules, and validation against markdown formatting
+
 ## [0.0.8] - 2026-02-06
 
 ### Changed

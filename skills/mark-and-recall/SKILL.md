@@ -9,17 +9,20 @@ Mark files (`marks.md`) are persistent bookmarks pointing to important code loca
 
 ## Format
 
+Three mark types — named, symbol (`@`), and anonymous:
+
 ```
-# Comments start with #
-name: path/to/file.ts:42        # Named mark
-@functionName: src/utils.ts:15  # Symbol mark (@ = definition site)
-src/config.ts:1                 # Anonymous mark
+# Section comments are standalone lines starting with #
+name: path/to/file.ts:42
+@functionName: src/utils.ts:15
+src/config.ts:1
 ```
 
 - Line numbers are 1-based; paths are relative to the workspace root (where `marks.md` lives)
 - Only use absolute paths for locations outside the workspace tree
 - `@` prefix indicates a symbol definition (function, class, method, variable)
 - Mark names should be unique
+- `#` comments must be on their own line.
 
 ## Reading
 
@@ -52,4 +55,8 @@ Then populate it with your findings.
 
 ## Validation
 
-After writing or updating marks, verify that every marked path exists. Run a quick check (e.g., test each `path` with the Read or Glob tool) and remove or fix any marks pointing to nonexistent files. This catches typos and stale paths before they mislead future sessions.
+After writing or updating marks, verify:
+
+1. **Paths exist** — test each path with Read or Glob and remove or fix marks pointing to nonexistent files.
+2. **No duplicate locations** - path:line locations should be unique.
+3. **No markdown tables or other formatting** — marks.md is a simple line-oriented format, not markdown (despite the `.md` extension).

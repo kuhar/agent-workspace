@@ -34,8 +34,12 @@ def parse_mark_path(before_line_num: str) -> str:
     return before_line_num
 
 
-def validate(content: str, base_dir: str) -> list[Error]:
-    """Validate marks content. Returns a list of errors (empty = valid)."""
+def validate_format(content: str) -> list[Error]:
+    """Validate marks format without checking the filesystem.
+
+    Checks: syntax, line numbers, duplicates, no markdown tables.
+    Returns a list of errors (empty = valid).
+    """
     errors: list[Error] = []
     seen_locations: dict[str, int] = {}
     in_comment = False
@@ -77,16 +81,6 @@ def validate(content: str, base_dir: str) -> list[Error]:
         before_line_num = line[:last_colon].strip()
         file_path = parse_mark_path(before_line_num)
 
-        # Resolve relative paths.
-        if os.path.isabs(file_path):
-            resolved = file_path
-        else:
-            resolved = os.path.join(base_dir, file_path)
-
-        # Check path exists.
-        if not os.path.isfile(resolved):
-            errors.append(Error(line_no, f"file not found — remove this mark or fix the path: {file_path}"))
-
         # Check duplicate locations.
         location = f"{file_path}:{line_num_str}"
         if location in seen_locations:
@@ -100,6 +94,49 @@ def validate(content: str, base_dir: str) -> list[Error]:
         else:
             seen_locations[location] = line_no
 
+    return errors
+
+
+def validate(content: str, base_dir: str) -> list[Error]:
+    """Validate marks content including filesystem path checks.
+
+    Returns a list of errors (empty = valid).
+    """
+    errors = validate_format(content)
+    in_comment = False
+
+    for line_no, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+
+        if in_comment:
+            if "-->" in line:
+                in_comment = False
+            continue
+        if line.startswith("<!--"):
+            if "-->" not in line:
+                in_comment = True
+            continue
+
+        if not line or line.startswith("#") or line.startswith("|") or ":" not in line:
+            continue
+
+        last_colon = line.rfind(":")
+        line_num_str = line[last_colon + 1 :].strip()
+        if not re.fullmatch(r"\d+", line_num_str):
+            continue
+
+        before_line_num = line[:last_colon].strip()
+        file_path = parse_mark_path(before_line_num)
+
+        if os.path.isabs(file_path):
+            resolved = file_path
+        else:
+            resolved = os.path.join(base_dir, file_path)
+
+        if not os.path.isfile(resolved):
+            errors.append(Error(line_no, f"file not found — remove this mark or fix the path: {file_path}"))
+
+    errors.sort(key=lambda e: e.line_no)
     return errors
 
 

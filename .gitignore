@@ -4,8 +4,9 @@
 !.vscode/launch.json
 marks.md
 
-# Python virtualenv
+# Python
 .venv/
+__pycache__/
 
 # bv (beads viewer) local config and caches
 .bv/

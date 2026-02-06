@@ -1,6 +1,6 @@
 ---
 name: mark-and-recall
-description: Read and write marks.md files to navigate codebases efficiently. Use when a marks.md file exists in the workspace, after significant codebase exploration, or when the user asks to document important code locations.
+description: Read and write marks.md files to navigate codebases efficiently. Use when a marks.md file exists in the workspace, after significant codebase exploration, or when the user asks to document important code locations. Also use when the user says "mark it/them", "mark me", "mark this/these", "add a mark", "bookmark this/these", "save as marks", "save to marks", or otherwise asks to remember/mark code locations.
 ---
 
 # Mark and Recall
@@ -16,7 +16,8 @@ name: path/to/file.ts:42        # Named mark
 src/config.ts:1                 # Anonymous mark
 ```
 
-- Line numbers are 1-based; paths are relative to workspace root
+- Line numbers are 1-based; paths are relative to the workspace root (where `marks.md` lives)
+- Only use absolute paths for locations outside the workspace tree
 - `@` prefix indicates a symbol definition (function, class, method, variable)
 - Mark names should be unique
 
@@ -39,7 +40,7 @@ Update `marks.md` after exploring or modifying the codebase. This is a deliverab
 
 ## Creating
 
-When no `marks.md` exists and you've done meaningful exploration, create one:
+When no `marks.md` exists and you've done meaningful exploration, create one **in the workspace root directory** (not a subdirectory):
 
 ```
 # Marks (see mark-and-recall skill)
@@ -48,3 +49,7 @@ When no `marks.md` exists and you've done meaningful exploration, create one:
 ```
 
 Then populate it with your findings.
+
+## Validation
+
+After writing or updating marks, verify that every marked path exists. Run a quick check (e.g., test each `path` with the Read or Glob tool) and remove or fix any marks pointing to nonexistent files. This catches typos and stale paths before they mislead future sessions.

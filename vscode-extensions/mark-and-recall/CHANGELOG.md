@@ -2,6 +2,11 @@
 
 All notable changes to the "Mark and Recall" extension will be documented in this file.
 
+## [0.0.8] - 2026-02-06
+
+### Changed
+- Improved skill auto-detection: added trigger phrases ("mark it/them", "mark me", "mark this/these", "save as/to marks", etc.) so AI agents invoke the skill automatically without explicit references
+
 ## [0.0.7] - 2026-02-05
 
 ### Changed

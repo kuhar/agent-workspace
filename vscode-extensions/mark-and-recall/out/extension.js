@@ -60,6 +60,36 @@ let pendingMarkUpdates;
 let lastNavigatedMarkIndex;
 // Extension path - set in activate()
 let extensionPath;
+// File decoration provider for marking files with bookmarks
+class MarkedFileDecorationProvider {
+    _onDidChangeFileDecorations = new vscode.EventEmitter();
+    onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
+    provideFileDecoration(uri) {
+        const config = vscode.workspace.getConfiguration('markAndRecall');
+        if (!config.get('fileDecoration.enabled', true)) {
+            return undefined;
+        }
+        const marks = getMarksQuiet();
+        const filePath = uri.fsPath;
+        const fileMarks = marks.filter((m) => m.filePath === filePath);
+        if (fileMarks.length === 0) {
+            return undefined;
+        }
+        const count = fileMarks.length;
+        const badge = count <= 99 ? String(count) : '99';
+        const names = fileMarks
+            .map((m) => m.name || `line ${m.line}`)
+            .join(', ');
+        return new vscode.FileDecoration(badge, `${count} mark${count !== 1 ? 's' : ''}: ${names}`, new vscode.ThemeColor('markAndRecall.fileDecorationForeground'));
+    }
+    fireChange() {
+        this._onDidChangeFileDecorations.fire(undefined);
+    }
+    dispose() {
+        this._onDidChangeFileDecorations.dispose();
+    }
+}
+let markedFileDecorationProvider;
 function createNumberSvg(num) {
     // Create a smaller SVG with a blue circle and white number
     const svg = `<svg width="12" height="12" xmlns="http://www.w3.org/2000/svg">
@@ -92,7 +122,7 @@ function initializeDecorations() {
     });
     // Create line highlight decoration
     lineHighlightDecoration = vscode.window.createTextEditorDecorationType({
-        backgroundColor: 'rgba(33, 150, 243, 0.15)', // Light blue background
+        backgroundColor: new vscode.ThemeColor('markAndRecall.lineHighlightBackground'),
         isWholeLine: true,
     });
 }
@@ -189,6 +219,7 @@ function updateAllDecorations() {
     for (const editor of vscode.window.visibleTextEditors) {
         updateDecorationsForEditor(editor);
     }
+    markedFileDecorationProvider?.fireChange();
 }
 function setupFileWatcher(context) {
     // Dispose existing watcher if any
@@ -236,16 +267,8 @@ async function openMarks() {
     const uri = vscode.Uri.file(marksFilePath);
     // Create the file if it doesn't exist
     if (!fs.existsSync(marksFilePath)) {
-        const template = `# Mark and Recall File
-#
-# Named marks (name: path:line) - user-specified
-# mymark: src/utils.ts:10
-#
-# Symbol marks (@symbol: path:line) - auto-detected from code
-# @parseConfig: src/utils.ts:42
-#
-# Anonymous marks (path:line)
-# src/helpers.ts:18
+        const template = `# Marks (see mark-and-recall skill)
+# Examples: name: path:line | @symbol: path:line | path:line
 
 `;
         fs.writeFileSync(marksFilePath, template, 'utf-8');
@@ -1192,6 +1215,9 @@ function activate(context) {
     extensionPath = context.extensionPath;
     // Initialize decorations
     initializeDecorations();
+    // Register file decoration provider
+    markedFileDecorationProvider = new MarkedFileDecorationProvider();
+    context.subscriptions.push(vscode.window.registerFileDecorationProvider(markedFileDecorationProvider), markedFileDecorationProvider);
     // Register commands
     context.subscriptions.push(vscode.commands.registerCommand('mark-and-recall.recall', recall), vscode.commands.registerCommand('mark-and-recall.openMarks', openMarks), vscode.commands.registerCommand('mark-and-recall.prependMark', prependMark), vscode.commands.registerCommand('mark-and-recall.prependNamedMark', prependNamedMark), vscode.commands.registerCommand('mark-and-recall.appendMark', appendMark), vscode.commands.registerCommand('mark-and-recall.appendNamedMark', appendNamedMark), vscode.commands.registerCommand('mark-and-recall.deleteMarkAtCursor', deleteMarkAtCursor), vscode.commands.registerCommand('mark-and-recall.deleteAllMarksInFile', deleteAllMarksInFile), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMark', gotoPreviousMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMark', gotoNextMark), vscode.commands.registerCommand('mark-and-recall.gotoNextMarkGlobal', gotoNextMarkGlobal), vscode.commands.registerCommand('mark-and-recall.gotoPreviousMarkGlobal', gotoPreviousMarkGlobal), vscode.commands.registerCommand('mark-and-recall.updateSymbolMarks', updateSymbolMarksInFile), vscode.commands.registerCommand('mark-and-recall.recallByIndex', recallByIndex), vscode.commands.registerCommand('mark-and-recall.selectMarksFile', selectMarksFile), vscode.commands.registerCommand('mark-and-recall.installAgentSkills', installAgentSkills));
     // Set up file watcher for marks file
@@ -1203,6 +1229,9 @@ function activate(context) {
             setupFileWatcher(context);
             // Update decorations with new marks file
             updateAllDecorations();
+        }
+        if (event.affectsConfiguration('markAndRecall.fileDecoration.enabled')) {
+            markedFileDecorationProvider.fireChange();
         }
     }));
     // Update decorations when active editor changes

@@ -2,6 +2,23 @@
 
 All notable changes to the "Mark and Recall" extension will be documented in this file.
 
+## [0.0.7] - 2026-02-05
+
+### Changed
+- Improved marks.md template: concise two-line header referencing the mark-and-recall skill
+- Improved mark-and-recall skill: reframed as cross-session context bridge, added creation/staleness guidance, selection criteria
+- Improved codebase-cartographer agent: reads existing marks before exploring, fixes stale marks, preloads mark-and-recall skill
+
+## [0.0.6] - 2026-02-05
+
+### Added
+- File decoration: files with marks are highlighted in the explorer, tabs, and open editors with a blue color tint and mark count badge
+- `markAndRecall.fileDecoration.enabled` setting to toggle file decorations
+- Customizable theme colors: `markAndRecall.fileDecorationForeground` and `markAndRecall.lineHighlightBackground`
+
+### Changed
+- Line highlight background color now uses a theme color instead of a hardcoded value
+
 ## [0.0.5] - 2026-02-05
 
 ### Added

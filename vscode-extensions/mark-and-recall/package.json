@@ -2,7 +2,7 @@
   "name": "mark-and-recall",
   "displayName": "Mark and Recall",
   "description": "LLM-friendly bookmarks in plain text. Navigate to marks, or feed marks.md to AI agents to point them to key code locations.",
-  "version": "0.0.5",
+  "version": "0.0.7",
   "publisher": "kuhar",
   "license": "Apache-2.0",
   "repository": {
@@ -91,6 +91,28 @@
         "title": "Mark and Recall: Install AI Agent Skills"
       }
     ],
+    "colors": [
+      {
+        "id": "markAndRecall.fileDecorationForeground",
+        "description": "Color for file names that contain marks, shown in the explorer, tabs, and open editors.",
+        "defaults": {
+          "dark": "#42a5f5",
+          "light": "#1976d2",
+          "highContrast": "#90caf9",
+          "highContrastLight": "#0d47a1"
+        }
+      },
+      {
+        "id": "markAndRecall.lineHighlightBackground",
+        "description": "Background color for lines that have a mark.",
+        "defaults": {
+          "dark": "#2196f326",
+          "light": "#2196f326",
+          "highContrast": "#2196f33d",
+          "highContrastLight": "#2196f33d"
+        }
+      }
+    ],
     "configuration": {
       "title": "Mark and Recall",
       "properties": {
@@ -98,6 +120,11 @@
           "type": "string",
           "default": "marks.md",
           "description": "Path to the marks file. Can be a filename, relative path (e.g., '.vscode/marks.md'), or absolute path."
+        },
+        "markAndRecall.fileDecoration.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight files that contain marks in the explorer, tabs, and open editors with a color tint and mark count badge."
         }
       }
     }

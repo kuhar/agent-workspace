@@ -20,7 +20,7 @@ Unlike native vim marks which are ephemeral and stored in binary format, these m
 ## Features
 
 - **Numbered marks (1-9)** with quick-access keybindings
-- **Visual indicators**: blue gutter icons and line highlighting
+- **Visual indicators**: blue gutter icons, line highlighting, and file decoration (color tint + mark count badge in explorer, tabs, and open editors)
 - **Automatic line tracking**: marks update when you insert/delete lines
 - **Symbol marks**: auto-named from function/class definitions with `@` prefix
 - **Anonymous and named marks**: name is optional
@@ -30,15 +30,11 @@ Unlike native vim marks which are ephemeral and stored in binary format, these m
 Create a `marks.md` file in your workspace root:
 
 ```md
-# Named marks (name: path:line) - user-specified
+# Marks (see mark-and-recall skill)
+# Examples: name: path:line | @symbol: path:line | path:line
+
 tester: agents/llvm-tester.md:11
-config: /home/user/project/config.json:5
-
-# Symbol marks (@symbol: path:line) - auto-detected from code
 @parseConfig: src/utils.ts:42
-@UserController: src/api/users.ts:15
-
-# Anonymous marks (path:line)
 src/helpers.ts:18
 ```
 
@@ -47,6 +43,10 @@ src/helpers.ts:18
 - Line numbers are 1-based
 - Lines starting with `#` are comments
 - HTML-style comments (`<!-- ... -->`) are also supported, including multi-line
+
+## AI Agent Integration
+
+Run `Mark and Recall: Install AI Agent Skills` to install the mark-and-recall skill and codebase-cartographer agent for your AI coding tools. The command auto-detects Claude Code, Cursor, and Codex by looking for their config directories in your home folder, and lets you choose between project-level and global installation.
 
 ## Commands
 
@@ -74,10 +74,16 @@ src/helpers.ts:18
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `markAndRecall.marksFilePath` | `marks.md` | Path to the marks file. Can be a filename, relative path (e.g., `.vscode/marks.md`), or absolute path. |
+| `markAndRecall.fileDecoration.enabled` | `true` | Highlight files that contain marks in the explorer, tabs, and open editors with a color tint and mark count badge. |
 
-## AI Agent Integration
+## Theme Colors
 
-Run `Mark and Recall: Install AI Agent Skills` to install the mark-and-recall skill and codebase-cartographer agent for your AI coding tools. The command auto-detects Claude Code, Cursor, and Codex by looking for their config directories in your home folder, and lets you choose between project-level and global installation.
+Both decoration colors can be customized in `workbench.colorCustomizations`:
+
+| Color ID | Description |
+|----------|-------------|
+| `markAndRecall.fileDecorationForeground` | Color tint for file names with marks (explorer, tabs, open editors). |
+| `markAndRecall.lineHighlightBackground` | Background color for marked lines in the editor. |
 
 ## Vim Keybindings
 

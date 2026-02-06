@@ -1,54 +1,50 @@
 ---
 name: mark-and-recall
-description: Read and write marks.md files to navigate codebases efficiently. Use when a marks.md file exists in the workspace, or when the user asks to document important code locations, entry points, or architectural boundaries.
+description: Read and write marks.md files to navigate codebases efficiently. Use when a marks.md file exists in the workspace, after significant codebase exploration, or when the user asks to document important code locations.
 ---
 
 # Mark and Recall
 
-Mark files (`marks.md`) are human-readable bookmarks pointing to important code locations. They serve as a communication channel between user and agent.
+Mark files (`marks.md`) are persistent bookmarks pointing to important code locations. They bridge context across agent sessions — marks you write today help future agents (and humans) navigate the codebase without re-exploring from scratch.
 
-## Format Reference
+## Format
 
 ```
 # Comments start with #
 name: path/to/file.ts:42        # Named mark
-@functionName: src/utils.ts:15  # Symbol mark (function/class/variable definition)
+@functionName: src/utils.ts:15  # Symbol mark (@ = definition site)
 src/config.ts:1                 # Anonymous mark
 ```
 
-- Line numbers are 1-based
-- Paths are relative to workspace root (or absolute)
-- `@` prefix indicates a symbol name (function, class, method, variable)
-- Mark names should be unique (duplicates work but are discouraged)
+- Line numbers are 1-based; paths are relative to workspace root
+- `@` prefix indicates a symbol definition (function, class, method, variable)
+- Mark names should be unique
 
-## Reading Marks
+## Reading
 
-When starting a task, check for `marks.md` in the workspace root and read marked locations before broader exploration.
+Check for `marks.md` in the workspace root before broader exploration. Marks represent curated human intent — the user placed them to direct your attention. Read the marked locations first.
 
-**Example:** User asks "add input validation". Marks file contains:
-```
-@handleRequest: src/api/router.ts:45
-@validateInput: src/api/middleware.ts:12
-```
-Read these locations first to understand existing patterns before implementing.
+If a mark looks stale (line number doesn't match the symbol name, or file is missing), fix or remove it.
 
-## Writing Marks
+## Writing
 
-After exploring or writing code, update `marks.md` with discoveries.
+Update `marks.md` after exploring or modifying the codebase. This is a deliverable, not an afterthought.
 
-1. Read existing `marks.md` first to avoid adding duplicates
+1. Read existing `marks.md` first to avoid duplicates
 2. Group related marks with `# Section` comments
 3. Place most important marks first (positions 1-9 have quick keybindings)
-4. Append new marks to the file (or create it if missing)
-5. Show the user what was added
+4. Show the user what was added
 
-**Example output:**
-```
-# Authentication
-@authenticateUser: src/auth/login.ts:23
-@validateToken: src/auth/jwt.ts:45
+**What to mark:** entry points, subsystem boundaries, non-obvious code paths, and anything the user asked about. Prefer named and symbol marks over anonymous ones.
 
-# API Routes
-@createUser: src/api/users.ts:12
-@getUserById: src/api/users.ts:34
+## Creating
+
+When no `marks.md` exists and you've done meaningful exploration, create one:
+
 ```
+# Marks (see mark-and-recall skill)
+# Examples: name: path:line | @symbol: path:line | path:line
+
+```
+
+Then populate it with your findings.

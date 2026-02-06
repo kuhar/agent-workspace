@@ -37,6 +37,49 @@ let lastNavigatedMarkIndex: number | undefined;
 // Extension path - set in activate()
 let extensionPath: string;
 
+// File decoration provider for marking files with bookmarks
+class MarkedFileDecorationProvider implements vscode.FileDecorationProvider {
+    private _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
+    readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
+
+    provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+        const config = vscode.workspace.getConfiguration('markAndRecall');
+        if (!config.get<boolean>('fileDecoration.enabled', true)) {
+            return undefined;
+        }
+
+        const marks = getMarksQuiet();
+        const filePath = uri.fsPath;
+        const fileMarks = marks.filter((m) => m.filePath === filePath);
+
+        if (fileMarks.length === 0) {
+            return undefined;
+        }
+
+        const count = fileMarks.length;
+        const badge = count <= 99 ? String(count) : '99';
+        const names = fileMarks
+            .map((m) => m.name || `line ${m.line}`)
+            .join(', ');
+
+        return new vscode.FileDecoration(
+            badge,
+            `${count} mark${count !== 1 ? 's' : ''}: ${names}`,
+            new vscode.ThemeColor('markAndRecall.fileDecorationForeground')
+        );
+    }
+
+    fireChange(): void {
+        this._onDidChangeFileDecorations.fire(undefined);
+    }
+
+    dispose(): void {
+        this._onDidChangeFileDecorations.dispose();
+    }
+}
+
+let markedFileDecorationProvider: MarkedFileDecorationProvider;
+
 function createNumberSvg(num: number): string {
     // Create a smaller SVG with a blue circle and white number
     const svg = `<svg width="12" height="12" xmlns="http://www.w3.org/2000/svg">
@@ -73,7 +116,7 @@ function initializeDecorations(): void {
 
     // Create line highlight decoration
     lineHighlightDecoration = vscode.window.createTextEditorDecorationType({
-        backgroundColor: 'rgba(33, 150, 243, 0.15)', // Light blue background
+        backgroundColor: new vscode.ThemeColor('markAndRecall.lineHighlightBackground'),
         isWholeLine: true,
     });
 }
@@ -191,6 +234,7 @@ function updateAllDecorations(): void {
     for (const editor of vscode.window.visibleTextEditors) {
         updateDecorationsForEditor(editor);
     }
+    markedFileDecorationProvider?.fireChange();
 }
 
 function setupFileWatcher(context: vscode.ExtensionContext): void {
@@ -259,16 +303,8 @@ async function openMarks(): Promise<void> {
 
     // Create the file if it doesn't exist
     if (!fs.existsSync(marksFilePath)) {
-        const template = `# Mark and Recall File
-#
-# Named marks (name: path:line) - user-specified
-# mymark: src/utils.ts:10
-#
-# Symbol marks (@symbol: path:line) - auto-detected from code
-# @parseConfig: src/utils.ts:42
-#
-# Anonymous marks (path:line)
-# src/helpers.ts:18
+        const template = `# Marks (see mark-and-recall skill)
+# Examples: name: path:line | @symbol: path:line | path:line
 
 `;
         fs.writeFileSync(marksFilePath, template, 'utf-8');
@@ -1427,6 +1463,13 @@ export function activate(context: vscode.ExtensionContext): void {
     // Initialize decorations
     initializeDecorations();
 
+    // Register file decoration provider
+    markedFileDecorationProvider = new MarkedFileDecorationProvider();
+    context.subscriptions.push(
+        vscode.window.registerFileDecorationProvider(markedFileDecorationProvider),
+        markedFileDecorationProvider
+    );
+
     // Register commands
     context.subscriptions.push(
         vscode.commands.registerCommand('mark-and-recall.recall', recall),
@@ -1458,6 +1501,9 @@ export function activate(context: vscode.ExtensionContext): void {
                 setupFileWatcher(context);
                 // Update decorations with new marks file
                 updateAllDecorations();
+            }
+            if (event.affectsConfiguration('markAndRecall.fileDecoration.enabled')) {
+                markedFileDecorationProvider.fireChange();
             }
         })
     );

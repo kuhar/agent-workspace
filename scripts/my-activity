@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Show PRs, issues, and code reviews from the past N days.
+# Show PRs, issues, code reviews, and direct commits from the past N days.
 # Works across all repos (public and private) via GitHub CLI.
 #
-# Usage: my-activity [USERNAME] [--days N] [--group-by repo] [--prs-only | --issues-only | --reviews-only]
+# Usage: my-activity [USERNAME] [--days N] [--group-by repo] [--json] [--detailed]
+#                    [--prs-only | --issues-only | --reviews-only | --commits-only]
 
 set -euo pipefail
 
@@ -12,8 +13,11 @@ days=7
 show_prs=true
 show_issues=true
 show_reviews=true
+show_direct_commits=true
 group_by=
 user=
+output_json=false
+detailed=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -28,25 +32,43 @@ while [[ $# -gt 0 ]]; do
             esac
             shift 2
             ;;
+        --json)
+            output_json=true
+            shift
+            ;;
+        --detailed)
+            detailed=true
+            shift
+            ;;
         --prs-only)
             show_issues=false
             show_reviews=false
+            show_direct_commits=false
             shift
             ;;
         --issues-only)
             show_prs=false
             show_reviews=false
+            show_direct_commits=false
             shift
             ;;
         --reviews-only)
             show_prs=false
             show_issues=false
+            show_direct_commits=false
+            shift
+            ;;
+        --commits-only)
+            show_prs=false
+            show_issues=false
+            show_reviews=false
             shift
             ;;
         -h|--help)
-            echo "Usage: my-activity [USERNAME] [--days N] [--group-by repo] [--prs-only | --issues-only | --reviews-only]"
+            echo "Usage: my-activity [USERNAME] [--days N] [--group-by repo] [--json] [--detailed]"
+            echo "                   [--prs-only | --issues-only | --reviews-only | --commits-only]"
             echo ""
-            echo "Show PRs, issues, and code reviews from the past N days."
+            echo "Show PRs, issues, code reviews, and direct commits from the past N days."
             echo ""
             echo "Arguments:"
             echo "  USERNAME            GitHub username (default: authenticated user)"
@@ -54,9 +76,12 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  -d, --days N        Look back N days (default: 7)"
             echo "  -g, --group-by repo Group output by repository"
+            echo "  --json              Output as JSON instead of tables"
+            echo "  --detailed          Enrich with PR bodies, review comments, file stats"
             echo "  --prs-only          Show only pull requests"
             echo "  --issues-only       Show only issues"
             echo "  --reviews-only      Show only code reviews"
+            echo "  --commits-only      Show only direct commits (fork branches without PRs)"
             echo "  -h, --help          Show this help"
             exit 0
             ;;
@@ -87,7 +112,18 @@ fi
 
 json_fields=repository,title,state,url,createdAt,number
 
-# Fetch each category as JSON, tagging with "kind".
+# ---------- Rate limit check ----------
+
+check_rate_limit() {
+    local remaining
+    remaining=$(gh api rate_limit --jq '.rate.remaining' 2>/dev/null) || return 0
+    if [[ "$remaining" -lt 50 ]]; then
+        echo "Warning: Only $remaining GitHub API calls remaining. Enrichment may fail." >&2
+    fi
+}
+
+# ---------- Fetch functions ----------
+
 fetch_prs() {
     gh search prs --author="$me" --created=">=$since" \
         --json "$json_fields" \
@@ -106,8 +142,200 @@ fetch_issues() {
         --jq '[.[] | . + {kind: "issue"}]' 2>/dev/null || echo '[]'
 }
 
-# Format a JSON array as a table. Items must have repository, number, title, state, createdAt.
-# Reviews also have pr_author.
+fetch_direct_commits() {
+    echo "  Fetching push events..." >&2
+
+    local events
+    events=$(gh api "users/$me/events" --paginate --jq \
+        '[.[] | select(.type == "PushEvent")]' 2>/dev/null \
+        | jq -s 'add // []') || { echo '[]'; return; }
+
+    # Extract unique (repo, branch) for user's own repos, excluding main/master
+    local branches
+    branches=$(echo "$events" | jq -c --arg since "$since" --arg me "$me" '
+        [.[] | select(.created_at >= $since) |
+         {
+           repo: .repo.name,
+           branch: (.payload.ref | ltrimstr("refs/heads/"))
+         } |
+         select(.repo | startswith($me + "/")) |
+         select(.branch != "main" and .branch != "master")
+        ] | unique_by("\(.repo)/\(.branch)")')
+
+    local count
+    count=$(echo "$branches" | jq 'length')
+    if [[ "$count" -eq 0 ]]; then echo '[]'; return; fi
+
+    echo "  Found $count branch(es) with push activity..." >&2
+
+    declare -A upstream_cache
+
+    local results='[]'
+    while IFS= read -r entry; do
+        local repo branch upstream
+        repo=$(echo "$entry" | jq -r '.repo')
+        branch=$(echo "$entry" | jq -r '.branch')
+
+        # Look up upstream (fork parent), with caching
+        if [[ -z "${upstream_cache[$repo]+x}" ]]; then
+            upstream_cache[$repo]=$(gh api "repos/$repo" --jq '.parent.full_name // empty' 2>/dev/null || true)
+        fi
+        upstream="${upstream_cache[$repo]}"
+
+        if [[ -z "$upstream" ]]; then
+            continue
+        fi
+
+        # Check if there's already an open PR for this branch
+        local has_pr
+        has_pr=$(gh api "search/issues" \
+            -f q="type:pr state:open head:$branch repo:$upstream author:$me" \
+            --jq '.total_count' 2>/dev/null) || has_pr="0"
+        if [[ "$has_pr" -gt 0 ]]; then
+            echo "  Skipping $repo:$branch (has open PR)..." >&2
+            continue
+        fi
+
+        # Compare against upstream default branch
+        local compare jq_filter
+        if $detailed; then
+            jq_filter='{
+                ahead_by,
+                commits: [.commits[] | {sha: .sha, message: .commit.message}],
+                files: [.files[] | {filename, status, additions, deletions, changes}]
+            }'
+        else
+            jq_filter='{
+                ahead_by,
+                commits: [.commits[] | {sha: .sha, message: .commit.message}]
+            }'
+        fi
+
+        compare=$(gh api "repos/$upstream/compare/main...$me:$branch" \
+            --jq "$jq_filter" 2>/dev/null) || continue
+
+        local item
+        item=$(jq -n \
+            --arg repo "$repo" --arg upstream "$upstream" --arg branch "$branch" \
+            --argjson compare "$compare" \
+            '$compare + {repo: $repo, upstream: $upstream, branch: $branch}')
+
+        results=$(echo "$results" | jq --argjson item "$item" '. + [$item]')
+    done < <(echo "$branches" | jq -c '.[]')
+
+    echo "$results"
+}
+
+# ---------- Enrichment functions ----------
+
+enrich_prs() {
+    local prs="$1"
+    local count
+    count=$(echo "$prs" | jq 'length')
+    if [[ "$count" -eq 0 ]]; then echo "[]"; return; fi
+    echo "  Enriching $count PR(s)..." >&2
+
+    echo "$prs" | jq -c '.[]' | while IFS= read -r pr; do
+        local repo num detail
+        repo=$(echo "$pr" | jq -r '.repository.nameWithOwner')
+        num=$(echo "$pr" | jq -r '.number')
+        detail=$(gh api "repos/$repo/pulls/$num" \
+            --jq '{body, changed_files, additions, deletions}' 2>/dev/null) || detail='{}'
+        echo "$pr" | jq --argjson d "$detail" '. + $d'
+    done | jq -s '. // []'
+}
+
+enrich_reviews() {
+    local reviews="$1"
+    local count
+    count=$(echo "$reviews" | jq 'length')
+    if [[ "$count" -eq 0 ]]; then echo "[]"; return; fi
+    echo "  Enriching $count review(s)..." >&2
+
+    echo "$reviews" | jq -c '.[]' | while IFS= read -r review; do
+        local repo num detail comments
+        repo=$(echo "$review" | jq -r '.repository.nameWithOwner')
+        num=$(echo "$review" | jq -r '.number')
+
+        # Get review state and body
+        detail=$(gh api "repos/$repo/pulls/$num/reviews" \
+            --jq "[.[] | select(.user.login == \"$me\") | {review_state: .state, review_body: .body}] | last // {}" \
+            2>/dev/null) || detail='{}'
+
+        # Get review comments
+        comments=$(gh api "repos/$repo/pulls/$num/comments" \
+            --jq "[.[] | select(.user.login == \"$me\") | {path, body}]" \
+            2>/dev/null) || comments='[]'
+
+        echo "$review" | jq --argjson d "$detail" --argjson c "$comments" \
+            '. + $d + {review_comments: $c}'
+    done | jq -s '. // []'
+}
+
+enrich_issues() {
+    local issues="$1"
+    local count
+    count=$(echo "$issues" | jq 'length')
+    if [[ "$count" -eq 0 ]]; then echo "[]"; return; fi
+    echo "  Enriching $count issue(s)..." >&2
+
+    echo "$issues" | jq -c '.[]' | while IFS= read -r issue; do
+        local repo num body
+        repo=$(echo "$issue" | jq -r '.repository.nameWithOwner')
+        num=$(echo "$issue" | jq -r '.number')
+        body=$(gh api "repos/$repo/issues/$num" --jq '{body}' 2>/dev/null) || body='{}'
+        echo "$issue" | jq --argjson b "$body" '. + $b'
+    done | jq -s '. // []'
+}
+
+maybe_enrich() {
+    local enricher="$1"
+    local data="$2"
+    if $detailed; then
+        "$enricher" "$data"
+    else
+        echo "$data"
+    fi
+}
+
+# ---------- JSON output ----------
+
+output_as_json() {
+    local prs='[]' reviews='[]' issues='[]' direct_commits='[]'
+
+    $show_prs && prs=$(fetch_prs)
+    $show_reviews && reviews=$(fetch_reviews)
+    $show_issues && issues=$(fetch_issues)
+    $show_direct_commits && direct_commits=$(fetch_direct_commits)
+
+    if $detailed; then
+        check_rate_limit
+        prs=$(maybe_enrich enrich_prs "$prs")
+        reviews=$(maybe_enrich enrich_reviews "$reviews")
+        issues=$(maybe_enrich enrich_issues "$issues")
+    fi
+
+    jq -n \
+        --arg user "$me" \
+        --argjson days "$days" \
+        --arg since "$since" \
+        --argjson prs "$prs" \
+        --argjson reviews "$reviews" \
+        --argjson issues "$issues" \
+        --argjson direct_commits "$direct_commits" \
+        '{
+            user: $user,
+            period: { days: $days, since: $since },
+            pull_requests: $prs,
+            reviews: $reviews,
+            issues: $issues,
+            direct_commits: $direct_commits
+        }'
+}
+
+# ---------- Table display helpers ----------
+
+# Format a JSON array as an aligned table (non-detailed mode).
 format_rows() {
     jq -r '
         if length == 0 then "(no results)"
@@ -119,68 +347,170 @@ format_rows() {
     ' | column -t -s $'\t'
 }
 
-# ---------- Default: group by type ----------
+# Format a JSON array with detail lines (detailed mode).
+format_rows_detailed() {
+    jq -r '
+        if length == 0 then "(no results)"
+        else .[] |
+            (if .pr_author then "\(.repository.nameWithOwner)#\(.number)  \(.title)  [\(.state)]  @\(.pr_author)  \(.url)"
+             else "\(.repository.nameWithOwner)#\(.number)  \(.title)  [\(.state)]  \(.url)"
+             end),
+            (if .body and .body != "" then "    \(.body | split("\n")[0][:100])" else empty end),
+            (if .changed_files then "    +\(.additions)/-\(.deletions), \(.changed_files) files changed" else empty end),
+            (if .review_state then "    Review: \(.review_state)\(if .review_body and .review_body != "" then " — \(.review_body | split("\n")[0][:80])" else "" end)" else empty end),
+            (if .review_comments and (.review_comments | length) > 0 then "    \(.review_comments | length) review comment(s)" else empty end)
+        end
+    '
+}
+
+display_direct_commits() {
+    local commits="$1"
+    local count
+    count=$(echo "$commits" | jq 'length')
+    if [[ "$count" -eq 0 ]]; then
+        echo "(no direct commits)"
+        return
+    fi
+
+    echo "$commits" | jq -r '.[] |
+        "\(.repo) -> \(.upstream)  [branch: \(.branch), \(.ahead_by) ahead]",
+        (.commits[] | "    \(.sha[:8]) \(.message | split("\n")[0])"),
+        (if .files then (.files[] | "    \(.status)  \(.filename)  +\(.additions)/-\(.deletions)") else empty end),
+        ""
+    '
+}
+
+# ---------- Display by type ----------
 
 display_by_type() {
+    if $detailed; then check_rate_limit; fi
+
     if $show_prs; then
         echo "=== Pull Requests (last $days days) ==="
         echo ""
-        fetch_prs | format_rows
+        local prs
+        prs=$(fetch_prs)
+        prs=$(maybe_enrich enrich_prs "$prs")
+        if $detailed; then
+            echo "$prs" | format_rows_detailed
+        else
+            echo "$prs" | format_rows
+        fi
         echo ""
     fi
 
     if $show_reviews; then
         echo "=== Code Reviews (last $days days) ==="
         echo ""
-        fetch_reviews | format_rows
+        local reviews
+        reviews=$(fetch_reviews)
+        reviews=$(maybe_enrich enrich_reviews "$reviews")
+        if $detailed; then
+            echo "$reviews" | format_rows_detailed
+        else
+            echo "$reviews" | format_rows
+        fi
         echo ""
     fi
 
     if $show_issues; then
         echo "=== Issues (last $days days) ==="
         echo ""
-        fetch_issues | format_rows
+        local issues
+        issues=$(fetch_issues)
+        issues=$(maybe_enrich enrich_issues "$issues")
+        if $detailed; then
+            echo "$issues" | format_rows_detailed
+        else
+            echo "$issues" | format_rows
+        fi
+        echo ""
+    fi
+
+    if $show_direct_commits; then
+        echo "=== Direct Commits (last $days days) ==="
+        echo ""
+        local direct_commits
+        direct_commits=$(fetch_direct_commits)
+        display_direct_commits "$direct_commits"
+        echo ""
     fi
 }
 
-# ---------- Group by repo ----------
+# ---------- Display by repo ----------
 
 display_by_repo() {
+    if $detailed; then check_rate_limit; fi
+
     local all="[]"
 
     if $show_prs; then
-        all=$(jq -s '.[0] + .[1]' <(echo "$all") <(fetch_prs))
+        local prs
+        prs=$(fetch_prs)
+        prs=$(maybe_enrich enrich_prs "$prs")
+        all=$(jq -s '.[0] + .[1]' <(echo "$all") <(echo "$prs"))
     fi
     if $show_reviews; then
-        all=$(jq -s '.[0] + .[1]' <(echo "$all") <(fetch_reviews))
+        local reviews
+        reviews=$(fetch_reviews)
+        reviews=$(maybe_enrich enrich_reviews "$reviews")
+        all=$(jq -s '.[0] + .[1]' <(echo "$all") <(echo "$reviews"))
     fi
     if $show_issues; then
-        all=$(jq -s '.[0] + .[1]' <(echo "$all") <(fetch_issues))
+        local issues
+        issues=$(fetch_issues)
+        issues=$(maybe_enrich enrich_issues "$issues")
+        all=$(jq -s '.[0] + .[1]' <(echo "$all") <(echo "$issues"))
     fi
 
-    if [[ "$(echo "$all" | jq 'length')" -eq 0 ]]; then
+    local direct_commits='[]'
+    if $show_direct_commits; then
+        direct_commits=$(fetch_direct_commits)
+    fi
+
+    local has_items has_commits
+    has_items=$(echo "$all" | jq 'length > 0')
+    has_commits=$(echo "$direct_commits" | jq 'length > 0')
+
+    if [[ "$has_items" == "false" && "$has_commits" == "false" ]]; then
         echo "(no activity in the last $days days)"
         return
     fi
 
-    echo "$all" | jq -r '
-        group_by(.repository.nameWithOwner)
-        | sort_by(.[0].repository.nameWithOwner)
-        | .[]
-        | (.[0].repository.nameWithOwner) as $repo
-        | "=== \($repo) ===",
-          (sort_by(.createdAt) | reverse | .[] |
-            if .pr_author then "  #\(.number)  \(.kind)  \(.state)  \(.title)  @\(.pr_author)  \(.url)"
-            else "  #\(.number)  \(.kind)  \(.state)  \(.title)  \(.url)"
-            end
-          ),
-          ""
-    '
+    # Display PR/review/issue items grouped by repo
+    if [[ "$has_items" == "true" ]]; then
+        echo "$all" | jq -r '
+            group_by(.repository.nameWithOwner)
+            | sort_by(.[0].repository.nameWithOwner)
+            | .[]
+            | (.[0].repository.nameWithOwner) as $repo
+            | "=== \($repo) ===",
+              (sort_by(.createdAt) | reverse | .[] |
+                (if .pr_author then "  #\(.number)  \(.kind)  \(.state)  \(.title)  @\(.pr_author)  \(.url)"
+                 else "  #\(.number)  \(.kind)  \(.state)  \(.title)  \(.url)"
+                 end),
+                (if .body and .body != "" then "      \(.body | split("\n")[0][:100])" else empty end),
+                (if .changed_files then "      +\(.additions)/-\(.deletions), \(.changed_files) files changed" else empty end),
+                (if .review_state then "      Review: \(.review_state)" else empty end),
+                (if .review_comments and (.review_comments | length) > 0 then "      \(.review_comments | length) review comment(s)" else empty end)
+              ),
+              ""
+        '
+    fi
+
+    # Display direct commits
+    if [[ "$has_commits" == "true" ]]; then
+        echo "=== Direct Commits ==="
+        echo ""
+        display_direct_commits "$direct_commits"
+    fi
 }
 
 # ---------- Main ----------
 
-if [[ "$group_by" == "repo" ]]; then
+if $output_json; then
+    output_as_json
+elif [[ "$group_by" == "repo" ]]; then
     display_by_repo
 else
     display_by_type

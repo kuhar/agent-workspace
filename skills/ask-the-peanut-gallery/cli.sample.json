@@ -6,10 +6,17 @@
       "LS(**)",
       "SemanticSearch(**)",
       "Shell(git diff **)",
+      "Shell(git -C * diff **)",
       "Shell(git status **)",
+      "Shell(git -C * status **)",
       "Shell(git log **)",
+      "Shell(git -C * log **)",
       "Shell(git show **)",
-      "Shell(git blame **)"
+      "Shell(git -C * show **)",
+      "Shell(git blame **)",
+      "Shell(git -C * blame **)",
+      "Shell(git rev-parse **)",
+      "Shell(git -C * rev-parse **)"
     ],
     "deny": [
       "Write(**)",

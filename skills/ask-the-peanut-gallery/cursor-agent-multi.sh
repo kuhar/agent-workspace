@@ -154,6 +154,14 @@ while [[ "$remaining" -gt 0 ]]; do
     model="${model_arr[$i]}"
     log="${log_files[$i]}"
 
+    # Remove the reaped PID so subsequent wait -n calls don't error.
+    for j in "${!pids[@]}"; do
+        if [[ "${pids[$j]}" == "$finished_pid" ]]; then
+            unset 'pids[$j]'
+            break
+        fi
+    done
+
     output_file="$output_dir/$task_prefix/$name/output.md"
     if [[ "$rc" -eq 0 ]]; then
         echo "[done] $name ($model)"

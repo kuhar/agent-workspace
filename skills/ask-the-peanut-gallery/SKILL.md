@@ -52,6 +52,10 @@ files by the script. Users should add project-specific shell commands (e.g.
    - `--names N1,N2,...` — custom names for each model
    - `--timeout SECS` — per-agent timeout (default: 480)
 
+   **Important**: `--models` and `--names` each take a single comma-separated
+   string with no spaces (e.g. `--models gpt-5.3-codex-fast,sonnet-4.6`).
+   Do NOT use spaces between model names.
+
    Defaults: gpt-5.3-codex-fast, sonnet-4.6, gemini-3.1-pro, gemini-3-flash.
    Run `cursor-agent --list-models` to see all available models.
 

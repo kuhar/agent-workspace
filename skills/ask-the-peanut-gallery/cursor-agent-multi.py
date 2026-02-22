@@ -139,6 +139,9 @@ def resolve_prompt(template, agent_vars, include_dir):
 
 
 def main():
+    # Flush prints immediately so callers see progress in real time.
+    sys.stdout.reconfigure(line_buffering=True)
+
     args = parse_args()
 
     prompt = " ".join(args.prompt)

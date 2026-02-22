@@ -5,7 +5,8 @@ local M = {}
 -- Cache state
 local _cache = {
   marks = nil, ---@type Mark[]|nil
-  mtime = nil, ---@type number|nil
+  mtime_sec = nil, ---@type number|nil
+  mtime_nsec = nil, ---@type number|nil
 }
 
 -- Flag to prevent circular file-watcher triggers
@@ -53,12 +54,14 @@ function M.read_marks()
   local stat = vim.uv.fs_stat(path)
   if not stat then
     _cache.marks = {}
-    _cache.mtime = nil
+    _cache.mtime_sec = nil
+    _cache.mtime_nsec = nil
     return {}
   end
 
-  local mtime = stat.mtime.sec * 1e9 + stat.mtime.nsec
-  if _cache.marks and _cache.mtime == mtime then
+  if _cache.marks
+    and _cache.mtime_sec == stat.mtime.sec
+    and _cache.mtime_nsec == stat.mtime.nsec then
     return _cache.marks
   end
 
@@ -73,14 +76,16 @@ function M.read_marks()
   end
 
   _cache.marks = marks
-  _cache.mtime = mtime
+  _cache.mtime_sec = stat.mtime.sec
+  _cache.mtime_nsec = stat.mtime.nsec
   return marks
 end
 
 --- Invalidate the cache so next read_marks() re-reads the file.
 function M.invalidate_cache()
   _cache.marks = nil
-  _cache.mtime = nil
+  _cache.mtime_sec = nil
+  _cache.mtime_nsec = nil
 end
 
 --- Compute the relative path from workspace root, or absolute if outside.
@@ -175,58 +180,9 @@ function M.delete_mark_at_cursor()
   local marks_path = M.get_marks_file_path()
   local lines = vim.fn.readfile(marks_path)
 
-  -- Walk through file lines counting valid marks to find the one to delete
-  local mark_index = 0
-  local line_to_delete = -1
-  local in_html_comment = false
+  local line_to_delete = parser.mark_index_to_file_line(lines, mark_to_delete.index)
 
-  for i, line in ipairs(lines) do
-    local trimmed = line:match("^%s*(.-)%s*$")
-
-    if in_html_comment then
-      if trimmed:find("-->", 1, true) then
-        in_html_comment = false
-      end
-      goto continue
-    end
-
-    if trimmed:sub(1, 4) == "<!--" then
-      if not trimmed:find("-->", 5, true) then
-        in_html_comment = true
-      end
-      goto continue
-    end
-
-    if trimmed == "" or trimmed:sub(1, 1) == "#" then
-      goto continue
-    end
-
-    -- Check if this is a valid mark line (has trailing :number)
-    local last_colon = nil
-    for j = #trimmed, 1, -1 do
-      if trimmed:sub(j, j) == ":" then
-        last_colon = j
-        break
-      end
-    end
-    if not last_colon then goto continue end
-
-    local line_str = trimmed:sub(last_colon + 1):match("^%s*(.-)%s*$")
-    local line_num = tonumber(line_str)
-    if not line_num or line_num ~= math.floor(line_num) then
-      goto continue
-    end
-
-    if mark_index == mark_to_delete.index then
-      line_to_delete = i
-      break
-    end
-    mark_index = mark_index + 1
-
-    ::continue::
-  end
-
-  if line_to_delete == -1 then
+  if not line_to_delete then
     vim.notify("Could not find mark in marks file", vim.log.levels.ERROR)
     return
   end

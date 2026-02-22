@@ -56,7 +56,7 @@ function M.parse_marks_file(content, workspace_root)
 
     local line_str = trimmed:sub(last_colon + 1):match("^%s*(.-)%s*$")
     local line_num = tonumber(line_str)
-    if not line_num or line_num ~= math.floor(line_num) then
+    if not line_num or line_num ~= math.floor(line_num) or line_num < 1 then
       goto continue
     end
 
@@ -105,6 +105,63 @@ function M.parse_marks_file(content, workspace_root)
   end
 
   return marks
+end
+
+--- Given raw file lines and a 0-based mark index, return the 1-based file line
+--- number of that mark. Returns nil if not found.
+--- Pure Lua — no vim.* dependencies.
+--- @param file_lines string[]
+--- @param target_index number 0-based mark index
+--- @return number|nil 1-based file line number
+function M.mark_index_to_file_line(file_lines, target_index)
+  local mark_index = 0
+  local in_html_comment = false
+
+  for i, line in ipairs(file_lines) do
+    local trimmed = line:match("^%s*(.-)%s*$")
+
+    if in_html_comment then
+      if trimmed:find("-->", 1, true) then
+        in_html_comment = false
+      end
+      goto continue
+    end
+
+    if trimmed:sub(1, 4) == "<!--" then
+      if not trimmed:find("-->", 5, true) then
+        in_html_comment = true
+      end
+      goto continue
+    end
+
+    if trimmed == "" or trimmed:sub(1, 1) == "#" then
+      goto continue
+    end
+
+    local last_colon = nil
+    for j = #trimmed, 1, -1 do
+      if trimmed:sub(j, j) == ":" then
+        last_colon = j
+        break
+      end
+    end
+    if not last_colon then goto continue end
+
+    local line_str = trimmed:sub(last_colon + 1):match("^%s*(.-)%s*$")
+    local line_num = tonumber(line_str)
+    if not line_num or line_num ~= math.floor(line_num) or line_num < 1 then
+      goto continue
+    end
+
+    if mark_index == target_index then
+      return i
+    end
+    mark_index = mark_index + 1
+
+    ::continue::
+  end
+
+  return nil
 end
 
 return M

@@ -161,7 +161,19 @@ describe("parseMarksFile", function()
 
     it("handles content with only comments", function()
       local content = "# Just comments\n# Nothing else\n<!-- HTML comment -->"
-      local marks = parser.parse_marks_file("", workspace_root)
+      local marks = parser.parse_marks_file(content, workspace_root)
+      assert_eq(#marks, 0)
+    end)
+
+    it("rejects negative line numbers", function()
+      local content = "src/file.ts:-5"
+      local marks = parser.parse_marks_file(content, workspace_root)
+      assert_eq(#marks, 0)
+    end)
+
+    it("rejects zero line numbers", function()
+      local content = "src/file.ts:0"
+      local marks = parser.parse_marks_file(content, workspace_root)
       assert_eq(#marks, 0)
     end)
   end)

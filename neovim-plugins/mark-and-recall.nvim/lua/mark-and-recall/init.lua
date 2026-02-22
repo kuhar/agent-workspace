@@ -4,9 +4,21 @@ M.config = {
   marks_file = "marks.md",
 }
 
+-- Stored file watcher handle, closed on re-setup
+M._watcher = nil
+
 function M.setup(opts)
   opts = opts or {}
   M.config = vim.tbl_deep_extend("force", M.config, opts)
+
+  -- Close previous file watcher if re-entering setup
+  if M._watcher then
+    M._watcher:stop()
+    if not M._watcher:is_closing() then
+      M._watcher:close()
+    end
+    M._watcher = nil
+  end
 
   -- Forward config to marks module
   local marks = require("mark-and-recall.marks")
@@ -32,7 +44,6 @@ function M.setup(opts)
   end, { nargs = 1, desc = "Jump to mark by number" })
   vim.api.nvim_create_user_command("MarkOpen", function()
     local path = marks.get_marks_file_path()
-    -- Create if doesn't exist
     if not vim.uv.fs_stat(path) then
       vim.fn.writefile({
         "# Marks (see mark-and-recall)",
@@ -53,9 +64,12 @@ function M.setup(opts)
     end,
   })
 
+  local marks_path = marks.get_marks_file_path()
+  local marks_basename = vim.fn.fnamemodify(marks_path, ":t")
+
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
-    pattern = "*" .. M.config.marks_file,
+    pattern = "*/" .. marks_basename,
     callback = function()
       marks.invalidate_cache()
       signs.update_all_signs()
@@ -63,9 +77,7 @@ function M.setup(opts)
   })
 
   -- File watcher: watch the parent directory, filter to marks filename
-  local marks_path = marks.get_marks_file_path()
   local marks_dir = vim.fn.fnamemodify(marks_path, ":h")
-  local marks_basename = vim.fn.fnamemodify(marks_path, ":t")
 
   local watcher = vim.uv.new_fs_event()
   if watcher then
@@ -75,9 +87,11 @@ function M.setup(opts)
       if marks._is_updating then return end
       vim.schedule(function()
         marks.invalidate_cache()
+        nav._last_index = nil
         signs.update_all_signs()
       end)
     end)
+    M._watcher = watcher
   end
 
   -- Initial sign update

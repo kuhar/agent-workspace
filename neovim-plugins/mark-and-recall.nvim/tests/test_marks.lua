@@ -1,6 +1,6 @@
 -- Tests for marks module pure-function logic.
--- We test relative_path computation and file-line manipulation
--- without requiring vim.* (those are integration tests).
+-- We test relative_path computation, mark-index-to-file-line mapping,
+-- and file-line manipulation without requiring vim.*.
 
 local parser = require("mark-and-recall.parser")
 
@@ -54,8 +54,8 @@ describe("marks", function()
     end)
   end)
 
-  describe("line manipulation for delete", function()
-    it("correctly identifies mark line to delete by index", function()
+  describe("mark_index_to_file_line", function()
+    it("finds mark at index 1 skipping comments and headers", function()
       local file_lines = {
         "# Header",
         "# Comment",
@@ -66,43 +66,11 @@ describe("marks", function()
         "src/c.ts:30",
       }
 
-      -- Simulate walking lines to find mark at index 1 (0-based)
-      local mark_index = 0
-      local target_index = 1
-      local found_line = nil
-
-      for i, line in ipairs(file_lines) do
-        local trimmed = line:match("^%s*(.-)%s*$")
-        if trimmed == "" or trimmed:sub(1, 1) == "#" then
-          goto continue
-        end
-        if trimmed:sub(1, 4) == "<!--" then
-          goto continue
-        end
-        -- Check for valid mark (has trailing :number)
-        local last_colon = nil
-        for j = #trimmed, 1, -1 do
-          if trimmed:sub(j, j) == ":" then
-            last_colon = j
-            break
-          end
-        end
-        if not last_colon then goto continue end
-        local num = tonumber(trimmed:sub(last_colon + 1))
-        if not num then goto continue end
-
-        if mark_index == target_index then
-          found_line = i
-          break
-        end
-        mark_index = mark_index + 1
-        ::continue::
-      end
-
-      assert_eq(found_line, 5) -- "named: src/b.ts:20" is file line 5
+      local found = parser.mark_index_to_file_line(file_lines, 1)
+      assert_eq(found, 5) -- "named: src/b.ts:20" is file line 5
 
       -- After removing, check result
-      table.remove(file_lines, found_line)
+      table.remove(file_lines, found)
       assert_eq(#file_lines, 6)
       assert_eq(file_lines[4], "src/a.ts:10")
       assert_eq(file_lines[5], "<!-- comment -->")
@@ -116,23 +84,41 @@ describe("marks", function()
         "src/second.ts:2",
       }
 
-      local mark_index = 0
-      local found_line = nil
-      for i, line in ipairs(file_lines) do
-        local trimmed = line:match("^%s*(.-)%s*$")
-        if trimmed == "" or trimmed:sub(1, 1) == "#" then goto continue end
-        local last_colon = nil
-        for j = #trimmed, 1, -1 do
-          if trimmed:sub(j, j) == ":" then last_colon = j; break end
-        end
-        if not last_colon then goto continue end
-        if not tonumber(trimmed:sub(last_colon + 1)) then goto continue end
-        if mark_index == 0 then found_line = i; break end
-        mark_index = mark_index + 1
-        ::continue::
-      end
+      assert_eq(parser.mark_index_to_file_line(file_lines, 0), 2)
+    end)
 
-      assert_eq(found_line, 2)
+    it("finds last mark", function()
+      local file_lines = {
+        "src/a.ts:1",
+        "src/b.ts:2",
+        "src/c.ts:3",
+      }
+
+      assert_eq(parser.mark_index_to_file_line(file_lines, 2), 3)
+    end)
+
+    it("returns nil for out-of-range index", function()
+      local file_lines = {
+        "src/a.ts:1",
+        "src/b.ts:2",
+      }
+
+      assert_nil(parser.mark_index_to_file_line(file_lines, 5))
+    end)
+
+    it("skips multi-line HTML comments", function()
+      local file_lines = {
+        "<!-- start",
+        "still comment",
+        "-->",
+        "src/a.ts:1",
+      }
+
+      assert_eq(parser.mark_index_to_file_line(file_lines, 0), 4)
+    end)
+
+    it("returns nil for empty file", function()
+      assert_nil(parser.mark_index_to_file_line({}, 0))
     end)
   end)
 

@@ -8,7 +8,7 @@ description: Asks multiple AI models the same question via Cursor agents and syn
 Delegate a question to multiple AI models (GPT, Claude/Sonnet, Gemini Pro,
 Gemini Flash) running as Cursor agents, then synthesize their responses.
 
-The `cursor-agent-multi.sh`, `cursor-agent-task.sh`, and `cli.sample.json` files
+The `cursor-agent-multi.py`, `cursor-agent-task.sh`, and `cli.sample.json` files
 are in the same directory as this skill file. Find them by looking in the skill
 directory.
 
@@ -32,31 +32,38 @@ files by the script. Users should add project-specific shell commands (e.g.
 ## Steps
 
 1. **Locate the scripts.** Find the directory containing this skill's files
-   and use the `cursor-agent-multi.sh` script there.
+   and use the `cursor-agent-multi.py` script there.
 
-2. **Run cursor-agent-multi.sh** with the user's question. Default the workspace
+2. **Run cursor-agent-multi.py** with the user's question. Default the workspace
    to the current working directory.
 
    ```bash
-   /path/to/cursor-agent-multi.sh \
+   /path/to/cursor-agent-multi.py \
      --workspace <WORKSPACE> \
      --task <short-kebab-case-name> \
+     --agents '<AGENTS_JSON>' \
      "<THE QUESTION>"
    ```
 
    Pick a short descriptive `--task` name based on the question (e.g.
    `vmvx-architecture`, `flag-review`).
 
-   Available options (pass through from the user if specified):
-   - `--models M1,M2,...` — override the default model set
-   - `--names N1,N2,...` — custom names for each model
+   The `--agents` flag takes a JSON array of agent configs. Each object must
+   have `name` and `model`. Example with default models:
+
+   ```json
+   [
+     {"name": "gpt",          "model": "gpt-5.3-codex-fast"},
+     {"name": "claude",       "model": "sonnet-4.6"},
+     {"name": "gemini-pro",   "model": "gemini-3.1-pro"},
+     {"name": "gemini-flash", "model": "gemini-3-flash"}
+   ]
+   ```
+
+   Additional options (pass through from the user if specified):
+   - `--include-dir DIR` — directory of .md files for `{{PLACEHOLDER}}` resolution
    - `--timeout SECS` — per-agent timeout (default: 480)
 
-   **Important**: `--models` and `--names` each take a single comma-separated
-   string with no spaces (e.g. `--models gpt-5.3-codex-fast,sonnet-4.6`).
-   Do NOT use spaces between model names.
-
-   Defaults: gpt-5.3-codex-fast, sonnet-4.6, gemini-3.1-pro, gemini-3-flash.
    Run `cursor-agent --list-models` to see all available models.
 
 3. **Read all output files.** After cursor-multi finishes, it prints the paths.
@@ -81,7 +88,7 @@ files by the script. Users should add project-specific shell commands (e.g.
 - Do NOT modify any files in the workspace.
 - If some models fail, still return results from the ones that succeeded and
   note which failed.
-- If cursor-agent-multi.sh itself fails (e.g., missing cli.json), report the error.
+- If cursor-agent-multi.py itself fails (e.g., missing cli.json), report the error.
 - **Always include this line in every prompt sent to agents:**
   "You are running non-interactively. No human will see your questions or
   reply. Never ask for clarification. Make reasonable assumptions and state

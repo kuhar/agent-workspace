@@ -10,7 +10,7 @@ Each reviewer adopts a specific persona (from the `personas/` subdirectory) with
 distinct expertise, review style, and priorities. Round 1 collects reviews, you
 triage and fix, then Round 2 validates your rebuttals.
 
-This skill reuses `cursor-agent-multi.sh` from the `ask-the-peanut-gallery`
+This skill reuses `cursor-agent-multi.py` from the `ask-the-peanut-gallery`
 skill directory. Locate that sibling skill directory to find the script.
 For details on script usage, flags, and prerequisites, see
 [ask-the-peanut-gallery/SKILL.md](../ask-the-peanut-gallery/SKILL.md).
@@ -70,28 +70,44 @@ of this skill.
    Reviewers: Merlin (opus-4.6-thinking), Petra (composer-1.5), Vera (gemini-3-flash), Soren (sonnet-4.6-thinking)
    ```
 
-6. Record the selected persona file paths, model IDs, and lowercase names for
-   use in Steps 2 and 4.
+6. Build the `--agents` JSON array for use in Steps 2 and 4. Each entry needs
+   `name`, `model`, and `PERSONA` (the persona filename). Example:
+   ```json
+   [
+     {"name": "merlin", "model": "opus-4.6-thinking", "PERSONA": "merlin.md"},
+     {"name": "petra",  "model": "composer-1.5",      "PERSONA": "petra.md"},
+     {"name": "vera",   "model": "gemini-3-flash",    "PERSONA": "vera.md"},
+     {"name": "soren",  "model": "sonnet-4.6-thinking","PERSONA": "soren.md"}
+   ]
+   ```
 
 ### Step 2 — Round 1: Initial review
 
-Run `cursor-agent-multi.sh` with `--task review-round1`, passing `--models`,
-`--names`, and `--persona-file` for each selected reviewer:
+Run `cursor-agent-multi.py` with `--task review-round1`, passing the `--agents`
+JSON array built in Step 1.5 and `--include-dir` pointing to the `personas/`
+subdirectory:
 
 ```bash
-/path/to/cursor-agent-multi.sh \
+/path/to/cursor-agent-multi.py \
   --workspace <WORKSPACE> \
   --task review-round1 \
-  --models <MODEL1>,<MODEL2>,<MODEL3>,<MODEL4> \
-  --names <name1>,<name2>,<name3>,<name4> \
-  --persona-file /path/to/personas/<persona1>.md \
-  --persona-file /path/to/personas/<persona2>.md \
-  --persona-file /path/to/personas/<persona3>.md \
-  --persona-file /path/to/personas/<persona4>.md \
-  "<PROMPT>"
+  --include-dir /path/to/personas \
+  --agents '<AGENTS_JSON>' \
+  "=== REVIEWER PERSONA ===
+You are reviewing code as the following reviewer. Adopt their expertise,
+review style, priorities, and feedback patterns throughout your review.
+
+{{PERSONA}}
+
+=== END PERSONA ===
+
+<REVIEW_INSTRUCTIONS>"
 ```
 
-The prompt MUST include:
+The `{{PERSONA}}` placeholder is resolved per-agent from the `PERSONA` key in
+the agents JSON — each agent gets their own persona content substituted in.
+
+The review instructions part of the prompt MUST include:
 - The exact git commands to obtain the diff (repo paths, SHAs, diff arguments
   from Step 1) so the agents can run them themselves
 - Clear instruction: "Review this diff. For each issue found, state: the file
@@ -135,20 +151,24 @@ Read all Round 1 reviews and process them:
 
 ### Step 4 — Round 2: Rebuttal review
 
-Run `cursor-agent-multi.sh` again with `--task review-round2`, using the same
-persona panel from Step 1.5:
+Run `cursor-agent-multi.py` again with `--task review-round2`, using the same
+`--agents` JSON and `--include-dir` from Step 2:
 
 ```bash
-/path/to/cursor-agent-multi.sh \
+/path/to/cursor-agent-multi.py \
   --workspace <WORKSPACE> \
   --task review-round2 \
-  --models <MODEL1>,<MODEL2>,<MODEL3>,<MODEL4> \
-  --names <name1>,<name2>,<name3>,<name4> \
-  --persona-file /path/to/personas/<persona1>.md \
-  --persona-file /path/to/personas/<persona2>.md \
-  --persona-file /path/to/personas/<persona3>.md \
-  --persona-file /path/to/personas/<persona4>.md \
-  "<PROMPT>"
+  --include-dir /path/to/personas \
+  --agents '<AGENTS_JSON>' \
+  "=== REVIEWER PERSONA ===
+You are reviewing code as the following reviewer. Adopt their expertise,
+review style, priorities, and feedback patterns throughout your review.
+
+{{PERSONA}}
+
+=== END PERSONA ===
+
+<REBUTTAL_REVIEW_INSTRUCTIONS>"
 ```
 
 The prompt MUST include all of the following (clearly separated with headers):
@@ -195,11 +215,11 @@ Present the final summary:
   fixes). The Cursor review agents themselves are read-only.
 - If some models fail, still proceed with results from the ones that succeeded
   and note which failed.
-- If `cursor-agent-multi.sh` fails (e.g., missing cli.json), report the error.
+- If `cursor-agent-multi.py` fails (e.g., missing cli.json), report the error.
 - Keep prompts to the agents concise but complete. If the diff is very large,
   consider summarizing or splitting the review.
-- The user can pass `--models` or `--timeout` flags; forward them to both
-  `cursor-agent-multi.sh` invocations.
+- The user can pass `--agents` or `--timeout` flags; forward them to both
+  `cursor-agent-multi.py` invocations.
 - The user can request specific personas by name (e.g., "use Merlin and Irene").
   In that case, skip auto-picking and use the requested personas.
 - **Always include this line in every prompt sent to agents:**

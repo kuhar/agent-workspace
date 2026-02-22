@@ -107,6 +107,72 @@ function M.parse_marks_file(content, workspace_root)
   return marks
 end
 
+--- Scan from top, skip `#` lines and empty lines, return 1-based insertion
+--- point after header block. Used for prepend mode.
+--- Pure Lua — no vim.* dependencies.
+--- @param file_lines string[]
+--- @return number 1-based insertion point
+function M.find_header_end(file_lines)
+  local i = 1
+  while i <= #file_lines do
+    local trimmed = file_lines[i]:match("^%s*(.-)%s*$")
+    if trimmed == "" or trimmed:sub(1, 1) == "#" then
+      i = i + 1
+    else
+      break
+    end
+  end
+  return i
+end
+
+--- Validate a mark name. Rejects empty/nil and names containing `": "`.
+--- Pure Lua — no vim.* dependencies.
+--- @param name string|nil
+--- @return boolean ok
+--- @return string|nil err
+function M.validate_mark_name(name)
+  if name == nil or name == "" then
+    return false, "Name cannot be empty"
+  end
+  if name:find(": ", 1, true) then
+    return false, "Name cannot contain ': '"
+  end
+  return true, nil
+end
+
+--- Compute line adjustments for marks after a buffer change.
+--- Pure Lua — no vim.* dependencies.
+--- @param mark_lines number[] 1-based mark line numbers
+--- @param first_line number 0-based first changed line (from nvim_buf_attach)
+--- @param last_line number 0-based last changed line (from nvim_buf_attach)
+--- @param new_last_line number 0-based new last line (from nvim_buf_attach)
+--- @return table<number,number> map of old_line → new_line (only changed entries)
+function M.compute_line_adjustments(mark_lines, first_line, last_line, new_last_line)
+  local delta = new_last_line - last_line
+  if delta == 0 then return {} end
+
+  local result = {}
+  for _, ml in ipairs(mark_lines) do
+    -- Mark is after the changed region (1-based mark > last_line 0-based)
+    if ml > last_line then
+      result[ml] = ml + delta
+    -- Mark is in a deleted range (delta < 0, mark is between first_line+1 and last_line inclusive)
+    elseif delta < 0 and ml > first_line and ml <= last_line then
+      result[ml] = first_line + 1
+    end
+  end
+  return result
+end
+
+--- Rewrite the trailing line number in a mark line string.
+--- Pure Lua — no vim.* dependencies.
+--- @param line_str string e.g. "@std::chrono: src/time.cpp:5"
+--- @param new_line number the new line number
+--- @return string the rewritten line
+function M.rewrite_line_number(line_str, new_line)
+  return (line_str:gsub(":%d+%s*$", ":" .. new_line))
+end
+
 --- Given raw file lines and a 0-based mark index, return the 1-based file line
 --- number of that mark. Returns nil if not found.
 --- Pure Lua — no vim.* dependencies.

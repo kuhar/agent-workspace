@@ -11,7 +11,7 @@ function M.setup(opts)
   opts = opts or {}
   M.config = vim.tbl_deep_extend("force", M.config, opts)
 
-  -- Close previous file watcher if re-entering setup
+  -- Close previous file watcher and teardown tracking if re-entering setup
   if M._watcher then
     M._watcher:stop()
     if not M._watcher:is_closing() then
@@ -19,6 +19,8 @@ function M.setup(opts)
     end
     M._watcher = nil
   end
+  local tracking = require("mark-and-recall.tracking")
+  tracking.teardown()
 
   -- Forward config to marks module
   local marks = require("mark-and-recall.marks")
@@ -32,7 +34,13 @@ function M.setup(opts)
 
   -- User commands
   vim.api.nvim_create_user_command("MarkAdd", function() marks.add_mark() end, { desc = "Add mark at cursor" })
+  vim.api.nvim_create_user_command("MarkAddPrepend", function() marks.add_mark({ prepend = true }) end, { desc = "Add mark (prepend)" })
+  vim.api.nvim_create_user_command("MarkAddNamed", function(cmd_opts)
+    marks.add_named_mark({ prepend = cmd_opts.bang })
+  end, { bang = true, desc = "Add named mark (bang = prepend)" })
   vim.api.nvim_create_user_command("MarkDelete", function() marks.delete_mark_at_cursor() end, { desc = "Delete mark at cursor" })
+  vim.api.nvim_create_user_command("MarkDeleteAll", function() marks.delete_marks_in_file() end, { desc = "Delete all marks in file" })
+  vim.api.nvim_create_user_command("MarkUpdateSymbols", function() marks.update_symbol_marks() end, { desc = "Update symbol marks" })
   vim.api.nvim_create_user_command("MarkRecall", function() nav.telescope_pick() end, { desc = "Browse marks (Telescope)" })
   vim.api.nvim_create_user_command("MarkNext", function() nav.next_mark_in_file() end, { desc = "Next mark in file" })
   vim.api.nvim_create_user_command("MarkPrev", function() nav.prev_mark_in_file() end, { desc = "Previous mark in file" })
@@ -61,6 +69,7 @@ function M.setup(opts)
     group = group,
     callback = function(ev)
       signs.update_signs(ev.buf)
+      tracking.maybe_attach(ev.buf)
     end,
   })
 
@@ -73,6 +82,7 @@ function M.setup(opts)
     callback = function()
       marks.invalidate_cache()
       signs.update_all_signs()
+      tracking.recheck_all_buffers()
     end,
   })
 

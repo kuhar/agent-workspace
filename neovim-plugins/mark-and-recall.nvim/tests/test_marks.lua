@@ -140,4 +140,39 @@ describe("marks", function()
       assert_eq(result, "# header\nsrc/a.ts:10\nsrc/b.ts:20\n")
     end)
   end)
+
+  describe("prepend insertion", function()
+    it("inserts after header block", function()
+      local lines = { "# Title", "# Comment", "", "src/a.ts:10", "src/b.ts:20" }
+      local insert_at = parser.find_header_end(lines)
+      table.insert(lines, insert_at, "src/new.ts:5")
+      assert_eq(lines[4], "src/new.ts:5")
+      assert_eq(lines[5], "src/a.ts:10")
+      assert_eq(#lines, 6)
+    end)
+
+    it("inserts at top when no header", function()
+      local lines = { "src/a.ts:10", "src/b.ts:20" }
+      local insert_at = parser.find_header_end(lines)
+      table.insert(lines, insert_at, "src/new.ts:5")
+      assert_eq(lines[1], "src/new.ts:5")
+      assert_eq(lines[2], "src/a.ts:10")
+    end)
+  end)
+
+  describe("reverse-order removal", function()
+    it("removes multiple lines in reverse order preserving indices", function()
+      local lines = { "# header", "src/a.ts:10", "src/b.ts:20", "src/c.ts:30", "src/d.ts:40" }
+      -- Remove indices 4, 2 (1-based) — must sort descending
+      local to_remove = { 2, 4 }
+      table.sort(to_remove, function(a, b) return a > b end)
+      for _, idx in ipairs(to_remove) do
+        table.remove(lines, idx)
+      end
+      assert_eq(#lines, 3)
+      assert_eq(lines[1], "# header")
+      assert_eq(lines[2], "src/b.ts:20")
+      assert_eq(lines[3], "src/d.ts:40")
+    end)
+  end)
 end)

@@ -135,6 +135,152 @@ describe("parseMarksFile", function()
     end)
   end)
 
+  describe("find_header_end", function()
+    it("returns 1 for empty file", function()
+      assert_eq(parser.find_header_end({}), 1)
+    end)
+
+    it("skips headers only", function()
+      local lines = { "# Title", "# Comment", "## Section" }
+      assert_eq(parser.find_header_end(lines), 4) -- after all headers
+    end)
+
+    it("returns 1 when content starts immediately", function()
+      local lines = { "src/file.ts:10", "src/other.ts:20" }
+      assert_eq(parser.find_header_end(lines), 1)
+    end)
+
+    it("skips mixed headers and blank lines", function()
+      local lines = { "# Title", "", "# Comment", "", "src/file.ts:10" }
+      assert_eq(parser.find_header_end(lines), 5)
+    end)
+  end)
+
+  describe("validate_mark_name", function()
+    it("accepts simple names", function()
+      local ok, err = parser.validate_mark_name("mymark")
+      assert_eq(ok, true)
+      assert_nil(err)
+    end)
+
+    it("accepts @symbol names", function()
+      local ok, err = parser.validate_mark_name("@parseConfig")
+      assert_eq(ok, true)
+      assert_nil(err)
+    end)
+
+    it("accepts C++ namespace symbols", function()
+      local ok, err = parser.validate_mark_name("@std::chrono::now")
+      assert_eq(ok, true)
+      assert_nil(err)
+    end)
+
+    it("rejects empty string", function()
+      local ok, err = parser.validate_mark_name("")
+      assert_eq(ok, false)
+      assert_eq(err, "Name cannot be empty")
+    end)
+
+    it("rejects nil", function()
+      local ok, err = parser.validate_mark_name(nil)
+      assert_eq(ok, false)
+      assert_eq(err, "Name cannot be empty")
+    end)
+
+    it("rejects names containing colon-space", function()
+      local ok, err = parser.validate_mark_name("bad: name")
+      assert_eq(ok, false)
+      assert_eq(err, "Name cannot contain ': '")
+    end)
+  end)
+
+  describe("compute_line_adjustments", function()
+    it("shifts marks down on insertion", function()
+      -- Insert 2 lines at line 3 (0-based: first=2, last=2, new_last=4)
+      local result = parser.compute_line_adjustments({ 1, 3, 5, 10 }, 2, 2, 4)
+      -- Mark at line 1: before change, no shift
+      assert_nil(result[1])
+      -- Mark at line 3: > last_line(2)? 3 > 2 yes → 3+2=5
+      assert_eq(result[3], 5)
+      -- Mark at line 5: > 2 → 5+2=7
+      assert_eq(result[5], 7)
+      -- Mark at line 10: > 2 → 10+2=12
+      assert_eq(result[10], 12)
+    end)
+
+    it("shifts marks up on deletion", function()
+      -- Delete 2 lines starting at line 3 (0-based: first=2, last=4, new_last=2)
+      local result = parser.compute_line_adjustments({ 1, 3, 4, 5, 10 }, 2, 4, 2)
+      -- Mark at 1: before change, no shift
+      assert_nil(result[1])
+      -- Mark at 3: in deleted range (3 > 2 and 3 <= 4) → first_line+1 = 3
+      assert_eq(result[3], 3)
+      -- Mark at 4: in deleted range (4 > 2 and 4 <= 4) → 3
+      assert_eq(result[4], 3)
+      -- Mark at 5: after change (5 > 4) → 5+(-2)=3
+      assert_eq(result[5], 3)
+      -- Mark at 10: after change → 10-2=8
+      assert_eq(result[10], 8)
+    end)
+
+    it("returns empty when zero delta", function()
+      local result = parser.compute_line_adjustments({ 1, 5, 10 }, 3, 5, 5)
+      assert_eq(next(result), nil)
+    end)
+
+    it("handles single line insertion", function()
+      -- Insert 1 line at line 1 (0-based: first=0, last=0, new_last=1)
+      local result = parser.compute_line_adjustments({ 1, 2, 3 }, 0, 0, 1)
+      -- Mark at 1: > last_line(0) → 1+1=2
+      assert_eq(result[1], 2)
+      assert_eq(result[2], 3)
+      assert_eq(result[3], 4)
+    end)
+
+    it("moves marks in deleted range to start", function()
+      -- Delete lines 2-5 (0-based: first=1, last=5, new_last=1), delta=-4
+      local result = parser.compute_line_adjustments({ 2, 3, 4, 5 }, 1, 5, 1)
+      -- All marks in range [2,5] (> first_line(1) and <= last_line(5))
+      assert_eq(result[2], 2)
+      assert_eq(result[3], 2)
+      assert_eq(result[4], 2)
+      assert_eq(result[5], 2)
+    end)
+
+    it("handles empty mark list", function()
+      local result = parser.compute_line_adjustments({}, 0, 0, 5)
+      assert_eq(next(result), nil)
+    end)
+
+    it("mark exactly at change boundary is not shifted on insertion", function()
+      -- Insert at 0-based line 5 (first=5, last=5, new_last=6), delta=1
+      -- Mark at 1-based line 5: 5 > 5? No, not shifted
+      local result = parser.compute_line_adjustments({ 5 }, 5, 5, 6)
+      assert_nil(result[5])
+    end)
+  end)
+
+  describe("rewrite_line_number", function()
+    it("rewrites anonymous mark line number", function()
+      assert_eq(parser.rewrite_line_number("src/file.ts:10", 42), "src/file.ts:42")
+    end)
+
+    it("rewrites named mark line number", function()
+      assert_eq(parser.rewrite_line_number("mymark: src/file.ts:10", 42), "mymark: src/file.ts:42")
+    end)
+
+    it("rewrites C++ namespace symbol mark", function()
+      assert_eq(
+        parser.rewrite_line_number("@std::chrono::system_clock: src/time.cpp:5", 100),
+        "@std::chrono::system_clock: src/time.cpp:100"
+      )
+    end)
+
+    it("handles trailing whitespace", function()
+      assert_eq(parser.rewrite_line_number("src/file.ts:10  ", 42), "src/file.ts:42")
+    end)
+  end)
+
   describe("edge cases", function()
     it("handles whitespace around separators", function()
       local content = "  mymark:   src/file.ts:10  "

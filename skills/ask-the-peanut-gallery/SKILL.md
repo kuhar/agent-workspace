@@ -82,3 +82,8 @@ files by the script. Users should add project-specific shell commands (e.g.
 - If some models fail, still return results from the ones that succeeded and
   note which failed.
 - If cursor-agent-multi.sh itself fails (e.g., missing cli.json), report the error.
+- **Always include this line in every prompt sent to agents:**
+  "You are running non-interactively. No human will see your questions or
+  reply. Never ask for clarification. Make reasonable assumptions and state
+  them. If a tool call fails, try alternative invocations before giving up.
+  Provide a complete answer no matter what."

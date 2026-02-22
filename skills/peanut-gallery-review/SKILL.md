@@ -90,6 +90,12 @@ Read all Round 1 reviews and process them:
    Wait for the user to review. If they disagree with any decision, adjust
    before proceeding to Round 2.
 
+4. **Ask the user whether to commit the fixes.** Committing creates a clean
+   history that Round 2 agents can diff against: base -> original change ->
+   review fixes. This lets them see exactly what was changed in response to
+   Round 1 feedback vs the original code. If the user declines, proceed
+   anyway — Round 2 will just work off the unstaged changes.
+
 ### Step 4 — Round 2: Rebuttal review
 
 Run `cursor-agent-multi.sh` again with `--task review-round2`:
@@ -103,8 +109,11 @@ Run `cursor-agent-multi.sh` again with `--task review-round2`:
 
 The prompt MUST include all of the following (clearly separated with headers):
 - **Git commands to obtain the original diff** (same as Round 1)
+- **Git commands to obtain the review-fix diff** (if fixes were committed,
+  provide the SHA range so agents can diff base->fix separately from the
+  original change)
 - **All raw Round 1 reviews** (verbatim content from each model's output.md)
-- **Changes applied** (list from Step 3, or a new diff if substantial)
+- **Changes applied** (list from Step 3)
 - **Rebuttals** for disregarded suggestions (from Step 3)
 - **Instruction**: "You are reviewing the triage of a code review. Given the
   original reviews, the fixes applied, and the rebuttals for dismissed
@@ -147,3 +156,8 @@ Present the final summary:
   consider summarizing or splitting the review.
 - The user can pass `--models` or `--timeout` flags; forward them to both
   `cursor-agent-multi.sh` invocations.
+- **Always include this line in every prompt sent to agents:**
+  "You are running non-interactively. No human will see your questions or
+  reply. Never ask for clarification. Make reasonable assumptions and state
+  them. If a tool call fails, try alternative invocations before giving up.
+  Provide a complete answer no matter what."

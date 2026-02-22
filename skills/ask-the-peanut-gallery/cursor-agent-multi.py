@@ -228,8 +228,11 @@ def main():
     # Wait for agents in completion order
     remaining = list(processes)
     failures = 0
+    last_status = time.monotonic()
+    STATUS_INTERVAL = 30
 
     while remaining:
+        finished = False
         for i, (name, model, proc, log_file, t0) in enumerate(remaining):
             rc = proc.poll()
             if rc is not None:
@@ -258,9 +261,18 @@ def main():
                         print(f"       ... ({len(lines) - 10} more lines)")
                     print()
 
+                finished = True
                 break  # restart iteration after modifying list
-        else:
-            # No process finished this iteration; sleep briefly
+
+        if not finished:
+            # Print periodic status update
+            now = time.monotonic()
+            if now - last_status >= STATUS_INTERVAL:
+                still_running = ", ".join(
+                    f"{n} [{int(now - t)}s]" for n, _m, _p, _l, t in remaining
+                )
+                print(f"[waiting] {len(remaining)} running: {still_running}")
+                last_status = now
             time.sleep(0.5)
 
     print()

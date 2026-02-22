@@ -130,11 +130,12 @@ function M.add_mark(opts)
     return
   end
 
-  -- Auto-name with @symbol when no explicit name given
+  -- Auto-name with @symbol when no explicit name given.
+  -- Uses a short timeout (200ms) to avoid blocking the UI when LSP is slow.
   local name = opts.name
   if not name then
     local lsp = require("mark-and-recall.lsp")
-    local symbol = lsp.get_symbol_at_cursor(bufnr, line)
+    local symbol = lsp.get_symbol_at_cursor(bufnr, line, 200)
     if symbol then
       name = "@" .. symbol
     end
@@ -363,11 +364,12 @@ function M.select_marks_file()
   local md_files = vim.fs.find(function(name, path)
     return name:match("%.md$") and not path:match("node_modules")
   end, { path = cwd, limit = 20, type = "file" })
-  -- Make relative, skip current
+  -- Make relative, skip current (normalize both sides for absolute path configs)
+  local current_rel = vim.fn.fnamemodify(current, ":.")
   local candidates = {}
   for _, f in ipairs(md_files) do
     local rel = vim.fn.fnamemodify(f, ":.")
-    if rel ~= current then
+    if rel ~= current_rel then
       candidates[#candidates + 1] = rel
     end
   end

@@ -14,13 +14,15 @@ end
 
 --- Get all document symbols for a buffer (flat list).
 --- @param bufnr number
+--- @param timeout_ms? number timeout in ms (default 2000)
 --- @return table[]|nil flat list of symbols, or nil on failure
-function M.get_document_symbols(bufnr)
+function M.get_document_symbols(bufnr, timeout_ms)
+  timeout_ms = timeout_ms or 2000
   local params = { textDocument = vim.lsp.util.make_text_document_params(bufnr) }
   local clients = vim.lsp.get_clients({ bufnr = bufnr, method = "textDocument/documentSymbol" })
   if #clients == 0 then return nil end
 
-  local results = vim.lsp.buf_request_sync(bufnr, "textDocument/documentSymbol", params, 2000)
+  local results = vim.lsp.buf_request_sync(bufnr, "textDocument/documentSymbol", params, timeout_ms)
   if not results then return nil end
 
   local flat = {}
@@ -36,9 +38,10 @@ end
 --- When multiple symbols contain the cursor, returns the smallest (innermost).
 --- @param bufnr number
 --- @param cursor_line number 1-based line number
+--- @param timeout_ms? number timeout in ms (default 2000)
 --- @return string|nil symbol name
-function M.get_symbol_at_cursor(bufnr, cursor_line)
-  local symbols = M.get_document_symbols(bufnr)
+function M.get_symbol_at_cursor(bufnr, cursor_line, timeout_ms)
+  local symbols = M.get_document_symbols(bufnr, timeout_ms)
   if not symbols then return nil end
 
   local best = nil

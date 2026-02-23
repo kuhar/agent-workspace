@@ -4,6 +4,8 @@
 
 Fortunately, Recall works perfectly fine in VS Code, thanks to this extension. Inspired by the Mark and Recall spells from Morrowind, it lets you define marks in a `marks.md` file and teleport to them instantly.
 
+Also available as a [Neovim plugin](https://github.com/kuhar/mark-and-recall.nvim). Both share the same `marks.md` format — you can use the same marks file across editors.
+
 Unlike native vim marks which are ephemeral and stored in binary format, these marks are:
 
 - **Persistent**: Saved in a plain text `marks.md` file that survives editor restarts

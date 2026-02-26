@@ -33,6 +33,15 @@ files by the script.
 
 ## Steps
 
+### Step 0 — Pick a fresh review directory
+
+Create a timestamped directory under `<REVIEW_DIR>/` for this
+review session, e.g. `review-20260226-143052/`. All intermediate files
+(Round 1 outputs, triage summary, Round 2 outputs) go under this directory.
+This keeps consecutive reviews from clobbering each other.
+
+Throughout the remaining steps, `<REVIEW_DIR>` refers to this directory.
+
 ### Step 1 — Determine what to review
 
 Figure out what the "active change" is — staged changes, uncommitted work,
@@ -49,9 +58,15 @@ agents in Steps 2 and 4 so they can inspect the changes themselves.
 Select a diverse panel of 4 reviewer personas from the `personas/` subdirectory
 of this skill.
 
-1. **Read all `*.md` files** in the `personas/` subdirectory. Parse the YAML
-   frontmatter from each file to extract `name` and `models` (list of compatible
-   model IDs).
+**IMPORTANT — do NOT read the full persona files.** They are large and will
+bloat your context window. The full content is only needed by
+`cursor-agent-multi.py` (which injects it via `{{PERSONA}}`). For selection
+you only need the YAML frontmatter. Use `head -10` on each file to read just
+the frontmatter.
+
+1. For each `*.md` file in the `personas/` subdirectory, run `head -10 <file>`
+   and parse the YAML frontmatter to extract `name` and `models` (list of
+   compatible model IDs).
 
 2. **Classify personas**: A persona is an "expert" if their `models` list
    includes `opus` or `gpt-5.3-codex-high` variants (e.g., `opus-4.6-thinking`,
@@ -74,10 +89,10 @@ of this skill.
    `name`, `model`, and `PERSONA` (the persona filename). Example:
    ```json
    [
-     {"name": "merlin", "model": "opus-4.6-thinking", "PERSONA": "merlin.md"},
-     {"name": "petra",  "model": "composer-1.5",      "PERSONA": "petra.md"},
-     {"name": "vera",   "model": "gemini-3-flash",    "PERSONA": "vera.md"},
-     {"name": "soren",  "model": "sonnet-4.6-thinking","PERSONA": "soren.md"}
+     {"name": "merlin", "model": "opus-4.6-thinking",   "PERSONA": "merlin.md"},
+     {"name": "petra",  "model": "composer-1.5",        "PERSONA": "petra.md"},
+     {"name": "vera",   "model": "gemini-3-flash",      "PERSONA": "vera.md"},
+     {"name": "soren",  "model": "sonnet-4.6-thinking", "PERSONA": "soren.md"}
    ]
    ```
 
@@ -93,14 +108,15 @@ that doesn't compile.
 
 ### Step 2 — Round 1: Initial review
 
-Run `cursor-agent-multi.py` with `--task review-round1`, passing the `--agents`
-JSON array built in Step 1.5 and `--include-dir` pointing to the `personas/`
-subdirectory:
+Run `cursor-agent-multi.py` with `--task review-round1`, passing
+`--output-dir <REVIEW_DIR>`, the `--agents` JSON array built in Step 1.5,
+and `--include-dir` pointing to the `personas/` subdirectory:
 
 ```bash
 /path/to/cursor-agent-multi.py \
   --workspace <WORKSPACE> \
   --task review-round1 \
+  --output-dir <REVIEW_DIR> \
   --include-dir /path/to/personas \
   --agents '<AGENTS_JSON>' \
   "=== REVIEWER PERSONA ===
@@ -153,7 +169,22 @@ Read all Round 1 reviews and process them:
    Wait for the user to review. If they disagree with any decision, adjust
    before proceeding to Round 2.
 
-4. **Ask the user whether to commit the fixes.** Committing creates a clean
+4. **Write the triage summary to disk** so Round 2 agents can read it
+   (instead of bloating the prompt). Write the file to
+   `<REVIEW_DIR>/triage.md` with this structure:
+
+   ```markdown
+   # Round 1 Triage
+
+   ## Changes Applied
+   - (same bullet list you showed the user)
+
+   ## Suggestions Disregarded
+   - **<Reviewer> — <short description>**: <your rebuttal>
+   - (one entry per disregarded suggestion)
+   ```
+
+5. **Ask the user whether to commit the fixes.** Committing creates a clean
    history that Round 2 agents can diff against: base -> original change ->
    review fixes. This lets them see exactly what was changed in response to
    Round 1 feedback vs the original code. If the user declines, proceed
@@ -162,12 +193,13 @@ Read all Round 1 reviews and process them:
 ### Step 4 — Round 2: Rebuttal review
 
 Run `cursor-agent-multi.py` again with `--task review-round2`, using the same
-`--agents` JSON and `--include-dir` from Step 2:
+`--output-dir <REVIEW_DIR>`, `--agents` JSON, and `--include-dir` from Step 2:
 
 ```bash
 /path/to/cursor-agent-multi.py \
   --workspace <WORKSPACE> \
   --task review-round2 \
+  --output-dir <REVIEW_DIR> \
   --include-dir /path/to/personas \
   --agents '<AGENTS_JSON>' \
   "=== REVIEWER PERSONA ===
@@ -181,19 +213,26 @@ review style, priorities, and feedback patterns throughout your review.
 <REBUTTAL_REVIEW_INSTRUCTIONS>"
 ```
 
-The prompt MUST include all of the following (clearly separated with headers):
+The prompt MUST include:
 - **Git commands to obtain the original diff** (same as Round 1)
 - **Git commands to obtain the review-fix diff** (if fixes were committed,
   provide the SHA range so agents can diff base->fix separately from the
   original change)
-- **All raw Round 1 reviews** (verbatim content from each model's output.md)
-- **Changes applied** (list from Step 3)
-- **Rebuttals** for disregarded suggestions (from Step 3)
-- **Instruction**: "You are reviewing the triage of a code review. Given the
-  original reviews, the fixes applied, and the rebuttals for dismissed
+- **File paths** pointing agents to the Round 1 reviews and triage summary
+  (instead of pasting their contents inline — this keeps the prompt short
+  and avoids timeouts):
+  - Round 1 reviews: `<REVIEW_DIR>/review-round1/<name>/output.md`
+    (one per reviewer — list all of them)
+  - Triage summary: `<REVIEW_DIR>/triage.md`
+    (written in Step 3, item 4)
+- **Instruction**: "Read all of the files listed above. Then assess: given
+  the original reviews, the fixes applied, and the rebuttals for dismissed
   suggestions — do you agree with the dismissals? Are there any remaining
   issues? For each rebuttal you disagree with, explain why the original
   suggestion should be reconsidered."
+
+Do NOT paste Round 1 reviews or the triage summary into the prompt — the
+agents have read access and will read the files themselves.
 
 After the script finishes, **read every `output.md`** file.
 
@@ -226,8 +265,10 @@ Present the final summary:
 - If some models fail, still proceed with results from the ones that succeeded
   and note which failed.
 - If `cursor-agent-multi.py` fails (e.g., missing cli.json), report the error.
-- Keep prompts to the agents concise but complete. If the diff is very large,
-  consider summarizing or splitting the review.
+- Keep prompts to the agents concise. Never paste large content (reviews,
+  diffs, triage summaries) inline — write it to files under
+  `<REVIEW_DIR>/` and point agents to the file paths instead.
+  If the diff is very large, consider summarizing or splitting the review.
 - The user can pass `--agents` or `--timeout` flags; forward them to both
   `cursor-agent-multi.py` invocations.
 - The user can request specific personas by name (e.g., "use Merlin and Irene").

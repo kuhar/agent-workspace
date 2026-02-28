@@ -35,7 +35,6 @@ Create a `marks.md` file in your workspace root:
 # Marks (see mark-and-recall skill)
 # Examples: name: path:line | @symbol: path:line | path:line
 
-tester: agents/llvm-tester.md:11
 @parseConfig: src/utils.ts:42
 src/helpers.ts:18
 ```
@@ -48,7 +47,7 @@ src/helpers.ts:18
 
 ## AI Agent Integration
 
-Run `Mark and Recall: Install AI Agent Skills` to install the mark-and-recall skill and codebase-cartographer agent for your AI coding tools. The command auto-detects Claude Code, Cursor, and Codex by looking for their config directories in your home folder, and lets you choose between project-level and global installation.
+Run `Mark and Recall: Install AI Agent Skills` to install the mark-and-recall skill for your AI coding tools. The command auto-detects Claude Code, Cursor, and Codex by looking for their config directories in your home folder, and lets you choose between project-level and global installation.
 
 ## Commands
 
@@ -69,7 +68,7 @@ Run `Mark and Recall: Install AI Agent Skills` to install the mark-and-recall sk
 | `gotoNextMarkGlobal` | Jump to next mark globally by index (requires being at a mark or having navigated to one) |
 | `updateSymbolMarks` | Update @symbol mark line numbers in current file |
 | `selectMarksFile` | Pick a different marks file (browse, enter path, or select from existing) |
-| `installAgentSkills` | Install mark-and-recall skill and codebase-cartographer agent for detected AI coding tools |
+| `installAgentSkills` | Install mark-and-recall skill for detected AI coding tools |
 
 ## Settings
 

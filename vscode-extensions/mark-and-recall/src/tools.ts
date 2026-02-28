@@ -1,25 +1,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-export type InstallableKind = 'skill' | 'agent';
-
 export interface Installable {
     name: string;
-    kind: InstallableKind;
     resourceFile: string;
     extraFiles?: string[];
 }
 
 export const INSTALLABLES: Installable[] = [
-    { name: 'mark-and-recall', kind: 'skill', resourceFile: 'mark-and-recall.md', extraFiles: ['validate_marks.py'] },
-    { name: 'codebase-cartographer', kind: 'agent', resourceFile: 'codebase-cartographer.md' },
+    { name: 'mark-and-recall', resourceFile: 'mark-and-recall.md', extraFiles: ['validate_marks.py'] },
 ];
 
-interface DirEntry { project: string; global: string; layout: 'flat' | 'subdirectory' }
+interface DirEntry { project: string; global: string }
 
 export interface ToolDirConfig {
     skill: DirEntry;
-    agent?: DirEntry;
 }
 
 export interface ToolConfig {
@@ -33,23 +28,21 @@ export const AI_TOOLS: ToolConfig[] = [
         name: 'Claude Code',
         detection: '.claude',
         dirs: {
-            skill: { project: '.claude/skills', global: '.claude/skills', layout: 'subdirectory' },
-            agent: { project: '.claude/agents', global: '.claude/agents', layout: 'flat' },
+            skill: { project: '.claude/skills', global: '.claude/skills' },
         },
     },
     {
         name: 'Cursor',
         detection: '.cursor',
         dirs: {
-            skill: { project: '.cursor/skills', global: '.cursor/skills', layout: 'subdirectory' },
-            agent: { project: '.cursor/agents', global: '.cursor/agents', layout: 'flat' },
+            skill: { project: '.cursor/skills', global: '.cursor/skills' },
         },
     },
     {
         name: 'Codex',
         detection: '.codex',
         dirs: {
-            skill: { project: '.agents/skills', global: '.agents/skills', layout: 'subdirectory' },
+            skill: { project: '.agents/skills', global: '.agents/skills' },
         },
     },
 ];
@@ -66,15 +59,8 @@ export function getTargetPath(
     scope: 'project' | 'global',
     baseDir: string,
     installable: Installable
-): string | undefined {
-    const dirConfig = tool.dirs[installable.kind];
-    if (!dirConfig) {
-        return undefined;
-    }
+): string {
+    const dirConfig = tool.dirs.skill;
     const dir = scope === 'project' ? dirConfig.project : dirConfig.global;
-    const base = path.join(baseDir, dir);
-    if (dirConfig.layout === 'subdirectory') {
-        return path.join(base, installable.name, 'SKILL.md');
-    }
-    return path.join(base, `${installable.name}.md`);
+    return path.join(baseDir, dir, installable.name, 'SKILL.md');
 }

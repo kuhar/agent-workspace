@@ -2,10 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { detectTools, getTargetPath, AI_TOOLS, INSTALLABLES, Installable } from './tools';
+import { detectTools, getTargetPath, AI_TOOLS, INSTALLABLES } from './tools';
 
-const skillInstallable: Installable = INSTALLABLES.find((i) => i.kind === 'skill')!;
-const agentInstallable: Installable = INSTALLABLES.find((i) => i.kind === 'agent')!;
+const skillInstallable = INSTALLABLES[0];
 
 describe('detectTools', () => {
     let tmpDir: string;
@@ -85,16 +84,9 @@ describe('getTargetPath', () => {
                 .toBe('/proj/.claude/skills/mark-and-recall/SKILL.md');
         });
 
-        it('installs agents as flat .md files', () => {
-            expect(getTargetPath(claude, 'project', '/proj', agentInstallable))
-                .toBe('/proj/.claude/agents/codebase-cartographer.md');
-        });
-
         it('uses same structure for global scope', () => {
             expect(getTargetPath(claude, 'global', '/home/user', skillInstallable))
                 .toBe('/home/user/.claude/skills/mark-and-recall/SKILL.md');
-            expect(getTargetPath(claude, 'global', '/home/user', agentInstallable))
-                .toBe('/home/user/.claude/agents/codebase-cartographer.md');
         });
     });
 
@@ -104,16 +96,9 @@ describe('getTargetPath', () => {
                 .toBe('/proj/.cursor/skills/mark-and-recall/SKILL.md');
         });
 
-        it('installs agents as flat .md files', () => {
-            expect(getTargetPath(cursor, 'project', '/proj', agentInstallable))
-                .toBe('/proj/.cursor/agents/codebase-cartographer.md');
-        });
-
         it('uses same structure for global scope', () => {
             expect(getTargetPath(cursor, 'global', '/home/user', skillInstallable))
                 .toBe('/home/user/.cursor/skills/mark-and-recall/SKILL.md');
-            expect(getTargetPath(cursor, 'global', '/home/user', agentInstallable))
-                .toBe('/home/user/.cursor/agents/codebase-cartographer.md');
         });
     });
 
@@ -123,16 +108,9 @@ describe('getTargetPath', () => {
                 .toBe('/proj/.agents/skills/mark-and-recall/SKILL.md');
         });
 
-        it('returns undefined for agents (not supported)', () => {
-            expect(getTargetPath(codex, 'project', '/proj', agentInstallable))
-                .toBeUndefined();
-        });
-
         it('uses same structure for global scope', () => {
             expect(getTargetPath(codex, 'global', '/home/user', skillInstallable))
                 .toBe('/home/user/.agents/skills/mark-and-recall/SKILL.md');
-            expect(getTargetPath(codex, 'global', '/home/user', agentInstallable))
-                .toBeUndefined();
         });
     });
 });

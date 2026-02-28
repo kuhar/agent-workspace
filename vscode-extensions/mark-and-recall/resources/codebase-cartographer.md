@@ -1,1 +1,0 @@
-../../../agents/codebase-cartographer.md

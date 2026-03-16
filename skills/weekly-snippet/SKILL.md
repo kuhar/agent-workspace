@@ -19,17 +19,21 @@ Generate a concise weekly activity summary grouped by project and task, using th
 
 ## Output Format
 
-Organize output by **project**, then by **task/theme** within each project. Order tasks within each project by impact (most impactful first).
+Organize output by **project**, then by **task/theme** within each project. Order tasks within each project by impact (most impactful first), then chronologically within the same impact tier.
 
 ### Structure
 
 ```
+## This week:
+
 ### <Project Name (e.g., IREE, LLVM/MLIR)>
 
-* **<Task/theme summary>**
+* **<Task/theme summary>** <optional-issue-url>
   - <Executive summary if the task has notable quantitative outcomes>
   - <One-line description focusing on motivation/outcome>: <url>
   - ...
+
+* **<Short single-item task>:** <url>
 
 ### <Next Project>
 ...
@@ -37,6 +41,11 @@ Organize output by **project**, then by **task/theme** within each project. Orde
 ---
 
 **Code reviews:** <count> PRs reviewed across <N> repos (<repo list>)
+
+**GitHub activity:** https://github.com/kuhar?tab=overview&from=<start-date>&to=<end-date>
+
+## Next week:
+
 ```
 
 ### Rules
@@ -44,16 +53,21 @@ Organize output by **project**, then by **task/theme** within each project. Orde
 - **Group related PRs** under a shared task heading (e.g., multiple PRs fixing the same bug across dialects belong together).
 - **Cross-project tasks** should live where they logically belong. For example, cherry-picking an LLVM fix into IREE stays under the LLVM heading.
 - **One-line descriptions** should focus on the motivation or outcome, not just restate the PR title. Use past tense (e.g., "Auto-enabled abi3 for CPython 3.12+" not "Auto-enable abi3").
-- **Code reviews** go at the bottom as a single aggregate line with total count and repo list. Do not list individual reviews under each project.
+- **Single-item tasks** that need no sub-bullets should be kept on one line: `* **Summary:** <url>`. Do not create a sub-bullet when there is only one item and no executive summary.
+- **Ordering within a task** should be by impact first, then chronologically (earliest first) within the same impact level.
+- **Code reviews** go at the bottom as a single aggregate line. Use `total_review_count` from the JSON (includes private repos) for the total, and list the repos from the `reviews` array. Do not list individual reviews under each project.
 - **Issues** should be inlined under the relevant task if one exists, not in a separate section.
 - **Direct commits** (fork branches without PRs) should be mentioned only if they represent work not already covered by a listed PR.
 - **Skip projects** where nothing interesting happened beyond reviews.
 - **Executive summaries** are warranted when a task has notable quantitative results (e.g., size reduction, performance improvement). Pull data from linked issues/PRs if needed. Keep to one line.
 - **Open PRs** needing review should be marked with `(needs review)`.
+- **GitHub activity link** should always be appended at the very end, using the `from` and `to` dates matching the snippet's time range (YYYY-MM-DD format).
 
 ### Example
 
 ```
+## This week:
+
 ### IREE
 
 * **Reduce Python release size via Stable ABI (abi3) enablement** https://github.com/iree-org/iree/issues/23646
@@ -62,8 +76,7 @@ Organize output by **project**, then by **task/theme** within each project. Orde
   - Fixed release validation installing wrong package versions: https://github.com/iree-org/iree/pull/23634
   - Stopped building redundant cp313 wheels on MacOS and Windows: https://github.com/iree-org/iree/pull/23640
 
-* **Add `iree_codegen.constraints` op for autotuner**
-  - Introduced infrastructure to express tuning constraints in codegen: https://github.com/iree-org/iree/pull/23687 (needs review)
+* **Add `iree_codegen.constraints` op for autotuner:** https://github.com/iree-org/iree/pull/23687 (needs review)
 
 ### LLVM/MLIR
 
@@ -74,4 +87,9 @@ Organize output by **project**, then by **task/theme** within each project. Orde
 ---
 
 **Code reviews:** 21 PRs reviewed across 5 repos (llvm/llvm-project, iree-org/iree, llvm/mlir-www, nod-ai/amd-shark-ai)
+
+**GitHub activity:** https://github.com/kuhar?tab=overview&from=2026-03-03&to=2026-03-09
+
+## Next week:
+
 ```

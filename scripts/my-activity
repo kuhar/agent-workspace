@@ -103,6 +103,7 @@ fi
 
 since=$(date -u -d "$days days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
      || date -u -v-"${days}d" +%Y-%m-%dT%H:%M:%SZ)
+today=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 if [[ -n "$user" ]]; then
     me="$user"
@@ -226,6 +227,22 @@ fetch_direct_commits() {
     echo "$results"
 }
 
+# ---------- Total review count (includes private repos) ----------
+
+fetch_total_review_count() {
+    gh api graphql -f query="
+        query {
+          user(login: \"$me\") {
+            contributionsCollection(from: \"$since\", to: \"$today\") {
+              pullRequestReviewContributions(first: 1) {
+                totalCount
+              }
+            }
+          }
+        }" --jq '.data.user.contributionsCollection.pullRequestReviewContributions.totalCount' \
+        2>/dev/null || echo "null"
+}
+
 # ---------- Enrichment functions ----------
 
 enrich_prs() {
@@ -308,6 +325,9 @@ output_as_json() {
     $show_issues && issues=$(fetch_issues)
     $show_direct_commits && direct_commits=$(fetch_direct_commits)
 
+    local total_review_count
+    $show_reviews && total_review_count=$(fetch_total_review_count) || total_review_count="null"
+
     if $detailed; then
         check_rate_limit
         prs=$(maybe_enrich enrich_prs "$prs")
@@ -323,11 +343,13 @@ output_as_json() {
         --argjson reviews "$reviews" \
         --argjson issues "$issues" \
         --argjson direct_commits "$direct_commits" \
+        --argjson total_review_count "$total_review_count" \
         '{
             user: $user,
             period: { days: $days, since: $since },
             pull_requests: $prs,
             reviews: $reviews,
+            total_review_count: $total_review_count,
             issues: $issues,
             direct_commits: $direct_commits
         }'

@@ -1,0 +1,17 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["mcp>=1.0"]
+# ///
+"""Peanut-review MCP server — zero-install via uv run."""
+import os
+import sys
+
+# Add the package to sys.path so peanut_review is importable
+script_dir = os.path.dirname(os.path.abspath(__file__))
+package_dir = os.path.dirname(script_dir)
+sys.path.insert(0, package_dir)
+
+from peanut_review.mcp_server import main
+
+main()

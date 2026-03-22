@@ -1,0 +1,7 @@
+#!/bin/bash
+# Run peanut-review directly — no install needed (zero external deps).
+# Sets PYTHONPATH so Python finds the peanut_review package.
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
+export PYTHONPATH="${PACKAGE_DIR}${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m peanut_review "$@"

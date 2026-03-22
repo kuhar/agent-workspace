@@ -164,6 +164,7 @@ timeout "$timeout_secs" cursor-agent --print \
     --model "$model" \
     --force \
     --trust \
+    --approve-mcps \
     --output-format text \
     --workspace "$workspace" \
     "$prompt" \

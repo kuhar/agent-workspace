@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peanut-review"
+version = "0.1.0"
+description = "Structured multi-agent code review CLI"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+peanut-review = "peanut_review.__main__:main"

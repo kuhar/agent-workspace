@@ -6,11 +6,13 @@ from pathlib import Path
 from peanut_review.models import Comment
 from peanut_review.store import (
     append_comment,
+    delete_comment,
     filter_comments,
     mark_stale,
     read_agent_comments,
     read_all_comments,
     resolve_comment,
+    undelete_comment,
 )
 
 
@@ -140,3 +142,66 @@ def test_comment_round_trip_json():
 def test_empty_agent_file():
     sd = _make_session()
     assert read_agent_comments(sd, "nobody") == []
+
+
+def test_delete_marks_and_sets_metadata():
+    sd = _make_session()
+    c = Comment(author="felix", file="a.py", line=1, body="bad take", severity="nit")
+    append_comment(sd, c)
+    assert delete_comment(sd, c.id, deleted_by="jakub") is True
+
+    stored = read_agent_comments(sd, "felix")[0]
+    assert stored.deleted is True
+    assert stored.deleted_by == "jakub"
+    assert stored.deleted_at is not None
+
+
+def test_delete_missing_comment_returns_false():
+    sd = _make_session()
+    append_comment(sd, Comment(author="felix", file="a.py", line=1, body="x"))
+    assert delete_comment(sd, "c_does_not_exist") is False
+
+
+def test_delete_is_idempotent_preserving_original_metadata():
+    sd = _make_session()
+    c = Comment(author="felix", file="a.py", line=1, body="x")
+    append_comment(sd, c)
+    delete_comment(sd, c.id, deleted_by="first")
+    first = read_agent_comments(sd, "felix")[0]
+    delete_comment(sd, c.id, deleted_by="second")
+    second = read_agent_comments(sd, "felix")[0]
+    assert second.deleted_by == first.deleted_by == "first"
+    assert second.deleted_at == first.deleted_at
+
+
+def test_undelete_clears_flags():
+    sd = _make_session()
+    c = Comment(author="felix", file="a.py", line=1, body="x")
+    append_comment(sd, c)
+    delete_comment(sd, c.id, deleted_by="jakub")
+    assert undelete_comment(sd, c.id) is True
+    stored = read_agent_comments(sd, "felix")[0]
+    assert stored.deleted is False
+    assert stored.deleted_by is None
+    assert stored.deleted_at is None
+
+
+def test_filter_comments_hides_deleted_by_default():
+    live = Comment(author="felix", file="a.py", line=1, body="live")
+    gone = Comment(author="felix", file="a.py", line=2, body="gone", deleted=True)
+    assert filter_comments([live, gone]) == [live]
+    # include_deleted=True brings them back
+    assert filter_comments([live, gone], include_deleted=True) == [live, gone]
+
+
+def test_mark_stale_skips_deleted():
+    sd = _make_session()
+    keep = Comment(author="felix", file="a.py", line=1, body="keep")
+    tomb = Comment(author="felix", file="a.py", line=2, body="tomb", deleted=True)
+    append_comment(sd, keep)
+    append_comment(sd, tomb)
+    n = mark_stale(sd)
+    assert n == 1  # only the live one was marked
+    all_cs = {c.id: c for c in read_agent_comments(sd, "felix")}
+    assert all_cs[keep.id].stale is True
+    assert all_cs[tomb.id].stale is False

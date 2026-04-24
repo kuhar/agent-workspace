@@ -172,6 +172,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
         severity=args.severity,
         round_num=args.round,
         unresolved=args.unresolved,
+        include_deleted=args.include_deleted,
     )
 
     if args.format == "json":
@@ -185,10 +186,16 @@ def cmd_comments(args: argparse.Namespace) -> int:
         print(hdr)
         print("-" * len(hdr))
         for c in comments:
-            stale = "*" if c.stale else " "
-            resolved = "R" if c.resolved else stale
+            if c.deleted:
+                flag = "X"
+            elif c.resolved:
+                flag = "R"
+            elif c.stale:
+                flag = "*"
+            else:
+                flag = " "
             body = c.body[:60].replace("\n", " ")
-            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {c.file:<30} {c.line:>5} {c.round:>2}{resolved} {body}")
+            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {c.file:<30} {c.line:>5} {c.round:>2}{flag} {body}")
     return 0
 
 
@@ -198,6 +205,27 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     by = args.by or _get_author(args)
     if store.resolve_comment(session_dir, args.comment_id, resolved_by=by):
         print(f"Resolved {args.comment_id}")
+        return 0
+    print(f"Comment {args.comment_id} not found", file=sys.stderr)
+    return 1
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    """Soft-delete a comment. Hidden from default listings and from agents."""
+    session_dir = _get_session_dir(args)
+    by = args.by or _get_author(args)
+    if store.delete_comment(session_dir, args.comment_id, deleted_by=by):
+        print(f"Deleted {args.comment_id}")
+        return 0
+    print(f"Comment {args.comment_id} not found", file=sys.stderr)
+    return 1
+
+
+def cmd_undelete(args: argparse.Namespace) -> int:
+    """Restore a soft-deleted comment."""
+    session_dir = _get_session_dir(args)
+    if store.undelete_comment(session_dir, args.comment_id):
+        print(f"Undeleted {args.comment_id}")
         return 0
     print(f"Comment {args.comment_id} not found", file=sys.stderr)
     return 1
@@ -338,7 +366,7 @@ def cmd_verdict(args: argparse.Namespace) -> int:
     s = sess.load_session(session_dir)
 
     decision = "approve" if args.approve else "request-changes"
-    comments = store.read_all_comments(session_dir)
+    comments = [c for c in store.read_all_comments(session_dir) if not c.deleted]
 
     # Summary per agent
     agents_summary = []
@@ -423,14 +451,22 @@ def cmd_status(args: argparse.Namespace) -> int:
         pid = f" (pid {a.pid})" if a.pid else ""
         print(f"  {a.name:<12} {a.status:<10} {a.model}{pid}")
 
-    # Comment counts
-    comments = store.read_all_comments(session_dir)
-    if comments:
+    # Comment counts — deleted comments are hidden from the total but
+    # surfaced separately for transparency.
+    all_comments = store.read_all_comments(session_dir)
+    live = [c for c in all_comments if not c.deleted]
+    deleted = len(all_comments) - len(live)
+    if all_comments:
         print()
-        print(f"Comments: {len(comments)} total, "
-              f"{sum(1 for c in comments if c.severity == 'critical')} critical, "
-              f"{sum(1 for c in comments if c.resolved)} resolved, "
-              f"{sum(1 for c in comments if c.stale)} stale")
+        parts = [
+            f"{len(live)} total",
+            f"{sum(1 for c in live if c.severity == 'critical')} critical",
+            f"{sum(1 for c in live if c.resolved)} resolved",
+            f"{sum(1 for c in live if c.stale)} stale",
+        ]
+        if deleted:
+            parts.append(f"{deleted} deleted")
+        print("Comments: " + ", ".join(parts))
 
     # Signals
     signals_dir = Path(session_dir) / "signals"
@@ -572,6 +608,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--severity", help="Filter by severity")
     sp.add_argument("--round", type=int, help="Filter by round")
     sp.add_argument("--unresolved", action="store_true", help="Only unresolved")
+    sp.add_argument("--include-deleted", action="store_true",
+                    help="Include soft-deleted comments (hidden by default)")
     sp.add_argument("--format", default="table", choices=["json", "table"],
                     help="Output format (default: table)")
 
@@ -579,6 +617,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("resolve", help="Resolve a comment")
     sp.add_argument("comment_id", help="Comment ID to resolve")
     sp.add_argument("--by", help="Resolved by (default: git config user.name)")
+
+    # delete
+    sp = sub.add_parser("delete", help="Soft-delete a comment (hides it from default views)")
+    sp.add_argument("comment_id", help="Comment ID to delete")
+    sp.add_argument("--by", help="Deleted by (default: git config user.name)")
+
+    # undelete
+    sp = sub.add_parser("undelete", help="Restore a soft-deleted comment")
+    sp.add_argument("comment_id", help="Comment ID to restore")
 
     # signal
     sp = sub.add_parser("signal", help="Signal an event")
@@ -677,6 +724,8 @@ def main(argv: list[str] | None = None) -> int:
         "add-comment": cmd_add_comment,
         "comments": cmd_comments,
         "resolve": cmd_resolve,
+        "delete": cmd_delete,
+        "undelete": cmd_undelete,
         "signal": cmd_signal,
         "wait": cmd_wait,
         "wait-all": cmd_wait_all,

@@ -66,9 +66,17 @@ def filter_comments(
     severity: str | None = None,
     round_num: int | None = None,
     unresolved: bool = False,
+    include_deleted: bool = False,
 ) -> list[Comment]:
-    """Filter a list of comments by criteria."""
+    """Filter a list of comments by criteria.
+
+    Deleted comments are hidden by default — set `include_deleted=True` to
+    see them (auditing, undelete). Agents reading back comments must NOT pass
+    this flag, so humans can hide bad comments before round 2.
+    """
     result = comments
+    if not include_deleted:
+        result = [c for c in result if not c.deleted]
     if agent:
         result = [c for c in result if c.author == agent]
     if file:
@@ -106,6 +114,50 @@ def resolve_comment(
     return False
 
 
+def delete_comment(
+    session_dir: str | Path, comment_id: str, deleted_by: str | None = None,
+) -> bool:
+    """Soft-delete a comment (hide from default views). Returns True if found.
+
+    Idempotent: re-deleting keeps the original deleted_at/by.
+    """
+    cdir = _comments_dir(session_dir)
+    for f in cdir.glob("*.jsonl"):
+        comments = _read_jsonl(f)
+        found = False
+        for c in comments:
+            if c.id == comment_id:
+                if not c.deleted:
+                    c.deleted = True
+                    c.deleted_by = deleted_by
+                    c.deleted_at = _now_iso()
+                found = True
+                break
+        if found:
+            _write_jsonl(f, comments)
+            return True
+    return False
+
+
+def undelete_comment(session_dir: str | Path, comment_id: str) -> bool:
+    """Clear the soft-delete flags on a comment. Returns True if found."""
+    cdir = _comments_dir(session_dir)
+    for f in cdir.glob("*.jsonl"):
+        comments = _read_jsonl(f)
+        found = False
+        for c in comments:
+            if c.id == comment_id:
+                c.deleted = False
+                c.deleted_by = None
+                c.deleted_at = None
+                found = True
+                break
+        if found:
+            _write_jsonl(f, comments)
+            return True
+    return False
+
+
 def mark_stale(session_dir: str | Path) -> int:
     """Mark all unresolved comments as stale. Returns count marked."""
     cdir = _comments_dir(session_dir)
@@ -114,7 +166,7 @@ def mark_stale(session_dir: str | Path) -> int:
         comments = _read_jsonl(f)
         changed = False
         for c in comments:
-            if not c.resolved and not c.stale:
+            if not c.resolved and not c.stale and not c.deleted:
                 c.stale = True
                 changed = True
                 count += 1

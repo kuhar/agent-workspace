@@ -62,6 +62,12 @@ class Comment:
     resolved_at: str | None = None
     stale: bool = False
     head_sha: str | None = None
+    # Soft delete — hides the comment from agents and the UI by default, but
+    # the record is retained so the audit trail (and any `--include-deleted`
+    # view) can show that the comment existed.
+    deleted: bool = False
+    deleted_by: str | None = None
+    deleted_at: str | None = None
 
     def to_json(self) -> str:
         d = asdict(self)

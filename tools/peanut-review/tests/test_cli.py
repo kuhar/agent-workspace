@@ -398,6 +398,54 @@ def test_add_comment_body_file_missing():
     assert "could not read --body-file" in err.getvalue()
 
 
+def test_delete_hides_from_default_list_and_undelete_restores():
+    ws = _make_workspace({"foo.py": "line1\nline2\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    main(["--session", sd, "add-comment",
+          "--file", "foo.py", "--line", "1", "--body", "bad take",
+          "--author", "felix"])
+    from peanut_review.store import read_all_comments
+    cid = read_all_comments(sd)[0].id
+
+    rc = main(["--session", sd, "delete", cid, "--by", "jakub"])
+    assert rc == 0
+
+    # Default listing hides the deleted comment
+    out = io.StringIO()
+    with redirect_stdout(out):
+        main(["--session", sd, "comments", "--format", "json"])
+    assert json.loads(out.getvalue()) == []
+
+    # --include-deleted surfaces it, with metadata
+    out = io.StringIO()
+    with redirect_stdout(out):
+        main(["--session", sd, "comments", "--format", "json", "--include-deleted"])
+    listed = json.loads(out.getvalue())
+    assert len(listed) == 1
+    assert listed[0]["deleted"] is True
+    assert listed[0]["deleted_by"] == "jakub"
+
+    # undelete restores visibility
+    rc = main(["--session", sd, "undelete", cid])
+    assert rc == 0
+    out = io.StringIO()
+    with redirect_stdout(out):
+        main(["--session", sd, "comments", "--format", "json"])
+    assert len(json.loads(out.getvalue())) == 1
+
+
+def test_delete_unknown_comment_returns_error():
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "delete", "c_missing", "--by", "jakub"])
+    assert rc == 1
+    assert "not found" in err.getvalue()
+
+
 def test_add_comment_meta_skips_validation():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd)

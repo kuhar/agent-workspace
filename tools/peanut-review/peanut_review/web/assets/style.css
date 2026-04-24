@@ -173,6 +173,8 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   font-size: 11px;
 }
 .comment-meta button:hover { color: var(--fg); border-color: var(--accent); }
+.comment-meta button.danger { margin-left: 0; }
+.comment-meta button.danger:hover { color: #fff; border-color: var(--critical); background: rgba(214, 96, 96, 0.18); }
 .comment-body { white-space: pre-wrap; word-break: break-word; }
 
 .new-comment {

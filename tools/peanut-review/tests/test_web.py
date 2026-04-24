@@ -303,6 +303,85 @@ def test_header_home_link_is_root_when_no_base_url(session_dir: Path):
         srv.shutdown()
 
 
+def test_server_post_delete_and_undelete(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, c = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"file": "foo.py", "line": 1, "body": "bad", "severity": "nit",
+             "author": "felix"},
+        )
+        assert code == 201
+        cid = c["id"]
+
+        # Delete
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/delete",
+            {"comment_id": cid, "by": "jakub"},
+        )
+        assert code == 200
+        assert data["deleted"] == cid
+
+        # Default comment list hides it
+        _, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/comments")
+        assert json.loads(raw) == []
+
+        # ?include_deleted=1 brings it back with metadata
+        _, raw = _get(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments?include_deleted=1"
+        )
+        listed = json.loads(raw)
+        assert len(listed) == 1
+        assert listed[0]["deleted"] is True
+        assert listed[0]["deleted_by"] == "jakub"
+
+        # Rendered page must not include the deleted comment — look for the
+        # specific data-cid marker, not just the body text (which can appear
+        # in CSS/JS as a substring, e.g. "badge").
+        _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        assert f'data-cid="{cid}"'.encode() not in body
+
+        # Undelete
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/undelete",
+            {"comment_id": cid},
+        )
+        assert code == 200
+        _, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/comments")
+        assert len(json.loads(raw)) == 1
+    finally:
+        srv.shutdown()
+
+
+def test_server_delete_missing_comment_returns_404(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/delete",
+            {"comment_id": "c_missing"},
+        )
+        assert code == 404
+        assert "not found" in data["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_server_delete_button_rendered_on_each_comment(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"file": "foo.py", "line": 1, "body": "x", "severity": "nit",
+             "author": "felix"},
+        )
+        _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        text = body.decode("utf-8")
+        assert 'data-delete=' in text
+        assert 'class="danger"' in text
+    finally:
+        srv.shutdown()
+
+
 def test_server_session_page_accepts_both_slash_and_no_slash(session_dir: Path):
     """Canonical session URL has no trailing slash, but /<id>/ still works."""
     srv, session_id, port = _start_server(session_dir)

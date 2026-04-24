@@ -66,7 +66,7 @@ def status() -> str:
     for a in s.agents:
         lines.append(f"  {a.name:<12} {a.status:<10} {a.model}")
 
-    comments = store.read_all_comments(sd)
+    comments = [c for c in store.read_all_comments(sd) if not c.deleted]
     if comments:
         lines.append("")
         lines.append(

@@ -113,6 +113,7 @@ class SessionRegistry:
                 comments = store.read_all_comments(sdir)
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
+            live = [c for c in comments if not c.deleted]
             summaries.append({
                 "id": sid,
                 "session_dir": str(sdir),
@@ -122,10 +123,11 @@ class SessionRegistry:
                 "created_at": s.created_at,
                 "workspace": s.workspace,
                 "current_head": (s.current_head or "")[:12],
-                "comment_count": len(comments),
-                "unresolved_count": sum(1 for c in comments if not c.resolved),
-                "stale_count": sum(1 for c in comments if c.stale),
-                "critical_count": sum(1 for c in comments if c.severity == "critical"),
+                "comment_count": len(live),
+                "unresolved_count": sum(1 for c in live if not c.resolved),
+                "stale_count": sum(1 for c in live if c.stale),
+                "critical_count": sum(1 for c in live if c.severity == "critical"),
+                "deleted_count": len(comments) - len(live),
                 "agent_count": len(s.agents),
             })
         summaries.sort(key=lambda d: d["created_at"], reverse=True)
@@ -265,6 +267,7 @@ class _Handler(BaseHTTPRequestHandler):
         if tail == "/api/session":
             session = load_session(session_dir)
             comments = store.read_all_comments(session_dir)
+            live = [c for c in comments if not c.deleted]
             payload = {
                 "id": session.id,
                 "state": session.state,
@@ -278,9 +281,10 @@ class _Handler(BaseHTTPRequestHandler):
                      "runner": a.runner}
                     for a in session.agents
                 ],
-                "comment_count": len(comments),
-                "stale_count": sum(1 for c in comments if c.stale),
-                "critical_count": sum(1 for c in comments if c.severity == "critical"),
+                "comment_count": len(live),
+                "stale_count": sum(1 for c in live if c.stale),
+                "critical_count": sum(1 for c in live if c.severity == "critical"),
+                "deleted_count": len(comments) - len(live),
                 "head_shifted": shifted,
             }
             self._json(200, payload)
@@ -296,6 +300,7 @@ class _Handler(BaseHTTPRequestHandler):
                 severity=(q.get("severity", [None])[0]),
                 round_num=int(q["round"][0]) if "round" in q else None,
                 unresolved="unresolved" in q,
+                include_deleted="include_deleted" in q,
             )
             self._json(200, [_comment_to_dict(c) for c in filtered])
             return
@@ -324,6 +329,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if tail == "/api/resolve":
             self._post_resolve(session_dir, data)
+            return
+        if tail == "/api/delete":
+            self._post_delete(session_dir, data)
+            return
+        if tail == "/api/undelete":
+            self._post_undelete(session_dir, data)
             return
         self._error(404, f"no route for {tail}")
 
@@ -373,6 +384,23 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, f"comment not found: {cid}")
         self._json(200, {"resolved": cid})
 
+    def _post_delete(self, session_dir: Path, data: dict) -> None:
+        cid = str(data.get("comment_id") or "")
+        if not cid:
+            return self._error(400, "missing comment_id")
+        by = str(data.get("by") or _default_author())
+        if not store.delete_comment(session_dir, cid, deleted_by=by):
+            return self._error(404, f"comment not found: {cid}")
+        self._json(200, {"deleted": cid, "by": by})
+
+    def _post_undelete(self, session_dir: Path, data: dict) -> None:
+        cid = str(data.get("comment_id") or "")
+        if not cid:
+            return self._error(400, "missing comment_id")
+        if not store.undelete_comment(session_dir, cid):
+            return self._error(404, f"comment not found: {cid}")
+        self._json(200, {"undeleted": cid})
+
 
 def _comment_to_dict(c: Comment) -> dict:
     return {
@@ -389,6 +417,9 @@ def _comment_to_dict(c: Comment) -> dict:
         "resolved_by": c.resolved_by,
         "resolved_at": c.resolved_at,
         "stale": c.stale,
+        "deleted": c.deleted,
+        "deleted_by": c.deleted_by,
+        "deleted_at": c.deleted_at,
         "head_sha": c.head_sha,
     }
 

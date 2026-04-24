@@ -36,6 +36,7 @@
     const resolveBtn = c.resolved
       ? ""
       : `<button data-resolve="${esc(c.id)}">Resolve</button>`;
+    const deleteBtn = `<button class="danger" data-delete="${esc(c.id)}">Delete</button>`;
     return `
       <div class="${cls.join(" ")}" data-cid="${esc(c.id)}">
         <div class="comment-meta">
@@ -46,6 +47,7 @@
           ${c.stale ? '<span class="round">stale</span>' : ""}
           ${c.resolved ? '<span class="round">resolved</span>' : ""}
           ${resolveBtn}
+          ${deleteBtn}
         </div>
         <div class="comment-body">${esc(c.body)}</div>
       </div>
@@ -220,16 +222,32 @@
     }
   });
 
-  // Resolve button (unchanged, stays on plain click)
+  // Resolve / Delete buttons — plain-click handlers, no drag involvement.
   document.addEventListener("click", (ev) => {
     const rb = ev.target.closest("[data-resolve]");
-    if (!rb) return;
-    const cid = rb.dataset.resolve;
-    api("POST", "/api/resolve", { comment_id: cid }).then(() => {
-      const c = rb.closest(".comment");
-      c.classList.add("resolved");
-      rb.remove();
-    }).catch((e) => alert("Resolve failed: " + e.message));
+    if (rb) {
+      const cid = rb.dataset.resolve;
+      api("POST", "/api/resolve", { comment_id: cid }).then(() => {
+        const c = rb.closest(".comment");
+        c.classList.add("resolved");
+        rb.remove();
+      }).catch((e) => alert("Resolve failed: " + e.message));
+      return;
+    }
+    const db = ev.target.closest("[data-delete]");
+    if (db) {
+      const cid = db.dataset.delete;
+      if (!confirm("Delete this comment? It's a soft-delete — the record is kept but hidden from agents and the default view.")) return;
+      api("POST", "/api/delete", { comment_id: cid }).then(() => {
+        const node = db.closest(".comment");
+        const thread = node && node.closest(".comment-thread");
+        if (node) node.remove();
+        // If the thread now has no live comments, drop it entirely.
+        if (thread && !thread.querySelector(".comment") && !thread.querySelector(".new-comment")) {
+          thread.remove();
+        }
+      }).catch((e) => alert("Delete failed: " + e.message));
+    }
   });
 
   // --- Periodic session refresh (for state/signals) ---

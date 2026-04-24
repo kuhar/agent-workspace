@@ -52,12 +52,18 @@ def _highlight_file(path: str, lines: list[str]) -> list[str]:
 def _group_comments(comments: list[Comment]) -> dict[tuple[str, int], list[Comment]]:
     """Key each comment by (file, anchor_line).
 
+    Soft-deleted comments are excluded — the server-rendered page mirrors what
+    agents see on a re-read (bad comments discarded by humans must not show up
+    as if they're still live). The audit trail remains in the JSONL.
+
     For range comments (end_line set and different from line), anchor the thread
     at end_line — where the user's drag ended and their eye is. Single-line
     comments stay anchored at line.
     """
     g: dict[tuple[str, int], list[Comment]] = defaultdict(list)
     for c in comments:
+        if c.deleted:
+            continue
         anchor = c.end_line if (c.end_line is not None and c.end_line != c.line) else c.line
         g[(c.file, anchor)].append(c)
     return g
@@ -69,10 +75,11 @@ def _render_comment(c: Comment) -> str:
         classes.append("stale")
     if c.resolved:
         classes.append("resolved")
-    resolve_btn = (
-        f'<button data-resolve="{html.escape(c.id)}">Resolve</button>'
-        if not c.resolved else ""
-    )
+    cid = html.escape(c.id)
+    buttons = []
+    if not c.resolved:
+        buttons.append(f'<button data-resolve="{cid}">Resolve</button>')
+    buttons.append(f'<button class="danger" data-delete="{cid}">Delete</button>')
     badges = []
     if c.end_line is not None and c.end_line != c.line:
         lo, hi = min(c.line, c.end_line), max(c.line, c.end_line)
@@ -82,13 +89,13 @@ def _render_comment(c: Comment) -> str:
     if c.resolved:
         badges.append('<span class="round">resolved</span>')
     return (
-        f'<div class="{" ".join(classes)}" data-cid="{html.escape(c.id)}">'
+        f'<div class="{" ".join(classes)}" data-cid="{cid}">'
         f'<div class="comment-meta">'
         f'<span class="author">{html.escape(c.author or "unknown")}</span>'
         f'<span class="sev {html.escape(c.severity)}">{html.escape(c.severity)}</span>'
         f'<span class="round">R{c.round}</span>'
         f'{"".join(badges)}'
-        f'{resolve_btn}'
+        f'{"".join(buttons)}'
         f'</div>'
         f'<div class="comment-body">{html.escape(c.body)}</div>'
         f'</div>'
@@ -159,13 +166,21 @@ def _render_file(fd: FileDiff, comments_at_line: dict[tuple[str, int], list[Comm
 
 
 def _render_sidebar(session: Session, comments: list[Comment]) -> str:
-    stale_count = sum(1 for c in comments if c.stale)
-    resolved = sum(1 for c in comments if c.resolved)
-    crit = sum(1 for c in comments if c.severity == "critical")
+    # Sidebar counters reflect what's visible (deleted hidden), with a
+    # separate "deleted" row so the audit count is still discoverable.
+    live = [c for c in comments if not c.deleted]
+    deleted = len(comments) - len(live)
+    stale_count = sum(1 for c in live if c.stale)
+    resolved = sum(1 for c in live if c.resolved)
+    crit = sum(1 for c in live if c.severity == "critical")
     agent_rows = "".join(
         f'<li><span>{html.escape(a.name)}</span>'
         f'<span class="v">{html.escape(a.status)}</span></li>'
         for a in session.agents
+    )
+    deleted_row = (
+        f'<li data-k="deleted"><span>deleted</span><span class="v">{deleted}</span></li>'
+        if deleted else ""
     )
     return (
         '<aside id="sidebar">'
@@ -174,10 +189,11 @@ def _render_sidebar(session: Session, comments: list[Comment]) -> str:
         f'<li data-k="state"><span>state</span><span class="v">{html.escape(session.state)}</span></li>'
         f'<li data-k="head"><span>head</span><span class="v mono">{html.escape(session.current_head[:12])}</span></li>'
         f'<li data-k="base"><span>base</span><span class="v mono">{html.escape(session.base_ref)}</span></li>'
-        f'<li data-k="total"><span>comments</span><span class="v">{len(comments)}</span></li>'
+        f'<li data-k="total"><span>comments</span><span class="v">{len(live)}</span></li>'
         f'<li data-k="stale_comments"><span>stale</span><span class="v">{stale_count}</span></li>'
         f'<li data-k="resolved"><span>resolved</span><span class="v">{resolved}</span></li>'
         f'<li data-k="critical"><span>critical</span><span class="v">{crit}</span></li>'
+        f'{deleted_row}'
         '</ul>'
         '<h3>Agents</h3>'
         f'<ul>{agent_rows or "<li>(none)</li>"}</ul>'

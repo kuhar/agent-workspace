@@ -250,7 +250,7 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
             '</div>'
         )
 
-    index_href = f"{base_url}/" if base_url else "/"
+    index_href = base_url if base_url else "/"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -311,7 +311,7 @@ def render_page(
     css = (ASSETS_DIR / "style.css").read_text()
     js = (ASSETS_DIR / "app.js").read_text()
 
-    index_href = f"{base_url}/" if base_url else "/"
+    index_href = base_url if base_url else "/"
     return f"""<!doctype html>
 <html lang="en">
 <head>

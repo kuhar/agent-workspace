@@ -268,6 +268,41 @@ def test_server_resolve(session_dir: Path):
         srv.shutdown()
 
 
+def test_header_home_link_has_no_trailing_slash_with_base_url(tmp_path: Path, repo: Path):
+    """The h1 link back to the index is just `/<base>`, not `/<base>/`."""
+    root = tmp_path / "review-root"
+    root.mkdir()
+    sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-a"),
+    )
+    registry = web_app.SessionRegistry([root])
+    srv = web_app.make_server("127.0.0.1", 0, registry, base_url="/pr")
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{port}/")
+        assert code == 200
+        text = body.decode("utf-8")
+        # Canonical home link
+        assert '<h1><a href="/pr">' in text
+        # …and not the trailing-slash variant
+        assert '<h1><a href="/pr/">' not in text
+    finally:
+        srv.shutdown()
+
+
+def test_header_home_link_is_root_when_no_base_url(session_dir: Path):
+    """Without a base_url, the h1 link falls back to `/`."""
+    srv, _, port = _start_server(session_dir)
+    try:
+        _, body = _get(f"http://127.0.0.1:{port}/")
+        assert '<h1><a href="/">' in body.decode("utf-8")
+    finally:
+        srv.shutdown()
+
+
 def test_server_session_page_accepts_both_slash_and_no_slash(session_dir: Path):
     """Canonical session URL has no trailing slash, but /<id>/ still works."""
     srv, session_id, port = _start_server(session_dir)

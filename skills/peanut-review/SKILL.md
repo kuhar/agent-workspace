@@ -179,6 +179,8 @@ peanut-review archive
   automatically. Currently CLI mode only (MCP integration via `opencode.json`
   is not wired up yet). The first opencode agent spawns the llama-servers; the
   rest reuse the already-running processes via lcode's idempotent health check.
+  Runs as the `reviewer` agent (defined by `lcode`'s generated `opencode.json`):
+  primary model, no `grep`/`glob`/`codesearch` denies, no subagent delegation.
 
 Only one `lcode` primary/subagent pair can be running at a time, so multiple
 opencode agents on the same session should share the same `lcode_primary` /

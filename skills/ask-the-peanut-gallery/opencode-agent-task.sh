@@ -22,7 +22,7 @@ Options:
   --prompt-file FILE     Read prompt from FILE
   --lcode-primary NAME   lcode primary model (default: qwen)
   --lcode-subagent NAME  lcode subagent model (default: null)
-  --agent NAME           Opencode agent to run as (default: build)
+  --agent NAME           Opencode agent to run as (default: reviewer)
   --dry-run              Print the command without executing
   -h, --help             Show this help
 
@@ -50,7 +50,7 @@ opt_prompt=""
 opt_prompt_file=""
 lcode_primary="qwen"
 lcode_subagent="null"
-agent_name="build"
+agent_name="reviewer"
 dry_run=0
 
 while [[ $# -gt 0 ]]; do

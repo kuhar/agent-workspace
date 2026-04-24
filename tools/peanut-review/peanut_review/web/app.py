@@ -1,8 +1,8 @@
-"""HTTP server for a peanut-review session — human review UI.
+"""HTTP server for peanut-review — human review UI.
 
-Routes are session-indexed from day 1 (`/sessions/<id>/...`). Multi-session
-hosting is a single-line change: drop the one-session redirect in
-`handle_root` and mount additional sessions via `SessionRegistry`.
+One server on one port can serve every session it discovers under one or more
+review roots. Routes are session-indexed: each session is reachable at
+`/sessions/<id>/...` and the root `/` renders a picker of recent sessions.
 """
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ import re
 import signal
 import subprocess
 import time
+from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import store
-from ..models import AgentStatus, Comment, Severity
+from ..models import Comment, Severity
 from ..session import (
     load_session,
     refresh_agent_statuses,
@@ -25,26 +26,110 @@ from ..session import (
     validate_comment_location,
 )
 from . import diff as diffmod
-from .render import render_page
+from .render import render_index, render_page
+
+
+DEFAULT_ROOT = Path("/tmp/peanut-review")
 
 
 class SessionRegistry:
-    """Map session-id → session-dir. Single-entry today; multi-session ready."""
+    """Map session-id → session-dir. Backed by filesystem scans of review roots.
 
-    def __init__(self) -> None:
+    Sessions can also be bound explicitly (used by tests and by `serve` when the
+    caller wants to attach a session that isn't under any configured root).
+    """
+
+    def __init__(self, roots: Iterable[str | Path] = ()) -> None:
+        self._roots: list[Path] = [Path(r) for r in roots]
         self._by_id: dict[str, Path] = {}
+        if self._roots:
+            self.rescan()
+
+    @property
+    def roots(self) -> list[Path]:
+        return list(self._roots)
 
     def bind(self, session_dir: str | Path) -> str:
+        """Attach a session by directory and return its id."""
         sdir = Path(session_dir)
         s = load_session(sdir)
         self._by_id[s.id] = sdir
         return s.id
 
+    def rescan(self) -> None:
+        """Re-discover sessions under each root, preserving explicitly-bound orphans."""
+        root_resolved = [r.resolve() for r in self._roots if r.is_dir()]
+
+        def _is_under_root(sd: Path) -> bool:
+            try:
+                sd_res = sd.resolve()
+            except OSError:
+                return False
+            for r in root_resolved:
+                try:
+                    sd_res.relative_to(r)
+                    return True
+                except ValueError:
+                    continue
+            return False
+
+        # Keep previously-bound sessions that live outside any root.
+        new_by_id: dict[str, Path] = {
+            sid: sd for sid, sd in self._by_id.items() if not _is_under_root(sd)
+        }
+        for root in self._roots:
+            if not root.is_dir():
+                continue
+            for sub in sorted(root.iterdir()):
+                if not sub.is_dir():
+                    continue
+                if not (sub / "session.json").is_file():
+                    continue
+                try:
+                    s = load_session(sub)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+                new_by_id[s.id] = sub
+        self._by_id = new_by_id
+
     def get(self, session_id: str) -> Path | None:
+        if session_id in self._by_id:
+            return self._by_id[session_id]
+        if self._roots:
+            self.rescan()
         return self._by_id.get(session_id)
 
     def only(self) -> str | None:
         return next(iter(self._by_id)) if len(self._by_id) == 1 else None
+
+    def list_sessions(self) -> list[dict]:
+        """Summaries for every known session, newest first."""
+        if self._roots:
+            self.rescan()
+        summaries: list[dict] = []
+        for sid, sdir in self._by_id.items():
+            try:
+                s = load_session(sdir)
+                comments = store.read_all_comments(sdir)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            summaries.append({
+                "id": sid,
+                "session_dir": str(sdir),
+                "state": s.state,
+                "base_ref": s.base_ref,
+                "topic_ref": s.topic_ref,
+                "created_at": s.created_at,
+                "workspace": s.workspace,
+                "current_head": (s.current_head or "")[:12],
+                "comment_count": len(comments),
+                "unresolved_count": sum(1 for c in comments if not c.resolved),
+                "stale_count": sum(1 for c in comments if c.stale),
+                "critical_count": sum(1 for c in comments if c.severity == "critical"),
+                "agent_count": len(s.agents),
+            })
+        summaries.sort(key=lambda d: d["created_at"], reverse=True)
+        return summaries
 
 
 def _git_head(workspace: str) -> str | None:
@@ -81,8 +166,12 @@ VALID_SEVERITIES = {s.value for s in Severity}
 
 
 class _Handler(BaseHTTPRequestHandler):
-    # Server attribute injected at construction — see make_server.
+    # Injected at construction — see make_server.
     registry: SessionRegistry
+    # Path prefix the app is mounted under (e.g. "/pr"). Empty = root-mounted.
+    # Caddy `handle_path /pr/*` strips the prefix before forwarding, so the
+    # router never sees it — this string is only used when emitting URLs.
+    base_url: str = ""
 
     # -------- helpers --------
 
@@ -125,9 +214,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _resolve_session(self, session_id: str) -> Path | None:
         return self.registry.get(session_id)
 
-    def log_message(self, fmt, *args):  # noqa: A003  (shadowing base method by design)
-        # Match BaseHTTPRequestHandler format, but route through stderr only —
-        # we're a dev server, don't need request logs on stdout.
+    def log_message(self, fmt, *args):  # noqa: A003
         import sys
         sys.stderr.write("[pr-web] " + fmt % args + "\n")
 
@@ -136,13 +223,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path in ("", "/"):
-            sid = self.registry.only()
-            if sid is None:
-                self._text(404, "No session bound; see /sessions/<id>/")
-                return
-            self.send_response(302)
-            self.send_header("Location", f"/sessions/{sid}/")
-            self.end_headers()
+            sessions = self.registry.list_sessions()
+            self._html(200, render_index(
+                sessions, roots=[str(r) for r in self.registry.roots],
+                base_url=self.base_url,
+            ))
+            return
+        if url.path == "/api/sessions":
+            self._json(200, self.registry.list_sessions())
             return
 
         m = ROUTE_RE.match(url.path)
@@ -155,7 +243,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(404, f"unknown session: {session_id}")
             return
 
-        # Refresh agent statuses and auto-migrate on any session-scoped GET.
         session = load_session(session_dir)
         refresh_agent_statuses(session_dir, session)
         shifted, _ = _auto_migrate_if_shifted(session_dir)
@@ -167,7 +254,7 @@ class _Handler(BaseHTTPRequestHandler):
             )
             html_out = render_page(
                 load_session(session_dir), session_id, files, comments,
-                head_shifted=shifted,
+                head_shifted=shifted, base_url=self.base_url,
             )
             self._html(200, html_out)
             return
@@ -253,7 +340,7 @@ class _Handler(BaseHTTPRequestHandler):
         severity = str(data.get("severity") or "suggestion")
         if severity not in VALID_SEVERITIES:
             return self._error(400, f"invalid severity: {severity}")
-        author = str(data.get("author") or _default_author(session_dir))
+        author = str(data.get("author") or _default_author())
 
         session = load_session(session_dir)
         _, err = validate_comment_location(session.workspace, file, line)
@@ -278,7 +365,7 @@ class _Handler(BaseHTTPRequestHandler):
         cid = str(data.get("comment_id") or "")
         if not cid:
             return self._error(400, "missing comment_id")
-        by = str(data.get("by") or _default_author(session_dir))
+        by = str(data.get("by") or _default_author())
         if not store.resolve_comment(session_dir, cid, resolved_by=by):
             return self._error(404, f"comment not found: {cid}")
         self._json(200, {"resolved": cid})
@@ -303,12 +390,16 @@ def _comment_to_dict(c: Comment) -> dict:
     }
 
 
-def _default_author(session_dir: Path) -> str:
-    """Use git config user.name as the human author for UI-posted comments."""
+def _default_author() -> str:
+    """Default author for UI-posted comments — the human running the browser.
+
+    Uses the global git identity so we never inherit whatever reviewer agent
+    (felix, vera, …) happens to be set as `user.name` in the session's
+    workspace/submodule git dir.
+    """
     try:
         out = subprocess.run(
-            ["git", "-C", str(load_session(session_dir).workspace),
-             "config", "user.name"],
+            ["git", "config", "--global", "user.name"],
             capture_output=True, text=True, timeout=5,
         )
         if out.returncode == 0 and out.stdout.strip():
@@ -318,15 +409,35 @@ def _default_author(session_dir: Path) -> str:
     return "human"
 
 
-def make_server(host: str, port: int, registry: SessionRegistry) -> ThreadingHTTPServer:
-    """Build a ThreadingHTTPServer that serves `registry`."""
-    handler_cls = type("Handler", (_Handler,), {"registry": registry})
+def _normalize_base_url(base_url: str) -> str:
+    """Normalize to empty or `/foo[/bar]` (leading slash, no trailing slash)."""
+    b = (base_url or "").rstrip("/")
+    if not b:
+        return ""
+    if not b.startswith("/"):
+        b = "/" + b
+    return b
+
+
+def make_server(
+    host: str, port: int, registry: SessionRegistry, *, base_url: str = "",
+) -> ThreadingHTTPServer:
+    """Build a ThreadingHTTPServer that serves `registry`.
+
+    `base_url` is the path prefix the app is served under (e.g. `/pr`). The
+    router never sees it — assume an upstream like caddy's `handle_path` has
+    already stripped it. The prefix only shapes URLs emitted in HTML/JS.
+    """
+    handler_cls = type("Handler", (_Handler,), {
+        "registry": registry,
+        "base_url": _normalize_base_url(base_url),
+    })
     return ThreadingHTTPServer((host, port), handler_cls)
 
 
-def pidfile_path(session_dir: str | Path) -> Path:
-    """Location of the server pidfile for a single-session binding."""
-    return Path(session_dir) / "web.pid"
+def pidfile_path(root: str | Path) -> Path:
+    """Server pidfile lives at `<root>/web.pid` — one server per root."""
+    return Path(root) / "web.pid"
 
 
 def _read_pidfile(path: Path) -> tuple[int | None, dict]:
@@ -345,42 +456,62 @@ def _read_pidfile(path: Path) -> tuple[int | None, dict]:
     except ProcessLookupError:
         return None, payload
     except PermissionError:
-        # Process exists but owned by someone else — treat as "alive" but we
-        # probably can't signal it.
+        # Exists but owned elsewhere — report alive; we likely can't signal it.
         return pid, payload
     return pid, payload
 
 
-def serve(session_dir: str | Path, host: str = "127.0.0.1", port: int = 0) -> None:
-    """Blocking server for a single session. Port 0 → OS-assigned.
+def serve(
+    roots: Iterable[str | Path],
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    extra_sessions: Iterable[str | Path] = (),
+    base_url: str = "",
+) -> None:
+    """Blocking multi-session server. Port 0 → OS-assigned.
 
-    Writes a pidfile at `<session>/web.pid` so `peanut-review stop` can find us.
-    If a live pidfile already points at a running server, refuses to start.
+    Pidfile is written to `<roots[0]>/web.pid` so `peanut-review stop` can find
+    us. Refuses to start if a live server already holds that pidfile.
     """
-    sdir = Path(session_dir)
-    pidfile = pidfile_path(sdir)
+    root_list = [Path(r) for r in roots]
+    if not root_list:
+        raise ValueError("serve() requires at least one root")
+
+    primary = root_list[0]
+    primary.mkdir(parents=True, exist_ok=True)
+    pidfile = pidfile_path(primary)
     existing_pid, _ = _read_pidfile(pidfile)
     if existing_pid is not None:
         raise RuntimeError(
-            f"server already running (pid {existing_pid}) for this session. "
+            f"server already running (pid {existing_pid}) for root {primary}. "
             f"Stop it first with `peanut-review stop` or remove {pidfile}."
         )
 
-    registry = SessionRegistry()
-    session_id = registry.bind(sdir)
-    srv = make_server(host, port, registry)
+    registry = SessionRegistry(root_list)
+    for sd in extra_sessions:
+        registry.bind(sd)
+
+    srv = make_server(host, port, registry, base_url=base_url)
     bound_port = srv.server_address[1]
-    url = f"http://{host}:{bound_port}/sessions/{session_id}/"
+    normalized = _normalize_base_url(base_url)
+    url = f"http://{host}:{bound_port}{normalized}/"
 
     pidfile.write_text(json.dumps({
         "pid": os.getpid(),
         "host": host,
         "port": bound_port,
         "url": url,
-        "session_id": session_id,
+        "base_url": normalized,
+        "roots": [str(r) for r in root_list],
     }) + "\n")
 
-    print(f"peanut-review web UI: {url}", flush=True)
+    session_count = len(registry.list_sessions())
+    print(
+        f"peanut-review web UI: {url} "
+        f"({session_count} session{'s' if session_count != 1 else ''})",
+        flush=True,
+    )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -393,16 +524,16 @@ def serve(session_dir: str | Path, host: str = "127.0.0.1", port: int = 0) -> No
             pass
 
 
-def stop(session_dir: str | Path, timeout: float = 5.0) -> dict:
-    """Signal a running serve() to shut down. Returns the last-known metadata.
+def stop(root: str | Path, timeout: float = 5.0) -> dict:
+    """Signal the running serve() at `<root>/web.pid` to shut down.
 
-    Raises RuntimeError if no running server is found.
+    Returns the last-known pidfile metadata. Raises RuntimeError if no running
+    server is found (stale pidfile gets cleaned up first).
     """
-    sdir = Path(session_dir)
-    pidfile = pidfile_path(sdir)
+    primary = Path(root)
+    pidfile = pidfile_path(primary)
     pid, payload = _read_pidfile(pidfile)
     if pid is None:
-        # Clean up a stale pidfile if one existed.
         if pidfile.exists():
             pidfile.unlink()
             raise RuntimeError(f"no running server (stale pidfile removed at {pidfile})")
@@ -413,7 +544,6 @@ def stop(session_dir: str | Path, timeout: float = 5.0) -> dict:
     except PermissionError as e:
         raise RuntimeError(f"cannot signal pid {pid}: {e}") from e
 
-    # Wait for the process to exit and for the pidfile to be cleaned.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -422,14 +552,11 @@ def stop(session_dir: str | Path, timeout: float = 5.0) -> dict:
             break
         time.sleep(0.1)
     else:
-        # Hard-kill if it didn't respond to SIGTERM within the timeout.
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
 
-    # Remove any leftover pidfile (serve's finally block should have handled it,
-    # but belt-and-suspenders for the SIGKILL path).
     if pidfile.exists():
         pidfile.unlink()
     return payload

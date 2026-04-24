@@ -451,24 +451,56 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    """Start the web UI server for a session."""
-    session_dir = _get_session_dir(args)
+def _resolve_serve_roots(args: argparse.Namespace) -> tuple[list[Path], str | None]:
+    """Pick review roots for serve/stop, plus an optional extra session to bind.
+
+    Precedence: explicit --root wins; otherwise infer from $PEANUT_SESSION's
+    parent; otherwise the default `/tmp/peanut-review/`.
+    """
     from .web import app as web_app
+    roots: list[Path] = []
+    if getattr(args, "root", None):
+        roots = [Path(r) for r in args.root]
+
+    extra_session: str | None = None
+    session_env = getattr(args, "session", None) or os.environ.get("PEANUT_SESSION")
+    if session_env:
+        sd = Path(session_env)
+        if sd.is_dir():
+            extra_session = str(sd)
+            if not roots:
+                roots = [sd.parent]
+
+    if not roots:
+        roots = [web_app.DEFAULT_ROOT]
+
+    for r in roots:
+        r.mkdir(parents=True, exist_ok=True)
+    return roots, extra_session
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Start the multi-session web UI."""
+    from .web import app as web_app
+    roots, extra_session = _resolve_serve_roots(args)
+    extras = [extra_session] if extra_session else []
     try:
-        web_app.serve(session_dir, host=args.host, port=args.port)
-    except RuntimeError as e:
+        web_app.serve(
+            roots, host=args.host, port=args.port, extra_sessions=extras,
+            base_url=args.base_url or "",
+        )
+    except (RuntimeError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     return 0
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    """Stop a running web UI server for a session."""
-    session_dir = _get_session_dir(args)
+    """Stop the web UI server running at <root>/web.pid."""
     from .web import app as web_app
+    roots, _ = _resolve_serve_roots(args)
     try:
-        payload = web_app.stop(session_dir, timeout=args.timeout)
+        payload = web_app.stop(roots[0], timeout=args.timeout)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -609,15 +641,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--ref", help="Git notes ref (default: refs/notes/peanut-review)")
 
     # serve
-    sp = sub.add_parser("serve", help="Start the web UI for a session")
+    sp = sub.add_parser("serve", help="Start the multi-session web UI")
     sp.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     sp.add_argument("--port", type=int, default=0,
                     help="Bind port (0 = OS-assigned, default)")
+    sp.add_argument("--root", action="append", metavar="PATH",
+                    help="Review root to scan for sessions (repeatable). "
+                         "Defaults to $PEANUT_SESSION's parent or /tmp/peanut-review/")
+    sp.add_argument("--base-url", metavar="PATH",
+                    help="Path prefix this server is mounted under when fronted "
+                         "by a reverse proxy (e.g. '/pr'). The router assumes "
+                         "the upstream already strips it (e.g. caddy handle_path).")
 
     # stop
-    sp = sub.add_parser("stop", help="Stop the web UI server for a session")
+    sp = sub.add_parser("stop", help="Stop the multi-session web UI")
     sp.add_argument("--timeout", type=float, default=5.0,
                     help="Seconds to wait for graceful shutdown before SIGKILL (default: 5)")
+    sp.add_argument("--root", action="append", metavar="PATH",
+                    help="Review root whose server to stop (same default as serve)")
 
     return p
 

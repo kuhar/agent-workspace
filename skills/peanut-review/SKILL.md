@@ -156,33 +156,50 @@ peanut-review archive
 A browser-based review UI is built into peanut-review and shares the exact
 same session storage — no separate tool, no duplicate CLI. Humans post
 comments the same way agents do; the web UI is a shell over the existing
-`add-comment` / `resolve` paths.
+`add-comment` / `resolve` paths. One server on one port serves every session
+found under its review root.
 
 ```bash
+# Multi-session: scan /tmp/peanut-review/ (default) — all sessions are listed
 peanut-review serve --port 16200
+# → http://127.0.0.1:16200/            (session picker)
 # → http://127.0.0.1:16200/sessions/<session-id>/
 
-# From another shell (same $PEANUT_SESSION):
+# Or explicitly point at one or more review roots
+peanut-review serve --port 16200 --root /tmp/peanut-review --root /path/to/more
+
+# Stop (uses same root inference as serve)
 peanut-review stop
+peanut-review stop --root /tmp/peanut-review
 ```
 
+Root inference: if `--root` is omitted, `$PEANUT_SESSION`'s parent is used
+(so the existing single-session workflow keeps working); otherwise the
+default `/tmp/peanut-review/`. The pidfile lives at `<root>/web.pid`.
+
 The server:
-- Renders a unified diff with pygments syntax highlighting.
+- Renders a session picker at `/` listing every discovered session
+  (id, state, base…topic, workspace, comment counts, created_at), sorted
+  newest-first. Reloads live every 15s; new sessions created while the
+  server is up are auto-discovered on rescan.
+- Renders each session's unified diff with pygments syntax highlighting
+  under `/sessions/<id>/`.
 - Shows existing comments (agent + human) anchored to source-file lines,
   with author, severity, round, and stale/resolved badges.
 - Lets humans post new comments by clicking a line number.
 - Auto-detects workspace HEAD shifts (e.g. `git commit --amend`) and runs
   `migrate` — stale comments get dimmed in the UI. No more git-notes
   coupling to commit SHAs.
-- Is session-indexed from day 1 (`/sessions/<id>/...`) so a future
-  multi-session daemon is a one-line change (drop the single-session
-  redirect in `web/app.py`).
+- Exposes `/api/sessions` (list) and `/sessions/<id>/api/{session,comments,resolve}`
+  (per-session JSON).
 
 Standalone human-only review (no agents):
 
 ```bash
-peanut-review init --workspace /repo --base main --topic HEAD
+peanut-review --session /tmp/peanut-review/my-review init \
+  --workspace /repo --base main --topic HEAD
 peanut-review serve --port 16200
+# browse to http://127.0.0.1:16200/ and click into the session
 ```
 
 ## Agent selection guidelines

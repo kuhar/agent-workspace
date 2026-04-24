@@ -163,14 +163,16 @@ def _post(url: str, body: dict) -> tuple[int, dict]:
         return e.code, json.loads(e.read())
 
 
-def test_server_root_redirects_to_session(session_dir: Path):
+def test_server_root_renders_index(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/")
-        opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
-        with opener.open(req) as r:
-            assert r.status == 200
-            assert f"/sessions/{session_id}/" in r.geturl()
+        code, body = _get(f"http://127.0.0.1:{port}/")
+        assert code == 200
+        text = body.decode("utf-8")
+        assert "<!doctype html>" in text
+        # Index page must link to the known session.
+        assert f'href="/sessions/{session_id}/"' in text
+        assert "peanut-review" in text
     finally:
         srv.shutdown()
 
@@ -308,28 +310,30 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
         srv.shutdown()
 
 
-def test_serve_writes_pidfile_and_stop_removes_it(session_dir: Path):
+def test_serve_writes_pidfile_and_stop_removes_it(session_dir: Path, tmp_path: Path):
     """End-to-end: spawn serve() in a subprocess, verify pidfile, then stop."""
     import socket
     import sys
     import time as _t
 
-    # Pick a free port so the subprocess can bind deterministically.
+    # Root = session's parent (which holds this single session).
+    root = session_dir.parent
+
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
 
-    pidfile = web_app.pidfile_path(session_dir)
+    pidfile = web_app.pidfile_path(root)
     assert not pidfile.exists()
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "peanut_review", "--session", str(session_dir),
-         "serve", "--host", "127.0.0.1", "--port", str(port)],
+        [sys.executable, "-m", "peanut_review", "serve",
+         "--root", str(root),
+         "--host", "127.0.0.1", "--port", str(port)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
-        # Wait for pidfile + reachable server.
         deadline = _t.monotonic() + 5.0
         while _t.monotonic() < deadline and not pidfile.exists():
             _t.sleep(0.05)
@@ -337,12 +341,11 @@ def test_serve_writes_pidfile_and_stop_removes_it(session_dir: Path):
         payload = json.loads(pidfile.read_text())
         assert payload["pid"] == proc.pid
         assert payload["port"] == port
+        assert payload["roots"] == [str(root)]
 
-        # Stop via the API
-        returned = web_app.stop(session_dir, timeout=5.0)
+        returned = web_app.stop(root, timeout=5.0)
         assert returned["pid"] == proc.pid
 
-        # Pidfile gone, process dead
         assert not pidfile.exists()
         assert proc.wait(timeout=2.0) is not None
     finally:
@@ -351,29 +354,242 @@ def test_serve_writes_pidfile_and_stop_removes_it(session_dir: Path):
             proc.wait()
 
 
-def test_stop_without_running_server_errors(session_dir: Path):
+def test_stop_without_running_server_errors(tmp_path: Path):
     with pytest.raises(RuntimeError, match="no running server"):
-        web_app.stop(session_dir)
+        web_app.stop(tmp_path)
 
 
-def test_stop_cleans_stale_pidfile(session_dir: Path):
-    # Write a pidfile pointing at a PID that doesn't exist.
-    pidfile = web_app.pidfile_path(session_dir)
+def test_stop_cleans_stale_pidfile(tmp_path: Path):
+    pidfile = web_app.pidfile_path(tmp_path)
     pidfile.write_text(json.dumps({"pid": 999999999, "port": 1}) + "\n")
     with pytest.raises(RuntimeError, match="stale pidfile removed"):
-        web_app.stop(session_dir)
+        web_app.stop(tmp_path)
     assert not pidfile.exists()
 
 
-def test_serve_refuses_second_instance(session_dir: Path):
-    # Fake a live pidfile by pointing at our own PID.
-    pidfile = web_app.pidfile_path(session_dir)
+def test_serve_refuses_second_instance(tmp_path: Path):
+    pidfile = web_app.pidfile_path(tmp_path)
     pidfile.write_text(json.dumps({"pid": os.getpid(), "port": 1}) + "\n")
     try:
         with pytest.raises(RuntimeError, match="already running"):
-            web_app.serve(session_dir, port=0)
+            web_app.serve([tmp_path], port=0)
     finally:
         pidfile.unlink()
+
+
+def test_serve_requires_a_root():
+    with pytest.raises(ValueError, match="at least one root"):
+        web_app.serve([], port=0)
+
+
+def test_registry_discovers_sessions_under_root(tmp_path: Path, repo: Path):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    # Two sessions under the same root.
+    s1, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-a"),
+    )
+    s2, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-b"),
+    )
+    # Plus a non-session directory that must be ignored.
+    (root / "not-a-session").mkdir()
+
+    reg = web_app.SessionRegistry([root])
+    assert reg.get(s1.id) == root / "sess-a"
+    assert reg.get(s2.id) == root / "sess-b"
+    ids = {s["id"] for s in reg.list_sessions()}
+    assert ids == {s1.id, s2.id}
+
+
+def test_registry_picks_up_sessions_added_later(tmp_path: Path, repo: Path):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    reg = web_app.SessionRegistry([root])
+    assert reg.list_sessions() == []
+
+    # Add a session after the registry was created — get() triggers rescan.
+    s, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "late"),
+    )
+    assert reg.get(s.id) == root / "late"
+
+
+def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    s1, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-a"),
+    )
+    s2, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-b"),
+    )
+
+    registry = web_app.SessionRegistry([root])
+    srv = web_app.make_server("127.0.0.1", 0, registry)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{port}/")
+        assert code == 200
+        text = body.decode("utf-8")
+        assert f'href="/sessions/{s1.id}/"' in text
+        assert f'href="/sessions/{s2.id}/"' in text
+
+        code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
+        assert code == 200
+        data = json.loads(raw)
+        ids = {d["id"] for d in data}
+        assert ids == {s1.id, s2.id}
+        # Newest first
+        assert data[0]["created_at"] >= data[1]["created_at"]
+        # Each session still reachable at its own URL
+        c1, _ = _get(f"http://127.0.0.1:{port}/sessions/{s1.id}/")
+        c2, _ = _get(f"http://127.0.0.1:{port}/sessions/{s2.id}/")
+        assert c1 == 200 and c2 == 200
+    finally:
+        srv.shutdown()
+
+
+def test_index_empty_state(tmp_path: Path):
+    root = tmp_path / "empty-root"
+    root.mkdir()
+    registry = web_app.SessionRegistry([root])
+    srv = web_app.make_server("127.0.0.1", 0, registry)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{port}/")
+        assert code == 200
+        assert b"No review sessions found" in body
+    finally:
+        srv.shutdown()
+
+
+def test_server_post_range_comment_persists_end_line(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            {"file": "foo.py", "line": 1, "end_line": 2,
+             "body": "range comment", "severity": "nit"},
+        )
+        assert code == 201
+        assert data["line"] == 1
+        assert data["end_line"] == 2
+
+        comments = store.read_all_comments(session_dir)
+        assert len(comments) == 1
+        assert comments[0].line == 1
+        assert comments[0].end_line == 2
+    finally:
+        srv.shutdown()
+
+
+def test_render_range_comment_anchored_at_end_line(session_dir: Path, repo: Path):
+    """A comment with end_line must appear in the thread anchored at end_line."""
+    store.append_comment(session_dir, Comment(
+        author="vera", file="foo.py", line=1, end_line=2,
+        body="spans two lines", severity="warning", round=1,
+    ))
+    store.append_comment(session_dir, Comment(
+        author="vera", file="foo.py", line=1,
+        body="single line", severity="nit", round=1,
+    ))
+    s = sess.load_session(session_dir)
+    from peanut_review.web import diff as diffmod
+    files = diffmod.parse_diff(s.workspace, s.base_ref, s.topic_ref)
+    html_out = render.render_page(s, "sid", files, store.read_all_comments(session_dir))
+
+    # Range comment must carry the L1–L2 badge.
+    assert "L1–L2" in html_out
+    # The range comment's thread is keyed at end_line (2); the single-line
+    # comment's thread is keyed at line (1). Both must be present as separate
+    # threads.
+    assert 'data-line="2"' in html_out  # range thread anchor
+    assert 'data-line="1"' in html_out  # single-line thread anchor
+
+
+def test_group_comments_anchors_range_at_end_line():
+    from peanut_review.web.render import _group_comments
+    comments = [
+        Comment(author="a", file="foo.py", line=5, body="single"),
+        Comment(author="b", file="foo.py", line=5, end_line=10, body="range"),
+        Comment(author="c", file="foo.py", line=10, end_line=10, body="degenerate"),
+    ]
+    g = _group_comments(comments)
+    # Single-line and range-ending-at-10 share an anchor at line 10.
+    assert len(g[("foo.py", 10)]) == 2
+    # Single at line 5 has its own anchor.
+    assert len(g[("foo.py", 5)]) == 1
+
+
+def test_normalize_base_url():
+    n = web_app._normalize_base_url
+    assert n("") == ""
+    assert n(None) == ""
+    assert n("/") == ""
+    assert n("/pr") == "/pr"
+    assert n("/pr/") == "/pr"
+    assert n("pr") == "/pr"
+    assert n("pr/") == "/pr"
+    assert n("/pr/review/") == "/pr/review"
+
+
+def test_index_emits_prefixed_hrefs_and_base_url_global(tmp_path: Path, repo: Path):
+    """Index page links honour base_url and window.PR_BASE_URL is injected."""
+    root = tmp_path / "review-root"
+    root.mkdir()
+    s, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-a"),
+    )
+    registry = web_app.SessionRegistry([root])
+    srv = web_app.make_server("127.0.0.1", 0, registry, base_url="/pr")
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{port}/")
+        assert code == 200
+        text = body.decode("utf-8")
+        # Server-rendered link carries the prefix.
+        assert f'href="/pr/sessions/{s.id}/"' in text
+        # Client-side JS can read the same prefix.
+        assert 'window.PR_BASE_URL = "/pr"' in text
+        # No bare-root session hrefs.
+        assert f'href="/sessions/{s.id}/"' not in text
+
+        # Router still accepts the stripped path (caddy strips /pr before us).
+        c, _ = _get(f"http://127.0.0.1:{port}/sessions/{s.id}/")
+        assert c == 200
+    finally:
+        srv.shutdown()
+
+
+def test_session_page_emits_prefixed_session_url(session_dir: Path):
+    registry = web_app.SessionRegistry()
+    session_id = registry.bind(session_dir)
+    srv = web_app.make_server("127.0.0.1", 0, registry, base_url="/pr")
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{port}/sessions/{session_id}/")
+        assert code == 200
+        text = body.decode("utf-8")
+        # app.js API calls are rooted at window.PR_SESSION_URL.
+        assert f'window.PR_SESSION_URL = "/pr/sessions/{session_id}"' in text
+        assert 'window.PR_BASE_URL = "/pr"' in text
+    finally:
+        srv.shutdown()
 
 
 def test_server_filter_comments_by_round(session_dir: Path):

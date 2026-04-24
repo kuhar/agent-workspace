@@ -109,7 +109,15 @@
     form.querySelector("textarea").focus();
 
     const cleanup = () => clearRangeHighlight(highlighted);
-    form.querySelector(".cancel").onclick = () => { cleanup(); form.remove(); };
+    const removeFormAndEmptyThread = () => {
+      form.remove();
+      // If the thread is now empty (no comments, no other form), drop it so
+      // we don't leave a blank row between code lines.
+      if (!thread.querySelector(".comment") && !thread.querySelector(".new-comment")) {
+        thread.remove();
+      }
+    };
+    form.querySelector(".cancel").onclick = () => { cleanup(); removeFormAndEmptyThread(); };
     form.querySelector(".submit").onclick = async () => {
       const body = form.querySelector("textarea").value.trim();
       if (!body) return;

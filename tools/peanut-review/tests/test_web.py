@@ -308,6 +308,74 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
         srv.shutdown()
 
 
+def test_serve_writes_pidfile_and_stop_removes_it(session_dir: Path):
+    """End-to-end: spawn serve() in a subprocess, verify pidfile, then stop."""
+    import socket
+    import sys
+    import time as _t
+
+    # Pick a free port so the subprocess can bind deterministically.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    pidfile = web_app.pidfile_path(session_dir)
+    assert not pidfile.exists()
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "peanut_review", "--session", str(session_dir),
+         "serve", "--host", "127.0.0.1", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        # Wait for pidfile + reachable server.
+        deadline = _t.monotonic() + 5.0
+        while _t.monotonic() < deadline and not pidfile.exists():
+            _t.sleep(0.05)
+        assert pidfile.exists(), "serve didn't write pidfile"
+        payload = json.loads(pidfile.read_text())
+        assert payload["pid"] == proc.pid
+        assert payload["port"] == port
+
+        # Stop via the API
+        returned = web_app.stop(session_dir, timeout=5.0)
+        assert returned["pid"] == proc.pid
+
+        # Pidfile gone, process dead
+        assert not pidfile.exists()
+        assert proc.wait(timeout=2.0) is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_stop_without_running_server_errors(session_dir: Path):
+    with pytest.raises(RuntimeError, match="no running server"):
+        web_app.stop(session_dir)
+
+
+def test_stop_cleans_stale_pidfile(session_dir: Path):
+    # Write a pidfile pointing at a PID that doesn't exist.
+    pidfile = web_app.pidfile_path(session_dir)
+    pidfile.write_text(json.dumps({"pid": 999999999, "port": 1}) + "\n")
+    with pytest.raises(RuntimeError, match="stale pidfile removed"):
+        web_app.stop(session_dir)
+    assert not pidfile.exists()
+
+
+def test_serve_refuses_second_instance(session_dir: Path):
+    # Fake a live pidfile by pointing at our own PID.
+    pidfile = web_app.pidfile_path(session_dir)
+    pidfile.write_text(json.dumps({"pid": os.getpid(), "port": 1}) + "\n")
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            web_app.serve(session_dir, port=0)
+    finally:
+        pidfile.unlink()
+
+
 def test_server_filter_comments_by_round(session_dir: Path):
     store.append_comment(session_dir, Comment(
         author="felix", file="foo.py", line=1, body="r1", severity="nit", round=1,

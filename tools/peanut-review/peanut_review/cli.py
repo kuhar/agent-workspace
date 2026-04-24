@@ -455,7 +455,25 @@ def cmd_serve(args: argparse.Namespace) -> int:
     """Start the web UI server for a session."""
     session_dir = _get_session_dir(args)
     from .web import app as web_app
-    web_app.serve(session_dir, host=args.host, port=args.port)
+    try:
+        web_app.serve(session_dir, host=args.host, port=args.port)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Stop a running web UI server for a session."""
+    session_dir = _get_session_dir(args)
+    from .web import app as web_app
+    try:
+        payload = web_app.stop(session_dir, timeout=args.timeout)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    url = payload.get("url") or f"pid {payload.get('pid')}"
+    print(f"Stopped {url}")
     return 0
 
 
@@ -596,6 +614,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--port", type=int, default=0,
                     help="Bind port (0 = OS-assigned, default)")
 
+    # stop
+    sp = sub.add_parser("stop", help="Stop the web UI server for a session")
+    sp.add_argument("--timeout", type=float, default=5.0,
+                    help="Seconds to wait for graceful shutdown before SIGKILL (default: 5)")
+
     return p
 
 
@@ -626,6 +649,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "archive": cmd_archive,
         "serve": cmd_serve,
+        "stop": cmd_stop,
     }.get(args.command)
 
     if handler is None:

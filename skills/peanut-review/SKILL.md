@@ -161,6 +161,9 @@ comments the same way agents do; the web UI is a shell over the existing
 ```bash
 peanut-review serve --port 16200
 # → http://127.0.0.1:16200/sessions/<session-id>/
+
+# From another shell (same $PEANUT_SESSION):
+peanut-review stop
 ```
 
 The server:

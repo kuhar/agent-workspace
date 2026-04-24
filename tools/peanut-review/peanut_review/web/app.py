@@ -7,8 +7,11 @@ hosting is a single-line change: drop the one-session redirect in
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -321,17 +324,112 @@ def make_server(host: str, port: int, registry: SessionRegistry) -> ThreadingHTT
     return ThreadingHTTPServer((host, port), handler_cls)
 
 
+def pidfile_path(session_dir: str | Path) -> Path:
+    """Location of the server pidfile for a single-session binding."""
+    return Path(session_dir) / "web.pid"
+
+
+def _read_pidfile(path: Path) -> tuple[int | None, dict]:
+    """Parse a pidfile. Returns (pid_if_alive, raw_payload)."""
+    if not path.exists():
+        return None, {}
+    try:
+        payload = json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return None, {}
+    pid = int(payload.get("pid", 0))
+    if pid <= 0:
+        return None, payload
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None, payload
+    except PermissionError:
+        # Process exists but owned by someone else — treat as "alive" but we
+        # probably can't signal it.
+        return pid, payload
+    return pid, payload
+
+
 def serve(session_dir: str | Path, host: str = "127.0.0.1", port: int = 0) -> None:
-    """Blocking server for a single session. Port 0 → OS-assigned."""
+    """Blocking server for a single session. Port 0 → OS-assigned.
+
+    Writes a pidfile at `<session>/web.pid` so `peanut-review stop` can find us.
+    If a live pidfile already points at a running server, refuses to start.
+    """
+    sdir = Path(session_dir)
+    pidfile = pidfile_path(sdir)
+    existing_pid, _ = _read_pidfile(pidfile)
+    if existing_pid is not None:
+        raise RuntimeError(
+            f"server already running (pid {existing_pid}) for this session. "
+            f"Stop it first with `peanut-review stop` or remove {pidfile}."
+        )
+
     registry = SessionRegistry()
-    session_id = registry.bind(session_dir)
+    session_id = registry.bind(sdir)
     srv = make_server(host, port, registry)
     bound_port = srv.server_address[1]
-    print(f"peanut-review web UI: http://{host}:{bound_port}/sessions/{session_id}/",
-          flush=True)
+    url = f"http://{host}:{bound_port}/sessions/{session_id}/"
+
+    pidfile.write_text(json.dumps({
+        "pid": os.getpid(),
+        "host": host,
+        "port": bound_port,
+        "url": url,
+        "session_id": session_id,
+    }) + "\n")
+
+    print(f"peanut-review web UI: {url}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         srv.server_close()
+        try:
+            pidfile.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def stop(session_dir: str | Path, timeout: float = 5.0) -> dict:
+    """Signal a running serve() to shut down. Returns the last-known metadata.
+
+    Raises RuntimeError if no running server is found.
+    """
+    sdir = Path(session_dir)
+    pidfile = pidfile_path(sdir)
+    pid, payload = _read_pidfile(pidfile)
+    if pid is None:
+        # Clean up a stale pidfile if one existed.
+        if pidfile.exists():
+            pidfile.unlink()
+            raise RuntimeError(f"no running server (stale pidfile removed at {pidfile})")
+        raise RuntimeError(f"no running server (no pidfile at {pidfile})")
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError as e:
+        raise RuntimeError(f"cannot signal pid {pid}: {e}") from e
+
+    # Wait for the process to exit and for the pidfile to be cleaned.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        # Hard-kill if it didn't respond to SIGTERM within the timeout.
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # Remove any leftover pidfile (serve's finally block should have handled it,
+    # but belt-and-suspenders for the SIGKILL path).
+    if pidfile.exists():
+        pidfile.unlink()
+    return payload

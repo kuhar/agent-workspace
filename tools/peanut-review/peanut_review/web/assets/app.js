@@ -250,6 +250,122 @@
     }
   });
 
+  // --- Live comment merge ---
+  // Poll the server for the current (non-deleted) comment set and reconcile
+  // against the DOM: insert new ones, remove vanished ones, reflect resolved
+  // state changes. Meant to run while agents are posting during a review.
+
+  function findRowForAnchor(fileEl, lineNo) {
+    // Match the `.ln.new` (right-gutter) cell that carries the new-file line
+    // number, same axis threads are keyed on server-side.
+    for (const el of fileEl.querySelectorAll(".line")) {
+      const newLn = el.querySelector(".ln.new");
+      if (newLn && Number(newLn.dataset.line) === lineNo) return el;
+    }
+    return null;
+  }
+
+  function anchorLineFor(c) {
+    return (c.end_line != null && c.end_line !== c.line) ? c.end_line : c.line;
+  }
+
+  function insertFetchedComment(c) {
+    const fileEl = document.querySelector(`.file[data-file="${cssEsc(c.file)}"]`);
+    if (!fileEl) return;  // comment's file isn't in this diff
+    const anchor = anchorLineFor(c);
+    const row = findRowForAnchor(fileEl, anchor);
+    if (!row) return;  // line is outside the diff window; skip
+    const thread = ensureThread(row, c.file, anchor);
+    const rendered = document.createElement("div");
+    rendered.innerHTML = renderComment(c);
+    const node = rendered.firstElementChild;
+    // Preserve any in-progress composer at the bottom of the thread.
+    const form = thread.querySelector(".new-comment");
+    if (form) thread.insertBefore(node, form);
+    else thread.appendChild(node);
+  }
+
+  function pickScrollAnchor() {
+    // Topmost element still (partially) on-screen. Prefer `.file` headers
+    // because they don't move around as comments insert, but fall back to
+    // any visible `.line` so a reviewer mid-scroll inside one file stays
+    // pinned to that exact line.
+    const candidates = document.querySelectorAll(".file, .line, .comment");
+    for (const el of candidates) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > 0 && r.top < window.innerHeight) {
+        return { el, top: r.top };
+      }
+    }
+    return null;
+  }
+
+  function withStableScroll(mutate) {
+    const anchor = pickScrollAnchor();
+    mutate();
+    if (!anchor || !anchor.el.isConnected) return;
+    const after = anchor.el.getBoundingClientRect().top;
+    const delta = after - anchor.top;
+    if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+  }
+
+  async function refreshComments() {
+    let fetched;
+    try {
+      const r = await fetch(sessionUrl + "/api/comments");
+      if (!r.ok) return;
+      fetched = await r.json();
+    } catch { return; }
+
+    const fetchedById = new Map();
+    for (const c of fetched) fetchedById.set(c.id, c);
+
+    const domNodes = document.querySelectorAll(".comment[data-cid]");
+    const domIds = new Set();
+    for (const el of domNodes) domIds.add(el.dataset.cid);
+
+    // Nothing to change? Skip the scroll dance entirely.
+    let anyNew = false;
+    for (const c of fetched) if (!domIds.has(c.id)) { anyNew = true; break; }
+    let anyGone = false;
+    for (const el of domNodes) if (!fetchedById.has(el.dataset.cid)) { anyGone = true; break; }
+    let anyStateChange = false;
+    for (const el of domNodes) {
+      const c = fetchedById.get(el.dataset.cid);
+      if (c && c.resolved && !el.classList.contains("resolved")) { anyStateChange = true; break; }
+    }
+    if (!anyNew && !anyGone && !anyStateChange) return;
+
+    withStableScroll(() => {
+      // Removals first — a comment disappearing shifts content upward.
+      for (const el of domNodes) {
+        if (!fetchedById.has(el.dataset.cid)) {
+          const thread = el.closest(".comment-thread");
+          el.remove();
+          if (thread && !thread.querySelector(".comment") && !thread.querySelector(".new-comment")) {
+            thread.remove();
+          }
+        }
+      }
+      // State flips on what remains.
+      for (const el of document.querySelectorAll(".comment[data-cid]")) {
+        const c = fetchedById.get(el.dataset.cid);
+        if (!c) continue;
+        if (c.resolved && !el.classList.contains("resolved")) {
+          el.classList.add("resolved");
+          const btn = el.querySelector("[data-resolve]");
+          if (btn) btn.remove();
+        }
+      }
+      // Inserts last so new IDs don't collide with nodes we're about to drop.
+      for (const c of fetched) {
+        if (domIds.has(c.id)) continue;
+        insertFetchedComment(c);
+      }
+    });
+  }
+  setInterval(refreshComments, 3000);
+
   // --- Periodic session refresh (for state/signals) ---
   async function refreshSidebar() {
     try {

@@ -105,7 +105,7 @@ def test_render_page_smoke(session_dir: Path, repo: Path):
     assert "<!doctype html>" in html
     assert "foo.py" in html
     assert "suggestion" in html
-    assert f"/sessions/{s.id}" in html
+    assert f"/{s.id}" in html
     assert "nice" in html  # comment body rendered
     assert "felix" in html  # author
 
@@ -171,7 +171,7 @@ def test_server_root_renders_index(session_dir: Path):
         text = body.decode("utf-8")
         assert "<!doctype html>" in text
         # Index page must link to the known session.
-        assert f'href="/sessions/{session_id}/"' in text
+        assert f'href="/{session_id}/"' in text
         assert "peanut-review" in text
     finally:
         srv.shutdown()
@@ -180,7 +180,7 @@ def test_server_root_renders_index(session_dir: Path):
 def test_server_session_page(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
-        code, body = _get(f"http://127.0.0.1:{port}/sessions/{session_id}/")
+        code, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
         assert code == 200
         assert b"<!doctype html>" in body
         assert b"foo.py" in body
@@ -191,7 +191,7 @@ def test_server_session_page(session_dir: Path):
 def test_server_session_api(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
-        code, raw = _get(f"http://127.0.0.1:{port}/sessions/{session_id}/api/session")
+        code, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/session")
         assert code == 200
         data = json.loads(raw)
         assert data["id"] == session_id
@@ -206,7 +206,7 @@ def test_server_post_comment(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         code, data = _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "body": "looks good",
              "severity": "suggestion", "author": "jakub"},
         )
@@ -226,7 +226,7 @@ def test_server_post_comment_validates_line(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         code, data = _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 999, "body": "x"},
         )
         assert code == 400
@@ -239,7 +239,7 @@ def test_server_post_comment_invalid_severity(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         code, data = _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "body": "x", "severity": "bogus"},
         )
         assert code == 400
@@ -252,11 +252,11 @@ def test_server_resolve(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         _, c = _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "body": "bug", "author": "jakub"},
         )
         code, data = _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/resolve",
+            f"http://127.0.0.1:{port}/{session_id}/api/resolve",
             {"comment_id": c["id"], "by": "jakub"},
         )
         assert code == 200
@@ -268,10 +268,28 @@ def test_server_resolve(session_dir: Path):
         srv.shutdown()
 
 
+def test_server_reserved_top_level_api_not_a_session(session_dir: Path):
+    """`/api/...` must never be interpreted as a session id."""
+    srv, _, port = _start_server(session_dir)
+    try:
+        # /api/sessions is a real route (list) — works.
+        code, _ = _get(f"http://127.0.0.1:{port}/api/sessions")
+        assert code == 200
+        # /api/bogus is not a route; must 404 (not "unknown session: api").
+        _get(f"http://127.0.0.1:{port}/api/bogus")
+    except urllib.request.HTTPError as e:
+        assert e.code == 404
+        body = e.read().decode("utf-8")
+        # Must not claim "api" is an unknown session.
+        assert "unknown session" not in body
+    finally:
+        srv.shutdown()
+
+
 def test_server_unknown_session(session_dir: Path):
     srv, _, port = _start_server(session_dir)
     try:
-        code, data = _get(f"http://127.0.0.1:{port}/sessions/nope/api/session")
+        code, data = _get(f"http://127.0.0.1:{port}/nope/api/session")
         # urllib raises on 4xx, so we need HTTPError handling
     except urllib.request.HTTPError as e:
         assert e.code == 404
@@ -286,7 +304,7 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
     try:
         # Seed a comment
         _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "body": "x", "author": "jakub"},
         )
         # Amend to create a new HEAD (with a tree change so the SHA actually shifts)
@@ -294,7 +312,7 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
         _git(repo, "commit", "-q", "--amend", "--no-edit", "-a")
 
         # Hit /api/session — should trigger migrate
-        _, raw = _get(f"http://127.0.0.1:{port}/sessions/{session_id}/api/session")
+        _, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/session")
         data = json.loads(raw)
         assert data["head_shifted"] is True
 
@@ -303,7 +321,7 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
         assert comments[0].stale is True
 
         # Subsequent hit — HEAD already migrated, no shift this time
-        _, raw2 = _get(f"http://127.0.0.1:{port}/sessions/{session_id}/api/session")
+        _, raw2 = _get(f"http://127.0.0.1:{port}/{session_id}/api/session")
         data2 = json.loads(raw2)
         assert data2["head_shifted"] is False
     finally:
@@ -439,8 +457,8 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         code, body = _get(f"http://127.0.0.1:{port}/")
         assert code == 200
         text = body.decode("utf-8")
-        assert f'href="/sessions/{s1.id}/"' in text
-        assert f'href="/sessions/{s2.id}/"' in text
+        assert f'href="/{s1.id}/"' in text
+        assert f'href="/{s2.id}/"' in text
 
         code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
         assert code == 200
@@ -450,8 +468,8 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         # Newest first
         assert data[0]["created_at"] >= data[1]["created_at"]
         # Each session still reachable at its own URL
-        c1, _ = _get(f"http://127.0.0.1:{port}/sessions/{s1.id}/")
-        c2, _ = _get(f"http://127.0.0.1:{port}/sessions/{s2.id}/")
+        c1, _ = _get(f"http://127.0.0.1:{port}/{s1.id}/")
+        c2, _ = _get(f"http://127.0.0.1:{port}/{s2.id}/")
         assert c1 == 200 and c2 == 200
     finally:
         srv.shutdown()
@@ -477,7 +495,7 @@ def test_server_post_range_comment_persists_end_line(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         code, data = _post(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "end_line": 2,
              "body": "range comment", "severity": "nit"},
         )
@@ -561,14 +579,14 @@ def test_index_emits_prefixed_hrefs_and_base_url_global(tmp_path: Path, repo: Pa
         assert code == 200
         text = body.decode("utf-8")
         # Server-rendered link carries the prefix.
-        assert f'href="/pr/sessions/{s.id}/"' in text
+        assert f'href="/pr/{s.id}/"' in text
         # Client-side JS can read the same prefix.
         assert 'window.PR_BASE_URL = "/pr"' in text
         # No bare-root session hrefs.
-        assert f'href="/sessions/{s.id}/"' not in text
+        assert f'href="/{s.id}/"' not in text
 
         # Router still accepts the stripped path (caddy strips /pr before us).
-        c, _ = _get(f"http://127.0.0.1:{port}/sessions/{s.id}/")
+        c, _ = _get(f"http://127.0.0.1:{port}/{s.id}/")
         assert c == 200
     finally:
         srv.shutdown()
@@ -582,11 +600,11 @@ def test_session_page_emits_prefixed_session_url(session_dir: Path):
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     try:
-        code, body = _get(f"http://127.0.0.1:{port}/sessions/{session_id}/")
+        code, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
         assert code == 200
         text = body.decode("utf-8")
         # app.js API calls are rooted at window.PR_SESSION_URL.
-        assert f'window.PR_SESSION_URL = "/pr/sessions/{session_id}"' in text
+        assert f'window.PR_SESSION_URL = "/pr/{session_id}"' in text
         assert 'window.PR_BASE_URL = "/pr"' in text
     finally:
         srv.shutdown()
@@ -602,7 +620,7 @@ def test_server_filter_comments_by_round(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         code, raw = _get(
-            f"http://127.0.0.1:{port}/sessions/{session_id}/api/comments?round=2",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments?round=2",
         )
         assert code == 200
         data = json.loads(raw)

@@ -161,7 +161,10 @@ def _auto_migrate_if_shifted(session_dir: Path) -> tuple[bool, str | None]:
     return True, live
 
 
-ROUTE_RE = re.compile(r"^/sessions/([^/]+)(/.*)?$")
+ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
+# Top-level path segments that are NOT session ids — reserved for future and
+# current global routes. Guards against a session-id slug called "api".
+RESERVED_ROOTS = {"api"}
 VALID_SEVERITIES = {s.value for s in Severity}
 
 
@@ -234,7 +237,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         m = ROUTE_RE.match(url.path)
-        if not m:
+        if not m or m.group(1) in RESERVED_ROOTS:
             self._error(404, f"no route for {url.path}")
             return
         session_id, tail = m.group(1), (m.group(2) or "/")
@@ -302,7 +305,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         m = ROUTE_RE.match(url.path)
-        if not m:
+        if not m or m.group(1) in RESERVED_ROOTS:
             self._error(404, f"no route for {url.path}")
             return
         session_id, tail = m.group(1), (m.group(2) or "/")

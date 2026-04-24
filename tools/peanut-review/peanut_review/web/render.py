@@ -207,7 +207,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     )
     return (
         f'<tr class="session-row state-{state}" data-id="{sid}">'
-        f'<td class="id"><a href="{base_url}/sessions/{sid}/">{sid}</a>'
+        f'<td class="id"><a href="{base_url}/{sid}/">{sid}</a>'
         f'<div class="mono head">{head}</div></td>'
         f'<td><span class="badge state-{state}">{state}</span>'
         f'<div class="sub">{agent_count} agent{"s" if agent_count != 1 else ""}</div></td>'
@@ -302,7 +302,7 @@ def render_page(
     )
     state_class = f"state-{session.state}"
 
-    session_url = f"{base_url}/sessions/{session_id}"
+    session_url = f"{base_url}/{session_id}"
     # Escape single quotes for safe JSON in JS
     session_url_js = json.dumps(session_url)
     session_id_js = json.dumps(session_id)

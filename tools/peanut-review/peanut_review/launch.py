@@ -13,19 +13,22 @@ from .models import AgentStatus, SessionState
 from .session import load_session, save_session, update_agent_status
 
 
-def _find_launcher_script() -> str:
-    """Find cursor-agent-task.sh relative to known locations."""
-    candidates = [
-        Path(__file__).resolve().parent.parent.parent.parent
-        / "skills" / "ask-the-peanut-gallery" / "cursor-agent-task.sh",
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    raise FileNotFoundError(
-        "cursor-agent-task.sh not found. Searched: "
-        + ", ".join(str(c) for c in candidates)
-    )
+_LAUNCHER_SCRIPTS = {
+    "cursor": "cursor-agent-task.sh",
+    "opencode": "opencode-agent-task.sh",
+}
+
+
+def _find_launcher_script(runner: str = "cursor") -> str:
+    """Find the launcher script for a given runner ("cursor" or "opencode")."""
+    script_name = _LAUNCHER_SCRIPTS.get(runner)
+    if not script_name:
+        raise ValueError(f"unknown runner: {runner!r} (expected one of {list(_LAUNCHER_SCRIPTS)})")
+    path = (Path(__file__).resolve().parent.parent.parent.parent
+            / "skills" / "ask-the-peanut-gallery" / script_name)
+    if path.exists():
+        return str(path)
+    raise FileNotFoundError(f"{script_name} not found at {path}")
 
 
 def render_prompt(template_path: str | Path, variables: dict[str, str]) -> str:
@@ -37,8 +40,39 @@ def render_prompt(template_path: str | Path, variables: dict[str, str]) -> str:
     return Template(text).safe_substitute(variables)
 
 
-def render_all_prompts(session_dir: str | Path, template_path: str | Path) -> dict[str, Path]:
-    """Render per-agent prompts and write to <session>/prompts/. Returns {agent: path}."""
+def _resolve_template(user_template: str | Path | None, runner: str) -> str:
+    """Pick the prompt template for a given runner.
+
+    Explicit --template always wins. Otherwise: cursor prefers MCP if the MCP
+    launcher script is installed; opencode always uses the CLI template (MCP
+    integration is not wired up yet).
+    """
+    if user_template:
+        return str(user_template)
+    skills_dir = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "peanut-review"
+    if runner == "cursor":
+        mcp_script = Path(__file__).resolve().parent.parent / "bin" / "peanut-review-mcp"
+        if mcp_script.exists():
+            mcp_default = skills_dir / "agent-prompt-mcp.md"
+            if mcp_default.exists():
+                return str(mcp_default)
+    default = skills_dir / "agent-prompt.md"
+    if default.exists():
+        return str(default)
+    raise FileNotFoundError(
+        f"no prompt template found for runner={runner!r} (looked in {skills_dir})"
+    )
+
+
+def render_all_prompts(
+    session_dir: str | Path,
+    template_path: str | Path | None = None,
+) -> dict[str, Path]:
+    """Render per-agent prompts and write to <session>/prompts/. Returns {agent: path}.
+
+    If template_path is provided, it is used for all agents. Otherwise the
+    template is picked per agent based on agent.runner.
+    """
     session = load_session(session_dir)
     sdir = Path(session_dir)
     prompts_dir = sdir / "prompts"
@@ -57,7 +91,8 @@ def render_all_prompts(session_dir: str | Path, template_path: str | Path) -> di
             "TOPIC_REF": session.topic_ref,
             "PR_BIN": pr_bin,
         }
-        rendered = render_prompt(template_path, variables)
+        tpl = _resolve_template(template_path, agent.runner)
+        rendered = render_prompt(tpl, variables)
         prompt_path = prompts_dir / f"{agent.name}.md"
         prompt_path.write_text(rendered)
         result[agent.name] = prompt_path
@@ -134,29 +169,55 @@ def _setup_mcp_config(session_dir: Path, workspace: str, agent_name: str, mcp_sc
     return mcp_path
 
 
+def _build_agent_cmd(
+    agent,
+    *,
+    session,
+    session_dir: Path,
+    prompt_path: Path,
+) -> list[str]:
+    """Build the launcher command for a single agent based on its runner."""
+    launcher = _find_launcher_script(agent.runner)
+    cmd = [
+        launcher,
+        "--model", agent.model,
+        "--workspace", session.workspace,
+        "--output-dir", str(session_dir / "log"),
+        "--name", agent.name,
+        "--timeout", str(session.timeout),
+        "--prompt-file", str(prompt_path),
+    ]
+    if agent.runner == "opencode":
+        cmd += [
+            "--lcode-primary", agent.lcode_primary or "qwen",
+            "--lcode-subagent", agent.lcode_subagent or "null",
+        ]
+    return cmd
+
+
 def launch_agents(
     session_dir: str | Path,
-    template_path: str | Path,
+    template_path: str | Path | None = None,
     dry_run: bool = False,
     cli_json: str | None = None,
 ) -> list[dict]:
-    """Spawn cursor agents for all agents in the session.
+    """Spawn agents for all entries in the session, dispatching by agent.runner.
 
     Returns list of {name, pid, cmd} dicts.
     """
     session = load_session(session_dir)
-    _validate_cli_json(session.workspace)
     sdir = Path(session_dir)
 
-    mcp_script = _find_mcp_script()
-    if not mcp_script:
-        print("  MCP: peanut-review-mcp script not found", file=sys.stderr)
-    launcher = _find_launcher_script()
+    runners = {a.runner for a in session.agents}
+    if "cursor" in runners:
+        _validate_cli_json(session.workspace)
 
-    # Render prompts
+    mcp_script = _find_mcp_script() if "cursor" in runners else None
+    if "cursor" in runners and not mcp_script:
+        print("  MCP: peanut-review-mcp script not found", file=sys.stderr)
+
     prompts = render_all_prompts(session_dir, template_path)
 
-    # Transition to round1
     session.state = SessionState.ROUND1.value
     save_session(sdir, session)
 
@@ -164,19 +225,9 @@ def launch_agents(
     for agent in session.agents:
         prompt_path = prompts[agent.name]
         log_path = sdir / "log" / f"{agent.name}.log"
-
-        cmd = [
-            launcher,
-            "--model", agent.model,
-            "--workspace", session.workspace,
-            "--output-dir", str(sdir / "log"),
-            "--name", agent.name,
-            "--timeout", str(session.timeout),
-            "--prompt-file", str(prompt_path),
-        ]
+        cmd = _build_agent_cmd(agent, session=session, session_dir=sdir, prompt_path=prompt_path)
 
         env = os.environ.copy()
-        # Put peanut-review bin dir on PATH so agents can call it
         bin_dir = str(Path(__file__).resolve().parent.parent / "bin")
         env["PATH"] = bin_dir + ":" + env.get("PATH", "")
         env["GIT_AUTHOR_NAME"] = agent.name
@@ -189,9 +240,8 @@ def launch_agents(
             results.append({"name": agent.name, "pid": None, "cmd": cmd})
             continue
 
-        # Write per-agent MCP config (agent name must be baked in since
-        # cursor-agent's env doesn't propagate to MCP server children)
-        if mcp_script:
+        # MCP config is cursor-specific for now — opencode runs in CLI mode.
+        if agent.runner == "cursor" and mcp_script:
             _setup_mcp_config(sdir, session.workspace, agent.name, mcp_script)
 
         with open(log_path, "w") as log_file:
@@ -206,7 +256,9 @@ def launch_agents(
         update_agent_status(sdir, agent.name, AgentStatus.RUNNING.value, proc.pid)
         results.append({"name": agent.name, "pid": proc.pid, "cmd": cmd})
 
-        # Stagger launches to avoid cursor-agent cli-config.json race condition
+        # Stagger launches: cursor-agent has a cli-config.json race, and lcode's
+        # idempotent llama-server startup also benefits from letting the first
+        # opencode agent finish booting servers before peers join.
         if agent != session.agents[-1]:
             time.sleep(1)
 

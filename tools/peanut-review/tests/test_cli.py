@@ -350,6 +350,54 @@ def test_add_comment_rejects_line_zero():
     assert len(read_all_comments(sd)) == 0
 
 
+def test_add_comment_from_body_file_preserves_backticks():
+    """Bodies with backticks must survive intact when read via --body-file."""
+    ws = _make_workspace({"foo.py": "a\nb\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    body_path = os.path.join(tempfile.mkdtemp(prefix="pr-body-"), "body.md")
+    body_text = "Verified: (1) `py_compile` clean, (2) `bash -n` clean, (3) $(echo hi) runs"
+    Path(body_path).write_text(body_text)
+
+    rc = main(["--session", sd, "add-comment",
+               "--file", "foo.py", "--line", "1",
+               "--body-file", body_path, "--author", "vera"])
+    assert rc == 0
+
+    from peanut_review.store import read_all_comments
+    comments = read_all_comments(sd)
+    assert len(comments) == 1
+    assert comments[0].body == body_text
+
+
+def test_add_comment_requires_body_or_body_file():
+    ws = _make_workspace({"foo.py": "a\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "add-comment",
+                   "--file", "foo.py", "--line", "1", "--author", "vera"])
+    assert rc == 1
+    assert "--body or --body-file is required" in err.getvalue()
+
+
+def test_add_comment_body_file_missing():
+    ws = _make_workspace({"foo.py": "a\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "add-comment",
+                   "--file", "foo.py", "--line", "1",
+                   "--body-file", "/nonexistent/path.md", "--author", "vera"])
+    assert rc == 1
+    assert "could not read --body-file" in err.getvalue()
+
+
 def test_add_comment_meta_skips_validation():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd)

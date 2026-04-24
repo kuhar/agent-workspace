@@ -71,6 +71,11 @@ ${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --severity <
 Severity guide: critical = bugs/security, warning = likely problems,
 suggestion = improvements, nit = style/naming.
 
+IMPORTANT: if your body contains backticks (`foo`) or `$(...)`, the shell
+will command-substitute them and silently eat the content. Use `--body-file`
+instead: write the body to a temp file with your Write tool, then pass the
+path. Example: `--body-file /tmp/c42.md` instead of `--body "…\`foo\`…"`.
+
 When done with all findings, signal completion:
 ```
 ${PR_BIN} --session ${SESSION} signal round1-done

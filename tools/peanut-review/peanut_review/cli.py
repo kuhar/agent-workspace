@@ -97,26 +97,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_launch(args: argparse.Namespace) -> int:
     """Spawn all agents."""
     session_dir = _get_session_dir(args)
-    template = args.template
-    if not template:
-        skills_dir = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "peanut-review"
-        # Prefer MCP prompt if peanut-review-mcp script exists
-        mcp_script = Path(__file__).resolve().parent.parent / "bin" / "peanut-review-mcp"
-        if mcp_script.exists():
-            mcp_default = skills_dir / "agent-prompt-mcp.md"
-            if mcp_default.exists():
-                template = str(mcp_default)
-        if not template:
-            default = skills_dir / "agent-prompt.md"
-            if default.exists():
-                template = str(default)
-            else:
-                print("Error: --template required (agent-prompt.md not found at default location)", file=sys.stderr)
-                return 1
-
     from . import launch
+    # When --template is omitted, let launch_agents pick per-agent based on
+    # each agent's runner (cursor → MCP-preferred, opencode → CLI).
     results = launch.launch_agents(
-        session_dir, template,
+        session_dir, args.template,
         dry_run=args.dry_run,
         cli_json=getattr(args, "cli_json", None),
     )
@@ -134,6 +119,21 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
     s = sess.load_session(session_dir)
     round_num = args.round if args.round is not None else sess.current_round(s.state)
 
+    # Body source: --body-file > --body (exactly one required). --body-file is
+    # preferred for agent-authored comments because the shell eats backticks
+    # and $(...) inside double-quoted --body arguments.
+    if args.body_file:
+        try:
+            body = Path(args.body_file).read_text()
+        except OSError as e:
+            print(f"Error: could not read --body-file: {e}", file=sys.stderr)
+            return 1
+    elif args.body is not None:
+        body = args.body
+    else:
+        print("Error: --body or --body-file is required", file=sys.stderr)
+        return 1
+
     # Validate file/line
     lines, err = sess.validate_comment_location(s.workspace, args.file, args.line)
     if err:
@@ -145,7 +145,7 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
         file=args.file,
         line=args.line,
         end_line=args.end_line,
-        body=args.body,
+        body=body,
         severity=args.severity,
         round=round_num,
         head_sha=s.current_head,
@@ -499,7 +499,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", required=True, help="Relative file path")
     sp.add_argument("--line", type=int, required=True, help="Line number")
     sp.add_argument("--end-line", type=int, default=None, help="End line number")
-    sp.add_argument("--body", required=True, help="Comment text")
+    sp.add_argument("--body", help="Comment text (watch for shell-eaten backticks — prefer --body-file)")
+    sp.add_argument("--body-file", help="Read comment text from FILE (safer for bodies with backticks or $ chars)")
     sp.add_argument("--severity", default="suggestion",
                     choices=["critical", "warning", "suggestion", "nit"],
                     help="Severity (default: suggestion)")

@@ -32,6 +32,21 @@ peanut-review init \
   --bead
 ```
 
+Each agent may specify `"runner": "cursor"` (default) or `"runner": "opencode"`.
+Opencode agents route through the `lcode` wrapper; they accept optional
+`"lcode_primary"` and `"lcode_subagent"` fields (default: `"qwen"`, `"null"`).
+Example mixed-runner lineup:
+
+```json
+[
+  {"name": "vera",  "model": "opus-4.6-thinking",           "persona": "vera.md"},
+  {"name": "felix", "model": "llama-primary/qwen3.6-35b-a3b",
+   "persona": "felix.md", "runner": "opencode"},
+  {"name": "petra", "model": "llama-primary/qwen3.6-35b-a3b",
+   "persona": "petra.md", "runner": "opencode"}
+]
+```
+
 This prints the session directory path. Set it for subsequent commands:
 ```bash
 export PEANUT_SESSION=<printed-path>
@@ -153,6 +168,21 @@ peanut-review archive
   JSONL appends). Proceed with available feedback.
 - If the orchestrator crashes, run `peanut-review status` in a new session
   to discover the current state and resume from where you left off.
+
+## Runners: cursor vs opencode
+
+- **cursor** (default): launches `cursor-agent --print` via `cursor-agent-task.sh`.
+  Requires cursor-agent to be logged in. Prefers MCP transport when the
+  `peanut-review-mcp` script is installed, falls back to CLI.
+- **opencode**: launches `opencode run` via `opencode-agent-task.sh`, which
+  forwards through the `lcode` wrapper so local `llama-server` instances boot
+  automatically. Currently CLI mode only (MCP integration via `opencode.json`
+  is not wired up yet). The first opencode agent spawns the llama-servers; the
+  rest reuse the already-running processes via lcode's idempotent health check.
+
+Only one `lcode` primary/subagent pair can be running at a time, so multiple
+opencode agents on the same session should share the same `lcode_primary` /
+`lcode_subagent` values (persona diversity still provides review breadth).
 
 ## Agent communication: MCP vs CLI
 

@@ -7,7 +7,10 @@ name = "peanut-review"
 version = "0.1.0"
 description = "Structured multi-agent code review CLI"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["Pygments>=2.10"]
 
 [project.scripts]
 peanut-review = "peanut_review.__main__:main"
+
+[tool.setuptools.package-data]
+peanut_review = ["web/assets/*"]

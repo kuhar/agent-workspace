@@ -151,6 +151,37 @@ peanut-review verdict --request-changes --body "Outstanding critical issue in X"
 peanut-review archive
 ```
 
+## Human review UI
+
+A browser-based review UI is built into peanut-review and shares the exact
+same session storage — no separate tool, no duplicate CLI. Humans post
+comments the same way agents do; the web UI is a shell over the existing
+`add-comment` / `resolve` paths.
+
+```bash
+peanut-review serve --port 16200
+# → http://127.0.0.1:16200/sessions/<session-id>/
+```
+
+The server:
+- Renders a unified diff with pygments syntax highlighting.
+- Shows existing comments (agent + human) anchored to source-file lines,
+  with author, severity, round, and stale/resolved badges.
+- Lets humans post new comments by clicking a line number.
+- Auto-detects workspace HEAD shifts (e.g. `git commit --amend`) and runs
+  `migrate` — stale comments get dimmed in the UI. No more git-notes
+  coupling to commit SHAs.
+- Is session-indexed from day 1 (`/sessions/<id>/...`) so a future
+  multi-session daemon is a one-line change (drop the single-session
+  redirect in `web/app.py`).
+
+Standalone human-only review (no agents):
+
+```bash
+peanut-review init --workspace /repo --base main --topic HEAD
+peanut-review serve --port 16200
+```
+
 ## Agent selection guidelines
 
 - **Always include Vera** — she is the most thorough and valuable reviewer

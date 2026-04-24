@@ -451,6 +451,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Start the web UI server for a session."""
+    session_dir = _get_session_dir(args)
+    from .web import app as web_app
+    web_app.serve(session_dir, host=args.host, port=args.port)
+    return 0
+
+
 def cmd_archive(args: argparse.Namespace) -> int:
     """Export comments to git notes for peanut-review archival."""
     session_dir = _get_session_dir(args)
@@ -582,6 +590,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("archive", help="Export comments to git notes")
     sp.add_argument("--ref", help="Git notes ref (default: refs/notes/peanut-review)")
 
+    # serve
+    sp = sub.add_parser("serve", help="Start the web UI for a session")
+    sp.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    sp.add_argument("--port", type=int, default=0,
+                    help="Bind port (0 = OS-assigned, default)")
+
     return p
 
 
@@ -611,6 +625,7 @@ def main(argv: list[str] | None = None) -> int:
         "migrate": cmd_migrate,
         "status": cmd_status,
         "archive": cmd_archive,
+        "serve": cmd_serve,
     }.get(args.command)
 
     if handler is None:

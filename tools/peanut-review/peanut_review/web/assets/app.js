@@ -96,7 +96,6 @@
       <textarea placeholder="Review comment for ${esc(label)}..."></textarea>
       <div class="controls">
         <button class="cancel">Cancel</button>
-        <span style="flex:1"></span>
         <select class="sev">
           <option value="suggestion">suggestion</option>
           <option value="warning">warning</option>

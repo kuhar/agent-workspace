@@ -207,7 +207,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     )
     return (
         f'<tr class="session-row state-{state}" data-id="{sid}">'
-        f'<td class="id"><a href="{base_url}/{sid}/">{sid}</a>'
+        f'<td class="id"><a href="{base_url}/{sid}">{sid}</a>'
         f'<div class="mono head">{head}</div></td>'
         f'<td><span class="badge state-{state}">{state}</span>'
         f'<div class="sub">{agent_count} agent{"s" if agent_count != 1 else ""}</div></td>'

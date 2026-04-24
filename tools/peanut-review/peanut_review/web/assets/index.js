@@ -26,7 +26,7 @@
     const agent = `${s.agent_count} agent${s.agent_count !== 1 ? "s" : ""}`;
     return `
       <tr class="session-row state-${esc(s.state)}" data-id="${esc(s.id)}">
-        <td class="id"><a href="${BASE}/${esc(s.id)}/">${esc(s.id)}</a>
+        <td class="id"><a href="${BASE}/${esc(s.id)}">${esc(s.id)}</a>
           <div class="mono head">${esc(s.current_head || "")}</div></td>
         <td><span class="badge state-${esc(s.state)}">${esc(s.state)}</span>
           <div class="sub">${esc(agent)}</div></td>

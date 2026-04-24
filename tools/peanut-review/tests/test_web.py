@@ -171,7 +171,7 @@ def test_server_root_renders_index(session_dir: Path):
         text = body.decode("utf-8")
         assert "<!doctype html>" in text
         # Index page must link to the known session.
-        assert f'href="/{session_id}/"' in text
+        assert f'href="/{session_id}"' in text
         assert "peanut-review" in text
     finally:
         srv.shutdown()
@@ -264,6 +264,18 @@ def test_server_resolve(session_dir: Path):
 
         comments = store.read_all_comments(session_dir)
         assert comments[0].resolved is True
+    finally:
+        srv.shutdown()
+
+
+def test_server_session_page_accepts_both_slash_and_no_slash(session_dir: Path):
+    """Canonical session URL has no trailing slash, but /<id>/ still works."""
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        c1, _ = _get(f"http://127.0.0.1:{port}/{session_id}")
+        c2, _ = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        assert c1 == 200
+        assert c2 == 200
     finally:
         srv.shutdown()
 
@@ -457,8 +469,8 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         code, body = _get(f"http://127.0.0.1:{port}/")
         assert code == 200
         text = body.decode("utf-8")
-        assert f'href="/{s1.id}/"' in text
-        assert f'href="/{s2.id}/"' in text
+        assert f'href="/{s1.id}"' in text
+        assert f'href="/{s2.id}"' in text
 
         code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
         assert code == 200
@@ -579,11 +591,11 @@ def test_index_emits_prefixed_hrefs_and_base_url_global(tmp_path: Path, repo: Pa
         assert code == 200
         text = body.decode("utf-8")
         # Server-rendered link carries the prefix.
-        assert f'href="/pr/{s.id}/"' in text
+        assert f'href="/pr/{s.id}"' in text
         # Client-side JS can read the same prefix.
         assert 'window.PR_BASE_URL = "/pr"' in text
         # No bare-root session hrefs.
-        assert f'href="/{s.id}/"' not in text
+        assert f'href="/{s.id}"' not in text
 
         # Router still accepts the stripped path (caddy strips /pr before us).
         c, _ = _get(f"http://127.0.0.1:{port}/{s.id}/")

@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import polling, store
-from ..models import Comment, CommentEdit, Severity
+from ..models import Comment, Severity
 from ..session import (
     load_session,
     refresh_agent_statuses,
@@ -423,28 +423,25 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(400, "must supply body or severity")
         if severity is not None and severity not in VALID_SEVERITIES:
             return self._error(400, f"invalid severity: {severity}")
-        author = str(data.get("author") or _default_author())
+        edited_by = str(data.get("author") or _default_author())
 
-        comments = store.read_all_comments(session_dir)
-        target = next((c for c in comments if c.id == cid), None)
-        if target is None:
-            return self._error(404, f"comment not found: {cid}")
-
-        e = CommentEdit(
-            target_id=cid,
-            author=author,
+        if not store.edit_comment(
+            session_dir, cid,
             body=str(body) if body is not None else None,
             severity=str(severity) if severity is not None else None,
-        )
-        store.append_edit(session_dir, e)
+            edited_by=edited_by,
+        ):
+            return self._error(404, f"comment not found: {cid}")
 
-        # Re-read to return the comment in its now-folded form, so the client
-        # can drop in the latest body/edited_at/versions without an extra GET.
-        refreshed = store.read_all_comments(session_dir)
-        merged = next((c for c in refreshed if c.id == cid), None)
-        if merged is None:
+        # Return the post-edit comment so the client can drop in the latest
+        # body/edited_at/versions without a follow-up GET.
+        refreshed = next(
+            (c for c in store.read_all_comments(session_dir) if c.id == cid),
+            None,
+        )
+        if refreshed is None:
             return self._error(500, "edit applied but comment vanished on reread")
-        self._json(200, _comment_to_dict(merged))
+        self._json(200, _comment_to_dict(refreshed))
 
     def _post_resolve(self, session_dir: Path, data: dict) -> None:
         cid = str(data.get("comment_id") or "")

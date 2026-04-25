@@ -1,15 +1,13 @@
 """Tests for the JSONL comment store."""
 import json
 import tempfile
-import time
 from pathlib import Path
 
-from peanut_review.models import Comment, CommentEdit
+from peanut_review.models import Comment
 from peanut_review.store import (
     append_comment,
-    append_edit,
-    collect_edits,
     delete_comment,
+    edit_comment,
     filter_comments,
     mark_stale,
     read_agent_comments,
@@ -291,117 +289,88 @@ def test_global_comment_stores_with_empty_file_and_zero_line():
     assert cs[0].line == 0
 
 
-def test_edit_applies_at_read_and_records_version():
-    """A CommentEdit folded into the parent updates body/severity and pushes
-    the prior values onto Comment.versions in load order."""
+def test_edit_rewrites_body_and_records_prior_version():
     sd = _make_session()
     c = Comment(author="vera", file="a.py", line=1, body="v1", severity="nit")
     append_comment(sd, c)
-    # Tiny sleep so timestamps differ; microsecond precision in _now_iso
-    # makes this enough even for a fast machine.
-    time.sleep(0.001)
-    append_edit(sd, CommentEdit(target_id=c.id, author="jakub",
-                                body="v2", severity="warning"))
 
-    [merged] = read_all_comments(sd)
-    assert merged.id == c.id
-    assert merged.body == "v2"
-    assert merged.severity == "warning"
-    assert merged.edited_by == "jakub"
-    assert merged.edited_at is not None
-    assert len(merged.versions) == 1
-    assert merged.versions[0]["body"] == "v1"
-    assert merged.versions[0]["severity"] == "nit"
-    assert merged.versions[0]["edited_at"] is None  # was the original
+    assert edit_comment(sd, c.id, body="v2", severity="warning",
+                        edited_by="jakub")
+
+    [stored] = read_all_comments(sd)
+    assert stored.id == c.id
+    assert stored.body == "v2"
+    assert stored.severity == "warning"
+    assert stored.edited_by == "jakub"
+    assert stored.edited_at is not None
+    assert len(stored.versions) == 1
+    assert stored.versions[0]["body"] == "v1"
+    assert stored.versions[0]["severity"] == "nit"
+    assert stored.versions[0]["edited_by"] is None  # original
 
 
-def test_multiple_edits_stack_in_timestamp_order():
+def test_multiple_edits_stack_versions_in_order():
     sd = _make_session()
     c = Comment(author="vera", file="a.py", line=1, body="v1", severity="nit")
     append_comment(sd, c)
-    time.sleep(0.001)
-    append_edit(sd, CommentEdit(target_id=c.id, author="jakub", body="v2"))
-    time.sleep(0.001)
-    append_edit(sd, CommentEdit(target_id=c.id, author="merlin",
-                                severity="critical"))
+    edit_comment(sd, c.id, body="v2", edited_by="jakub")
+    edit_comment(sd, c.id, severity="critical", edited_by="merlin")
 
-    [merged] = read_all_comments(sd)
-    assert merged.body == "v2"
-    assert merged.severity == "critical"
-    assert merged.edited_by == "merlin"
-    assert len(merged.versions) == 2
-    assert merged.versions[0]["body"] == "v1"
-    assert merged.versions[0]["severity"] == "nit"
-    assert merged.versions[1]["body"] == "v2"
-    assert merged.versions[1]["severity"] == "nit"  # still nit before merlin's edit
+    [stored] = read_all_comments(sd)
+    assert stored.body == "v2"
+    assert stored.severity == "critical"
+    assert stored.edited_by == "merlin"
+    assert len(stored.versions) == 2
+    # versions[0] = original (body=v1, severity=nit, no editor).
+    assert stored.versions[0]["body"] == "v1"
+    assert stored.versions[0]["severity"] == "nit"
+    assert stored.versions[0]["edited_by"] is None
+    # versions[1] = state after jakub's body edit (severity still nit).
+    assert stored.versions[1]["body"] == "v2"
+    assert stored.versions[1]["severity"] == "nit"
+    assert stored.versions[1]["edited_by"] == "jakub"
 
 
-def test_edit_by_other_author_writes_to_their_jsonl():
-    """When jakub edits vera's comment, the edit lands in jakub.jsonl. Vera's
-    own JSONL remains untouched (per-author append-only stays clean)."""
+def test_edit_only_severity_keeps_body():
     sd = _make_session()
-    c = Comment(author="vera", file="a.py", line=1, body="orig")
+    c = Comment(author="vera", file="a.py", line=1, body="hi", severity="nit")
     append_comment(sd, c)
-    append_edit(sd, CommentEdit(target_id=c.id, author="jakub", body="rewritten"))
+    edit_comment(sd, c.id, severity="warning", edited_by="irene")
 
-    vera_path = Path(sd) / "comments" / "vera.jsonl"
-    jakub_path = Path(sd) / "comments" / "jakub.jsonl"
-    assert vera_path.exists()
-    assert jakub_path.exists()
-    # Vera's file holds only her original comment record.
-    vera_lines = vera_path.read_text().splitlines()
-    assert len(vera_lines) == 1
-    assert json.loads(vera_lines[0])["type"] == "comment"
-    # Jakub's file holds only the edit event.
-    jakub_lines = jakub_path.read_text().splitlines()
-    assert len(jakub_lines) == 1
-    assert json.loads(jakub_lines[0])["type"] == "edit"
+    [stored] = read_all_comments(sd)
+    assert stored.body == "hi"  # unchanged
+    assert stored.severity == "warning"
+    assert stored.edited_by == "irene"
+
+
+def test_edit_unknown_id_returns_false():
+    sd = _make_session()
+    assert edit_comment(sd, "c_missing", body="x", edited_by="jakub") is False
+
+
+def test_edit_rejects_no_change():
+    sd = _make_session()
+    c = Comment(author="vera", file="a.py", line=1, body="hi")
+    append_comment(sd, c)
+    import pytest
+    with pytest.raises(ValueError):
+        edit_comment(sd, c.id, edited_by="jakub")
 
 
 def test_since_cursor_unaffected_by_edits():
-    """`comments --since <id>` is the cursor for new activity. An edit doesn't
-    add a new comment id, so it should NOT bubble up as something new."""
+    """`comments --since <id>` cursors on comment-creation order. An edit
+    doesn't change the comment id or timestamp, so the cursor stays put."""
     sd = _make_session()
     a = Comment(author="vera", file="a.py", line=1, body="A")
     b = Comment(author="vera", file="a.py", line=2, body="B")
     append_comment(sd, a)
-    time.sleep(0.001)
     append_comment(sd, b)
-    time.sleep(0.001)
-    append_edit(sd, CommentEdit(target_id=a.id, author="jakub", body="A-edited"))
+    edit_comment(sd, a.id, body="A-edited", edited_by="jakub")
 
     all_c = read_all_comments(sd)
     assert [c.id for c in all_c] == [a.id, b.id]
-    # since=a should still return only b — even though a was edited after b.
     after_a = filter_comments(all_c, since=a.id)
     assert [c.id for c in after_a] == [b.id]
-
-
-def test_unknown_target_id_edit_skipped_with_warning(caplog):
-    sd = _make_session()
-    c = Comment(author="vera", file="a.py", line=1, body="real")
-    append_comment(sd, c)
-    append_edit(sd, CommentEdit(target_id="c_doesnotexist", author="jakub",
-                                body="orphan"))
-
-    with caplog.at_level("WARNING"):
-        merged = read_all_comments(sd)
-    assert len(merged) == 1
-    assert merged[0].body == "real"
-    assert merged[0].versions == []
-    assert any("c_doesnotexist" in r.message for r in caplog.records)
-
-
-def test_edit_round_trip_via_jsonl():
-    e = CommentEdit(target_id="c_abc", author="jakub", body="new", severity="warning")
-    line = e.to_json()
-    e2 = CommentEdit.from_json(line)
-    assert e2.target_id == "c_abc"
-    assert e2.author == "jakub"
-    assert e2.body == "new"
-    assert e2.severity == "warning"
-    # Type discriminator round-trips.
-    assert json.loads(line)["type"] == "edit"
 
 
 def test_external_id_round_trip_via_jsonl():
@@ -436,47 +405,31 @@ def test_update_comment_external_stamps_metadata():
     assert stored.external_synced_body == "x"
 
 
-def test_collect_edits_returns_only_edits():
+def test_versions_round_trip_via_jsonl():
+    """versions/edited_at/edited_by are now persisted; round-trip check."""
     sd = _make_session()
     c = Comment(author="vera", file="a.py", line=1, body="v1")
     append_comment(sd, c)
-    append_edit(sd, CommentEdit(target_id=c.id, author="jakub", body="v2"))
-
-    edits = collect_edits(sd, target_id=c.id)
-    assert len(edits) == 1
-    assert edits[0].target_id == c.id
-    assert edits[0].author == "jakub"
-    assert edits[0].body == "v2"
-
-    # Filter out non-matching target.
-    assert collect_edits(sd, target_id="c_other") == []
+    edit_comment(sd, c.id, body="v2", edited_by="jakub")
+    [stored] = read_all_comments(sd)
+    # Re-read after a write cycle: versions still match.
+    [stored2] = read_all_comments(sd)
+    assert stored.versions == stored2.versions
+    assert stored.edited_at == stored2.edited_at
+    assert stored.body == "v2"
 
 
-def test_derived_fields_not_persisted_to_disk():
-    """to_json must not emit edited_at/edited_by/versions — they are folded
-    in fresh on each read from the edit log. If they leak to disk, an old
-    edit log + new on-disk fields would double-apply."""
-    c = Comment(author="vera", file="a.py", line=1, body="x")
-    c.edited_at = "2026-04-25T12:00:00.000000+00:00"
-    c.edited_by = "jakub"
-    c.versions = [{"body": "old", "severity": "nit"}]
-    raw = json.loads(c.to_json())
-    assert "edited_at" not in raw
-    assert "edited_by" not in raw
-    assert "versions" not in raw
-
-
-def test_resolve_skips_edit_records():
-    """resolve_comment iterates polymorphic JSONL — must not match a CommentEdit
-    with the same id-shape, must not crash on missing `resolved` attr."""
+def test_resolve_after_edit_keeps_edit_state():
     sd = _make_session()
-    c = Comment(author="vera", file="a.py", line=1, body="x")
+    c = Comment(author="vera", file="a.py", line=1, body="v1")
     append_comment(sd, c)
-    append_edit(sd, CommentEdit(target_id=c.id, author="jakub", body="y"))
+    edit_comment(sd, c.id, body="v2", edited_by="jakub")
     assert resolve_comment(sd, c.id, resolved_by="jakub")
     [stored] = read_all_comments(sd)
     assert stored.resolved is True
-    assert stored.body == "y"  # edit still applied at read time
+    assert stored.body == "v2"
+    assert stored.edited_by == "jakub"
+    assert len(stored.versions) == 1
 
 
 def test_mark_stale_skips_deleted():

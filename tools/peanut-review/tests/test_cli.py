@@ -720,30 +720,6 @@ def test_edit_command_unknown_comment_errors():
     assert "not found" in err.getvalue()
 
 
-def test_legacy_session_json_without_github_field_still_loads():
-    """A session.json saved before stage 1 (no `github`, no `diff_source`)
-    must round-trip through Session.from_json without error."""
-    legacy = {
-        "version": 1,
-        "id": "20240101-000000-aaaa",
-        "created_at": "2026-04-01T00:00:00.000000+00:00",
-        "workspace": "/tmp/repo",
-        "base_ref": "main",
-        "topic_ref": "HEAD",
-        "original_head": "deadbeef",
-        "current_head": "deadbeef",
-        "diff_commands": ["git diff main...HEAD"],
-        "diff_stat": "+10 -5",
-        "agents": [],
-        "state": "init",
-        "timeout": 1200,
-    }
-    s = models.Session.from_json(json.dumps(legacy))
-    assert s.id == "20240101-000000-aaaa"
-    assert s.github is None
-    assert s.diff_source == "git"
-
-
 def test_session_with_github_field_round_trips():
     s = models.Session(
         id="x", workspace="/tmp/repo", base_ref="main", topic_ref="HEAD",

@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from .models import Comment, CommentEdit, _now_iso
+from .models import Comment, _now_iso
 
 log = logging.getLogger(__name__)
 
@@ -40,79 +40,21 @@ def append_comment(session_dir: str | Path, comment: Comment) -> Comment:
     return comment
 
 
-def append_edit(session_dir: str | Path, edit: CommentEdit) -> CommentEdit:
-    """Append a CommentEdit to the editor's JSONL file. Returns the edit.
-
-    The edit lives under the *editor's* author file, not the original
-    comment's author file, so each contributor's append-only log stays its
-    own (matters when one user edits another's comment).
-    """
-    path = _agent_file(session_dir, edit.author)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = edit.to_json() + "\n"
-    if len(line.encode()) > _PIPE_BUF:
-        log.warning("Edit %s exceeds PIPE_BUF — write may not be atomic", edit.id)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        os.write(fd, line.encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    return edit
-
-
 def read_agent_comments(session_dir: str | Path, agent: str) -> list[Comment]:
-    """Read comments authored by `agent` (no edit application).
-
-    Edits live in the *editor's* file, not the comment author's, so this
-    function alone won't reflect cross-author edits. Use it for per-author
-    bookkeeping (resolve_comment etc.). For the user-facing view, go through
-    `read_all_comments`.
-    """
+    """Read all comments from one agent's JSONL file."""
     path = _agent_file(session_dir, agent)
     if not path.exists():
         return []
-    records = _read_jsonl(path)
-    return [r for r in records if isinstance(r, Comment)]
+    return _read_jsonl(path)
 
 
 def read_all_comments(session_dir: str | Path) -> list[Comment]:
-    """Read and merge comments from all agents, sorted by timestamp.
-
-    Folds CommentEdit events into the matching Comments: latest body/severity
-    is applied, prior values are preserved on the in-memory `versions` list.
-    """
+    """Read and merge comments from all agents, sorted by timestamp."""
     cdir = _comments_dir(session_dir)
-    records: list[Comment | CommentEdit] = []
+    comments: list[Comment] = []
     for f in sorted(cdir.glob("*.jsonl")):
-        records.extend(_read_jsonl(f))
-    records.sort(key=lambda r: r.timestamp)
-
-    by_id: dict[str, Comment] = {}
-    for r in records:
-        if isinstance(r, Comment):
-            by_id[r.id] = r
-    for r in records:
-        if isinstance(r, CommentEdit):
-            target = by_id.get(r.target_id)
-            if target is None:
-                log.warning("Edit %s targets unknown comment %s — skipping",
-                            r.id, r.target_id)
-                continue
-            target.versions.append({
-                "body": target.body,
-                "severity": target.severity,
-                "edited_at": target.edited_at,
-                "edited_by": target.edited_by,
-            })
-            if r.body is not None:
-                target.body = r.body
-            if r.severity is not None:
-                target.severity = r.severity
-            target.edited_at = r.timestamp
-            target.edited_by = r.author
-
-    comments = [r for r in records if isinstance(r, Comment)]
+        comments.extend(_read_jsonl(f))
+    comments.sort(key=lambda c: c.timestamp)
     return comments
 
 
@@ -162,94 +104,96 @@ def filter_comments(
     return result
 
 
+def _mutate_comment(
+    session_dir: str | Path, comment_id: str, mutator,
+) -> bool:
+    """Find a comment by id across all per-author JSONL files, run `mutator(c)`,
+    and atomically rewrite that file. Returns True if the comment was found.
+
+    Used by every per-comment mutation (resolve, delete, edit, …) so they all
+    share the same locate + rewrite contract.
+    """
+    cdir = _comments_dir(session_dir)
+    for f in cdir.glob("*.jsonl"):
+        comments = _read_jsonl(f)
+        for c in comments:
+            if c.id == comment_id:
+                mutator(c)
+                _write_jsonl(f, comments)
+                return True
+    return False
+
+
 def resolve_comment(
     session_dir: str | Path, comment_id: str, resolved_by: str | None = None
 ) -> bool:
-    """Mark a comment as resolved by rewriting the agent's JSONL file.
-
-    Returns True if the comment was found and resolved.
-    """
-    cdir = _comments_dir(session_dir)
-    for f in cdir.glob("*.jsonl"):
-        records = _read_jsonl(f)
-        found = False
-        for r in records:
-            if isinstance(r, Comment) and r.id == comment_id:
-                r.resolved = True
-                r.resolved_by = resolved_by
-                r.resolved_at = _now_iso()
-                found = True
-                break
-        if found:
-            _write_jsonl(f, records)
-            return True
-    return False
+    """Mark a comment as resolved. Returns True if found."""
+    def _apply(c: Comment) -> None:
+        c.resolved = True
+        c.resolved_by = resolved_by
+        c.resolved_at = _now_iso()
+    return _mutate_comment(session_dir, comment_id, _apply)
 
 
 def unresolve_comment(session_dir: str | Path, comment_id: str) -> bool:
-    """Clear the resolved flag on a comment. Returns True if found.
-
-    Mirrors `undelete_comment` for the resolve dimension.
-    """
-    cdir = _comments_dir(session_dir)
-    for f in cdir.glob("*.jsonl"):
-        records = _read_jsonl(f)
-        found = False
-        for r in records:
-            if isinstance(r, Comment) and r.id == comment_id:
-                r.resolved = False
-                r.resolved_by = None
-                r.resolved_at = None
-                found = True
-                break
-        if found:
-            _write_jsonl(f, records)
-            return True
-    return False
+    """Clear the resolved flag on a comment. Returns True if found."""
+    def _apply(c: Comment) -> None:
+        c.resolved = False
+        c.resolved_by = None
+        c.resolved_at = None
+    return _mutate_comment(session_dir, comment_id, _apply)
 
 
 def delete_comment(
     session_dir: str | Path, comment_id: str, deleted_by: str | None = None,
 ) -> bool:
-    """Soft-delete a comment (hide from default views). Returns True if found.
-
-    Idempotent: re-deleting keeps the original deleted_at/by.
-    """
-    cdir = _comments_dir(session_dir)
-    for f in cdir.glob("*.jsonl"):
-        records = _read_jsonl(f)
-        found = False
-        for r in records:
-            if isinstance(r, Comment) and r.id == comment_id:
-                if not r.deleted:
-                    r.deleted = True
-                    r.deleted_by = deleted_by
-                    r.deleted_at = _now_iso()
-                found = True
-                break
-        if found:
-            _write_jsonl(f, records)
-            return True
-    return False
+    """Soft-delete a comment. Idempotent: re-deleting keeps original metadata."""
+    def _apply(c: Comment) -> None:
+        if not c.deleted:
+            c.deleted = True
+            c.deleted_by = deleted_by
+            c.deleted_at = _now_iso()
+    return _mutate_comment(session_dir, comment_id, _apply)
 
 
 def undelete_comment(session_dir: str | Path, comment_id: str) -> bool:
     """Clear the soft-delete flags on a comment. Returns True if found."""
-    cdir = _comments_dir(session_dir)
-    for f in cdir.glob("*.jsonl"):
-        records = _read_jsonl(f)
-        found = False
-        for r in records:
-            if isinstance(r, Comment) and r.id == comment_id:
-                r.deleted = False
-                r.deleted_by = None
-                r.deleted_at = None
-                found = True
-                break
-        if found:
-            _write_jsonl(f, records)
-            return True
-    return False
+    def _apply(c: Comment) -> None:
+        c.deleted = False
+        c.deleted_by = None
+        c.deleted_at = None
+    return _mutate_comment(session_dir, comment_id, _apply)
+
+
+def edit_comment(
+    session_dir: str | Path, comment_id: str, *,
+    body: str | None = None,
+    severity: str | None = None,
+    edited_by: str,
+) -> bool:
+    """Rewrite a comment's body and/or severity, snapshotting prior state.
+
+    `versions[0]` is always the original creator's state (edited_at/by null).
+    Each subsequent call appends the *prior* state, then bumps body/severity
+    /edited_at/edited_by to the new values. Caller must pass at least one of
+    body or severity. Returns True if the comment was found.
+    """
+    if body is None and severity is None:
+        raise ValueError("edit_comment requires body or severity")
+    def _apply(c: Comment) -> None:
+        c.versions.append({
+            "body": c.body,
+            "severity": c.severity,
+            "edited_at": c.edited_at,
+            "edited_by": c.edited_by,
+        })
+        if body is not None:
+            c.body = body
+        if severity is not None:
+            c.severity = severity
+        c.edited_at = _now_iso()
+        c.edited_by = edited_by
+    return _mutate_comment(session_dir, comment_id, _apply)
 
 
 def normalize_reply_to(comments: list[Comment], reply_to: str) -> str | None:
@@ -285,76 +229,39 @@ def mark_stale(session_dir: str | Path) -> int:
     cdir = _comments_dir(session_dir)
     count = 0
     for f in cdir.glob("*.jsonl"):
-        records = _read_jsonl(f)
+        comments = _read_jsonl(f)
         changed = False
-        for r in records:
-            if not isinstance(r, Comment):
-                continue
-            if not r.resolved and not r.stale and not r.deleted:
-                r.stale = True
+        for c in comments:
+            if not c.resolved and not c.stale and not c.deleted:
+                c.stale = True
                 changed = True
                 count += 1
         if changed:
-            _write_jsonl(f, records)
+            _write_jsonl(f, comments)
     return count
 
 
-def collect_edits(session_dir: str | Path,
-                  target_id: str | None = None,
-                  ) -> list[CommentEdit]:
-    """Read all CommentEdit records, optionally filtered by target.
-
-    Used by `comments --show-edits` and the web UI's history popover when
-    they want the raw edit log rather than the folded `Comment.versions`.
-    """
-    cdir = _comments_dir(session_dir)
-    out: list[CommentEdit] = []
-    for f in sorted(cdir.glob("*.jsonl")):
-        for r in _read_jsonl(f):
-            if not isinstance(r, CommentEdit):
-                continue
-            if target_id and r.target_id != target_id:
-                continue
-            out.append(r)
-    out.sort(key=lambda e: e.timestamp)
-    return out
-
-
-def _read_jsonl(path: Path) -> list[Comment | CommentEdit]:
-    """Read a JSONL file, dispatching on the `type` discriminator.
-
-    Lines without a `type` field default to "comment" (matches the on-disk
-    format from before edit support). Unparseable lines are skipped with a
-    warning so a single corrupt entry doesn't break the whole session.
-    """
-    out: list[Comment | CommentEdit] = []
+def _read_jsonl(path: Path) -> list[Comment]:
+    """Read a JSONL file, skipping unparseable lines with a warning."""
+    comments: list[Comment] = []
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
             try:
-                d = json.loads(line)
-            except json.JSONDecodeError as e:
+                comments.append(Comment.from_json(line))
+            except (json.JSONDecodeError, TypeError) as e:
                 log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
-                continue
-            kind = d.get("type", "comment")
-            try:
-                if kind == "edit":
-                    out.append(CommentEdit.from_json(line))
-                else:
-                    out.append(Comment.from_json(line))
-            except TypeError as e:
-                log.warning("Skipping malformed line %d in %s: %s", lineno, path, e)
-    return out
+    return comments
 
 
-def _write_jsonl(path: Path, records: list[Comment | CommentEdit]) -> None:
+def _write_jsonl(path: Path, comments: list[Comment]) -> None:
     """Rewrite a JSONL file atomically."""
     tmp = path.with_suffix(".jsonl.tmp")
     with open(tmp, "w") as f:
-        for r in records:
-            f.write(r.to_json() + "\n")
+        for c in comments:
+            f.write(c.to_json() + "\n")
         f.flush()
         os.fsync(f.fileno())
     tmp.replace(path)
@@ -370,32 +277,18 @@ def update_comment_external(
     external_in_reply_to: str | None = None,
     external_synced_body: str | None = None,
 ) -> bool:
-    """Stamp external-provider metadata on a comment, in place.
-
-    Used by the gh push/pull layer to record round-trip info. Rewrites the
-    comment's own JSONL file (the comment author's, not the caller's). Only
-    fields passed as non-None are updated — pass `external_synced_body=""`
-    to record an empty body explicitly.
+    """Stamp external-provider metadata on a comment, in place. Returns True
+    if the comment was found. Only non-None args are applied.
     """
-    cdir = _comments_dir(session_dir)
-    for f in cdir.glob("*.jsonl"):
-        records = _read_jsonl(f)
-        found = False
-        for r in records:
-            if isinstance(r, Comment) and r.id == comment_id:
-                if external_source is not None:
-                    r.external_source = external_source
-                if external_id is not None:
-                    r.external_id = external_id
-                if external_url is not None:
-                    r.external_url = external_url
-                if external_in_reply_to is not None:
-                    r.external_in_reply_to = external_in_reply_to
-                if external_synced_body is not None:
-                    r.external_synced_body = external_synced_body
-                found = True
-                break
-        if found:
-            _write_jsonl(f, records)
-            return True
-    return False
+    def _apply(c: Comment) -> None:
+        if external_source is not None:
+            c.external_source = external_source
+        if external_id is not None:
+            c.external_id = external_id
+        if external_url is not None:
+            c.external_url = external_url
+        if external_in_reply_to is not None:
+            c.external_in_reply_to = external_in_reply_to
+        if external_synced_body is not None:
+            c.external_synced_body = external_synced_body
+    return _mutate_comment(session_dir, comment_id, _apply)

@@ -1057,9 +1057,7 @@ def test_render_edited_indicator_appears_after_edit(
     c = Comment(author="vera", file="foo.py", line=1, body="v1",
                 severity="nit")
     store.append_comment(session_dir, c)
-    from peanut_review.models import CommentEdit
-    store.append_edit(session_dir, CommentEdit(
-        target_id=c.id, author="jakub", body="v2"))
+    store.edit_comment(session_dir, c.id, body="v2", edited_by="jakub")
     html_out = render.render_page(s, s.id, files,
                                    store.read_all_comments(session_dir),
                                    head_shifted=False)

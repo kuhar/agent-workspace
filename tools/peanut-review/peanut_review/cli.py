@@ -229,15 +229,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
     )
 
     if args.format == "json":
-        # asdict includes derived fields (versions, edited_at, edited_by) so
-        # JSON consumers get edit history without an extra call. Drop Nones
-        # for compactness; --show-edits is implicit in JSON mode.
-        out = []
-        for c in comments:
-            d = dataclasses.asdict(c)
-            d = {k: v for k, v in d.items() if v not in (None, [])}
-            out.append(d)
-        print(json.dumps(out, indent=2))
+        print(json.dumps([json.loads(c.to_json()) for c in comments], indent=2))
     else:
         # Table format
         if not comments:
@@ -270,16 +262,11 @@ def cmd_comments(args: argparse.Namespace) -> int:
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
-    """Edit an existing comment's body and/or severity, preserving history.
-
-    The edit is appended to the editor's own JSONL file (not the original
-    comment's author file), so per-author append-only logs stay clean even
-    when one user edits another's comment. The original comment line on
-    disk is not modified — `store.read_all_comments` folds the edit log
-    into Comment.versions / edited_at / edited_by at read time.
+    """Edit an existing comment's body and/or severity, snapshotting prior
+    state into Comment.versions. Rewrites the comment's JSONL row in place.
     """
     session_dir = _get_session_dir(args)
-    author = _get_author(args)
+    edited_by = _get_author(args)
 
     if args.body_file:
         try:
@@ -299,20 +286,11 @@ def cmd_edit(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    all_comments = store.read_all_comments(session_dir)
-    target = next((c for c in all_comments if c.id == args.comment_id), None)
-    if target is None:
+    if not store.edit_comment(session_dir, args.comment_id,
+                              body=body, severity=severity, edited_by=edited_by):
         print(f"Error: comment {args.comment_id} not found", file=sys.stderr)
         return 1
-
-    edit = models.CommentEdit(
-        target_id=target.id,
-        author=author,
-        body=body,
-        severity=severity,
-    )
-    store.append_edit(session_dir, edit)
-    print(f"Edited {target.id} ({edit.id})")
+    print(f"Edited {args.comment_id}")
     return 0
 
 

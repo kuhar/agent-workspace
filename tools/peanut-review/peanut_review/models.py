@@ -44,7 +44,6 @@ class AgentStatus(str, Enum):
 @dataclass
 class Comment:
     id: str = field(default_factory=lambda: _short_id("c"))
-    type: str = "comment"
     author: str = ""
     timestamp: str = field(default_factory=_now_iso)
     file: str = ""
@@ -79,56 +78,22 @@ class Comment:
     external_url: str | None = None
     external_in_reply_to: str | None = None
     external_synced_body: str | None = None
-    # Derived fields populated by store.read_all_comments after applying
-    # CommentEdit events. Not serialized to disk — set to defaults on load and
-    # rebuilt from the edit log each read.
-    edited_at: str | None = field(default=None, metadata={"derived": True})
-    edited_by: str | None = field(default=None, metadata={"derived": True})
-    versions: list[dict] = field(default_factory=list,
-                                 metadata={"derived": True})
+    # Edit history — `versions` stacks prior {body, severity, edited_at,
+    # edited_by} snapshots in chronological order (versions[0] is the
+    # original creator's state). edited_at/edited_by reflect the most recent
+    # edit, or None on a never-edited comment.
+    edited_at: str | None = None
+    edited_by: str | None = None
+    versions: list[dict] = field(default_factory=list)
 
     def to_json(self) -> str:
         d = asdict(self)
-        # Strip derived fields so the JSONL on-disk format is unchanged from
-        # before edit support landed (legacy sessions still parse, new edit
-        # records reproduce versions on read).
-        for fname, f in self.__dataclass_fields__.items():
-            if f.metadata.get("derived"):
-                d.pop(fname, None)
-        # Drop None / empty-list values for compactness
+        # Drop None / empty-list values for compactness on disk.
         d = {k: v for k, v in d.items() if v not in (None, [])}
         return json.dumps(d, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, line: str) -> Comment:
-        d = json.loads(line)
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-
-
-@dataclass
-class CommentEdit:
-    """An append-only edit event targeting an existing Comment.
-
-    Stored in the editor's own `comments/<author>.jsonl` file (so per-author
-    append-only is preserved even when one user edits another's comment).
-    `store.read_all_comments` folds these into Comment.versions / edited_*
-    on read; on disk the body of the original Comment is left as-is.
-    """
-    id: str = field(default_factory=lambda: _short_id("e"))
-    type: str = "edit"
-    target_id: str = ""
-    author: str = ""
-    timestamp: str = field(default_factory=_now_iso)
-    body: str | None = None        # None → body unchanged
-    severity: str | None = None    # None → severity unchanged
-
-    def to_json(self) -> str:
-        d = asdict(self)
-        d = {k: v for k, v in d.items() if v is not None}
-        return json.dumps(d, separators=(",", ":"))
-
-    @classmethod
-    def from_json(cls, line: str) -> CommentEdit:
         d = json.loads(line)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 

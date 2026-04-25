@@ -195,8 +195,13 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         classes.append("stale")
     if c.resolved:
         classes.append("resolved")
+    if c.edited_at:
+        classes.append("edited")
     cid = html.escape(c.id)
-    buttons = [f'<button class="danger" data-delete="{cid}">Delete</button>']
+    buttons = [
+        f'<button data-edit="{cid}">Edit</button>',
+        f'<button class="danger" data-delete="{cid}">Delete</button>',
+    ]
     badges = []
     if c.end_line is not None and c.end_line != c.line:
         lo, hi = min(c.line, c.end_line), max(c.line, c.end_line)
@@ -211,12 +216,24 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         if is_reply
         else f'<span class="sev {html.escape(c.severity)}">{html.escape(c.severity)}</span>'
     )
+    edited_html = ""
+    if c.edited_at:
+        n = len(c.versions)
+        title = f"edited by {c.edited_by or 'unknown'} at {c.edited_at}"
+        if n:
+            title += f" ({n} prior version{'s' if n != 1 else ''})"
+        edited_html = (
+            f'<button class="edited-badge" type="button" '
+            f'data-history="{cid}" title="{html.escape(title)}">'
+            f'edited</button>'
+        )
     return (
         f'<div class="{" ".join(classes)}" data-cid="{cid}">'
         f'<div class="comment-meta">'
         f'<span class="author">{html.escape(c.author or "unknown")}</span>'
         f'{sev_html}'
         f'{"".join(badges)}'
+        f'{edited_html}'
         f'{"".join(buttons)}'
         f'</div>'
         f'<div class="comment-body">{html.escape(c.body)}</div>'

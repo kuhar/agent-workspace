@@ -668,3 +668,91 @@ def test_refresh_agent_statuses_leaves_pending_alone():
     changed = _refresh_agent_statuses(sd, s)
     assert changed is False
     assert s.agents[0].status == "pending"
+
+
+def test_edit_command_replaces_body_and_keeps_history():
+    ws = _make_workspace({"foo.py": "line1\nline2\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    main(["--session", sd, "add-comment",
+          "--file", "foo.py", "--line", "1",
+          "--body", "first take", "--severity", "nit",
+          "--author", "felix"])
+    from peanut_review.store import read_all_comments
+    cid = read_all_comments(sd)[0].id
+
+    rc = main(["--session", sd, "edit", cid,
+               "--body", "second take", "--severity", "warning",
+               "--author", "jakub"])
+    assert rc == 0
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        main(["--session", sd, "comments", "--format", "json"])
+    listed = json.loads(out.getvalue())
+    assert len(listed) == 1
+    assert listed[0]["body"] == "second take"
+    assert listed[0]["severity"] == "warning"
+    assert listed[0]["edited_by"] == "jakub"
+    assert listed[0]["edited_at"]
+    assert len(listed[0]["versions"]) == 1
+    assert listed[0]["versions"][0]["body"] == "first take"
+    assert listed[0]["versions"][0]["severity"] == "nit"
+
+
+def test_edit_command_requires_body_or_severity():
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "edit", "c_anything"])
+    assert rc == 1
+    assert "at least one of" in err.getvalue()
+
+
+def test_edit_command_unknown_comment_errors():
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "edit", "c_missing", "--body", "x"])
+    assert rc == 1
+    assert "not found" in err.getvalue()
+
+
+def test_legacy_session_json_without_github_field_still_loads():
+    """A session.json saved before stage 1 (no `github`, no `diff_source`)
+    must round-trip through Session.from_json without error."""
+    legacy = {
+        "version": 1,
+        "id": "20240101-000000-aaaa",
+        "created_at": "2026-04-01T00:00:00.000000+00:00",
+        "workspace": "/tmp/repo",
+        "base_ref": "main",
+        "topic_ref": "HEAD",
+        "original_head": "deadbeef",
+        "current_head": "deadbeef",
+        "diff_commands": ["git diff main...HEAD"],
+        "diff_stat": "+10 -5",
+        "agents": [],
+        "state": "init",
+        "timeout": 1200,
+    }
+    s = models.Session.from_json(json.dumps(legacy))
+    assert s.id == "20240101-000000-aaaa"
+    assert s.github is None
+    assert s.diff_source == "git"
+
+
+def test_session_with_github_field_round_trips():
+    s = models.Session(
+        id="x", workspace="/tmp/repo", base_ref="main", topic_ref="HEAD",
+        original_head="abc", current_head="abc", diff_source="gh-pr",
+        github=models.GitHubPR(repo="o/r", number=42, url="https://example.com",
+                                head_sha="abc", base_sha="def", title="t"),
+    )
+    s2 = models.Session.from_json(s.to_json())
+    assert s2.diff_source == "gh-pr"
+    assert s2.github is not None
+    assert s2.github.repo == "o/r"
+    assert s2.github.number == 42

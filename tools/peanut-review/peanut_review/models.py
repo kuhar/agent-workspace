@@ -68,15 +68,67 @@ class Comment:
     # nest: setting reply_to on a reply silently re-roots to its parent's
     # parent, so trees are at most one level deep (GitHub-style).
     reply_to: str | None = None
+    # External provenance — set when imported from or pushed to a remote
+    # provider (currently only "github"). external_synced_body holds the body
+    # at the last successful sync so we can detect local edits that need
+    # PATCHing back. external_in_reply_to is the provider's reply pointer
+    # (e.g. GitHub's in_reply_to_id) — kept around so reverse mappings during
+    # pull don't have to scan all bodies.
+    external_source: str | None = None
+    external_id: str | None = None
+    external_url: str | None = None
+    external_in_reply_to: str | None = None
+    external_synced_body: str | None = None
+    # Derived fields populated by store.read_all_comments after applying
+    # CommentEdit events. Not serialized to disk — set to defaults on load and
+    # rebuilt from the edit log each read.
+    edited_at: str | None = field(default=None, metadata={"derived": True})
+    edited_by: str | None = field(default=None, metadata={"derived": True})
+    versions: list[dict] = field(default_factory=list,
+                                 metadata={"derived": True})
 
     def to_json(self) -> str:
         d = asdict(self)
-        # Drop None values for compactness
-        d = {k: v for k, v in d.items() if v is not None}
+        # Strip derived fields so the JSONL on-disk format is unchanged from
+        # before edit support landed (legacy sessions still parse, new edit
+        # records reproduce versions on read).
+        for fname, f in self.__dataclass_fields__.items():
+            if f.metadata.get("derived"):
+                d.pop(fname, None)
+        # Drop None / empty-list values for compactness
+        d = {k: v for k, v in d.items() if v not in (None, [])}
         return json.dumps(d, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, line: str) -> Comment:
+        d = json.loads(line)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class CommentEdit:
+    """An append-only edit event targeting an existing Comment.
+
+    Stored in the editor's own `comments/<author>.jsonl` file (so per-author
+    append-only is preserved even when one user edits another's comment).
+    `store.read_all_comments` folds these into Comment.versions / edited_*
+    on read; on disk the body of the original Comment is left as-is.
+    """
+    id: str = field(default_factory=lambda: _short_id("e"))
+    type: str = "edit"
+    target_id: str = ""
+    author: str = ""
+    timestamp: str = field(default_factory=_now_iso)
+    body: str | None = None        # None → body unchanged
+    severity: str | None = None    # None → severity unchanged
+
+    def to_json(self) -> str:
+        d = asdict(self)
+        d = {k: v for k, v in d.items() if v is not None}
+        return json.dumps(d, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, line: str) -> CommentEdit:
         d = json.loads(line)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
@@ -104,6 +156,29 @@ class AgentConfig:
 
 
 @dataclass
+class GitHubPR:
+    """Provenance for a session backed by a GitHub PR.
+
+    `head_sha`/`base_sha` are pinned at session creation; agent comments
+    posted later use Session.current_head as their commit_id when pushed,
+    not these. Stored to detect rebase/retarget after the fact.
+    """
+    repo: str = ""           # "owner/name"
+    number: int = 0
+    url: str = ""
+    head_sha: str = ""
+    base_sha: str = ""
+    title: str = ""
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v not in (None, "", 0)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> GitHubPR:
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class Session:
     version: int = 1
     id: str = ""
@@ -115,14 +190,22 @@ class Session:
     current_head: str = ""
     diff_commands: list[str] = field(default_factory=list)
     diff_stat: str = ""
+    # "git" (default — diff is `git diff base...topic`) or "gh-pr" (diff is
+    # cached in <session_dir>/pr.diff and provenance lives in self.github).
+    diff_source: str = "git"
     bead_id: str | None = None
     agents: list[AgentConfig] = field(default_factory=list)
     state: str = SessionState.INIT.value
     timeout: int = 1200
+    github: GitHubPR | None = None
 
     def to_json(self) -> str:
         d = asdict(self)
         d["agents"] = [a.to_dict() for a in self.agents]
+        if self.github is not None:
+            d["github"] = self.github.to_dict()
+        else:
+            d.pop("github", None)
         d = {k: v for k, v in d.items() if v is not None}
         return json.dumps(d, indent=2)
 
@@ -130,9 +213,12 @@ class Session:
     def from_json(cls, text: str) -> Session:
         d = json.loads(text)
         agents = [AgentConfig.from_dict(a) for a in d.pop("agents", [])]
+        gh_raw = d.pop("github", None)
         filtered = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         s = cls(**filtered)
         s.agents = agents
+        if gh_raw:
+            s.github = GitHubPR.from_dict(gh_raw)
         return s
 
 

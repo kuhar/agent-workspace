@@ -528,6 +528,79 @@ table.sessions td.counts .sub { color: var(--muted); font-size: 11px; }
   color: var(--fg);
 }
 
+/* Edit indicator + inline edit form + version-history panel */
+.edited-badge {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+.edited-badge:hover { color: var(--fg); border-color: var(--accent); }
+.comment.edited > .comment-meta .edited-badge { color: var(--accent); }
+
+.edit-form {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.edit-form textarea {
+  width: 100%;
+  background: #0a0e12;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: "Source Code Pro", "JetBrains Mono", "Menlo", monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+.edit-form .edit-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.edit-form button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.edit-form button[type="submit"] { color: var(--fg); border-color: var(--accent); }
+.edit-form button:hover { color: var(--fg); border-color: var(--accent); }
+
+.version-history {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #0a0e12;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
+.version-history ol { margin: 0; padding-left: 20px; }
+.version-history li { margin: 4px 0; }
+.version-history li.current .vh-meta { color: var(--accent); }
+.version-history .vh-meta {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.version-history pre {
+  margin: 2px 0 8px 0;
+  padding: 6px 8px;
+  background: #131820;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Pygments overrides — pick a dark palette */
 .hl-k, .hl-kd, .hl-kn, .hl-kp, .hl-kr, .hl-kt { color: #d19a66; }
 .hl-n, .hl-na, .hl-nb, .hl-nc, .hl-nd, .hl-nf, .hl-ni, .hl-nl, .hl-nn, .hl-no, .hl-nt, .hl-nv, .hl-nx { color: var(--fg); }

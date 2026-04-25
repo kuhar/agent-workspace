@@ -999,6 +999,75 @@ def test_session_page_emits_prefixed_session_url(session_dir: Path):
         srv.shutdown()
 
 
+def test_server_edit_endpoint_updates_body_and_history(session_dir: Path):
+    c = Comment(author="vera", file="foo.py", line=1, body="v1", severity="nit")
+    store.append_comment(session_dir, c)
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/edit",
+            {"comment_id": c.id, "body": "v2", "severity": "warning",
+             "author": "jakub"},
+        )
+        assert code == 200
+        assert data["body"] == "v2"
+        assert data["severity"] == "warning"
+        assert data["edited_by"] == "jakub"
+        assert len(data["versions"]) == 1
+        assert data["versions"][0]["body"] == "v1"
+    finally:
+        srv.shutdown()
+
+
+def test_server_edit_endpoint_unknown_comment_returns_404(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/edit",
+            {"comment_id": "c_missing", "body": "x"},
+        )
+        assert code == 404
+        assert "not found" in data["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_server_edit_endpoint_requires_body_or_severity(session_dir: Path):
+    c = Comment(author="vera", file="foo.py", line=1, body="x")
+    store.append_comment(session_dir, c)
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/edit",
+            {"comment_id": c.id},
+        )
+        assert code == 400
+        assert "body or severity" in data["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_render_edited_indicator_appears_after_edit(
+    session_dir: Path, repo: Path
+):
+    """The page render shows the 'edited' badge with a data-history hook so
+    the JS can pop the version history without an extra round-trip."""
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    c = Comment(author="vera", file="foo.py", line=1, body="v1",
+                severity="nit")
+    store.append_comment(session_dir, c)
+    from peanut_review.models import CommentEdit
+    store.append_edit(session_dir, CommentEdit(
+        target_id=c.id, author="jakub", body="v2"))
+    html_out = render.render_page(s, s.id, files,
+                                   store.read_all_comments(session_dir),
+                                   head_shifted=False)
+    assert "edited-badge" in html_out
+    assert f'data-history="{c.id}"' in html_out
+    assert f'data-edit="{c.id}"' in html_out
+
+
 def test_server_filter_comments_since_id(session_dir: Path):
     """The `--since <id>` cursor (replaces the old `--round N` filter) lets
     the orchestrator poll for new activity since they last looked."""

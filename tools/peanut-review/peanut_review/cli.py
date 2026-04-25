@@ -229,7 +229,15 @@ def cmd_comments(args: argparse.Namespace) -> int:
     )
 
     if args.format == "json":
-        print(json.dumps([json.loads(c.to_json()) for c in comments], indent=2))
+        # asdict includes derived fields (versions, edited_at, edited_by) so
+        # JSON consumers get edit history without an extra call. Drop Nones
+        # for compactness; --show-edits is implicit in JSON mode.
+        out = []
+        for c in comments:
+            d = dataclasses.asdict(c)
+            d = {k: v for k, v in d.items() if v not in (None, [])}
+            out.append(d)
+        print(json.dumps(out, indent=2))
     else:
         # Table format
         if not comments:
@@ -245,12 +253,66 @@ def cmd_comments(args: argparse.Namespace) -> int:
                 flag = "R"
             elif c.stale:
                 flag = "*"
+            elif c.edited_at:
+                flag = "E"
             else:
                 flag = " "
             body = c.body[:60].replace("\n", " ")
             file_col = "[global]" if c.file == sess.GLOBAL_FILE else c.file
             line_col = "" if c.file == sess.GLOBAL_FILE else str(c.line)
             print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {file_col:<30} {line_col:>5} {flag}  {body}")
+            if args.show_edits and c.versions:
+                for i, v in enumerate(c.versions, 1):
+                    vbody = (v.get("body") or "")[:60].replace("\n", " ")
+                    print(f"  v{i} ({v.get('edited_by') or 'orig'}): {vbody}")
+                print(f"  v{len(c.versions) + 1} (current, edited by {c.edited_by} at {c.edited_at}): {c.body[:60]}")
+    return 0
+
+
+def cmd_edit(args: argparse.Namespace) -> int:
+    """Edit an existing comment's body and/or severity, preserving history.
+
+    The edit is appended to the editor's own JSONL file (not the original
+    comment's author file), so per-author append-only logs stay clean even
+    when one user edits another's comment. The original comment line on
+    disk is not modified — `store.read_all_comments` folds the edit log
+    into Comment.versions / edited_at / edited_by at read time.
+    """
+    session_dir = _get_session_dir(args)
+    author = _get_author(args)
+
+    if args.body_file:
+        try:
+            body: str | None = Path(args.body_file).read_text()
+        except OSError as e:
+            print(f"Error: could not read --body-file: {e}", file=sys.stderr)
+            return 1
+    elif args.body is not None:
+        body = args.body
+    else:
+        body = None
+
+    severity: str | None = args.severity
+
+    if body is None and severity is None:
+        print("Error: at least one of --body, --body-file, --severity required",
+              file=sys.stderr)
+        return 1
+
+    all_comments = store.read_all_comments(session_dir)
+    target = next((c for c in all_comments if c.id == args.comment_id), None)
+    if target is None:
+        print(f"Error: comment {args.comment_id} not found", file=sys.stderr)
+        return 1
+
+    edit = models.CommentEdit(
+        target_id=target.id,
+        author=author,
+        body=body,
+        severity=severity,
+    )
+    store.append_edit(session_dir, edit)
+    print(f"Edited {target.id} ({edit.id})")
     return 0
 
 
@@ -692,8 +754,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--unresolved", action="store_true", help="Only unresolved")
     sp.add_argument("--include-deleted", action="store_true",
                     help="Include soft-deleted comments (hidden by default)")
+    sp.add_argument("--show-edits", action="store_true",
+                    help="In table mode, expand each comment's full edit "
+                         "history below it (JSON mode always includes it)")
     sp.add_argument("--format", default="table", choices=["json", "table"],
                     help="Output format (default: table)")
+
+    # edit
+    sp = sub.add_parser("edit",
+                        help="Rewrite a comment's body/severity, keeping the prior version in history")
+    sp.add_argument("comment_id", help="Comment ID to edit")
+    sp.add_argument("--body", help="New comment text (watch for shell-eaten backticks — prefer --body-file)")
+    sp.add_argument("--body-file", help="Read new comment text from FILE")
+    sp.add_argument("--severity", default=None,
+                    choices=["critical", "warning", "suggestion", "nit"],
+                    help="New severity (omit to keep current)")
+    sp.add_argument("--author", help="Editor name (default: git config user.name)")
 
     # resolve
     sp = sub.add_parser("resolve", help="Resolve a comment")
@@ -804,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
         "add-comment": cmd_add_comment,
         "add-global-comment": cmd_add_global_comment,
         "comments": cmd_comments,
+        "edit": cmd_edit,
         "resolve": cmd_resolve,
         "unresolve": cmd_unresolve,
         "delete": cmd_delete,

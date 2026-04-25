@@ -29,11 +29,21 @@
     return `<span class="round range">L${lo}–L${hi}</span>`;
   }
 
+  function editedBadge(c) {
+    if (!c.edited_at) return "";
+    const n = (c.versions || []).length;
+    let title = `edited by ${c.edited_by || "unknown"} at ${c.edited_at}`;
+    if (n) title += ` (${n} prior version${n === 1 ? "" : "s"})`;
+    return `<button class="edited-badge" type="button" data-history="${esc(c.id)}" title="${esc(title)}">edited</button>`;
+  }
+
   function renderComment(c, { isReply = false } = {}) {
     const cls = ["comment"];
     if (isReply) cls.push("reply");
     if (c.stale) cls.push("stale");
     if (c.resolved && !isReply) cls.push("resolved");
+    if (c.edited_at) cls.push("edited");
+    const editBtn = `<button data-edit="${esc(c.id)}">Edit</button>`;
     const deleteBtn = `<button class="danger" data-delete="${esc(c.id)}">Delete</button>`;
     const sevHtml = isReply
       ? ""
@@ -47,6 +57,8 @@
           ${rangeBadge(c)}
           ${c.stale ? '<span class="round">stale</span>' : ""}
           ${resolvedBadge}
+          ${editedBadge(c)}
+          ${editBtn}
           ${deleteBtn}
         </div>
         <div class="comment-body">${esc(c.body)}</div>
@@ -362,6 +374,116 @@
     }
   }
 
+  // Edit + history. Edit replaces the comment-body with a textarea + Save/Cancel.
+  // History toggles a panel under the comment showing prior versions inline.
+  function applyEditedComment(node, c) {
+    const body = node.querySelector(".comment-body");
+    if (body) body.textContent = c.body || "";
+    if (c.edited_at) node.classList.add("edited");
+    const meta = node.querySelector(".comment-meta");
+    if (!meta) return;
+    let badge = meta.querySelector(".edited-badge");
+    const n = (c.versions || []).length;
+    let title = `edited by ${c.edited_by || "unknown"} at ${c.edited_at}`;
+    if (n) title += ` (${n} prior version${n === 1 ? "" : "s"})`;
+    if (!badge) {
+      badge = document.createElement("button");
+      badge.type = "button";
+      badge.className = "edited-badge";
+      badge.dataset.history = c.id;
+      badge.textContent = "edited";
+      const editBtn = meta.querySelector("[data-edit]");
+      meta.insertBefore(badge, editBtn || meta.lastElementChild);
+    }
+    badge.title = title;
+    badge.dataset.history = c.id;
+    // Stash latest payload on the node so toggleHistory can render without
+    // hitting the network — the JSON came back from the POST already.
+    node.__prComment = c;
+    // Refresh any open history panel.
+    const panel = node.querySelector(".version-history");
+    if (panel) {
+      panel.remove();
+      toggleHistory(node, c.id);
+    }
+  }
+
+  function openEditForm(node, cid) {
+    if (node.querySelector(".edit-form")) return;  // already editing
+    const body = node.querySelector(".comment-body");
+    if (!body) return;
+    const current = body.textContent || "";
+    const form = document.createElement("form");
+    form.className = "edit-form";
+    form.innerHTML = `
+      <textarea rows="4">${esc(current)}</textarea>
+      <div class="edit-actions">
+        <button type="submit">Save</button>
+        <button type="button" class="cancel">Cancel</button>
+      </div>
+    `;
+    body.style.display = "none";
+    body.insertAdjacentElement("afterend", form);
+    const ta = form.querySelector("textarea");
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    form.querySelector(".cancel").addEventListener("click", () => {
+      form.remove();
+      body.style.display = "";
+    });
+    form.addEventListener("submit", async (sev) => {
+      sev.preventDefault();
+      const newBody = ta.value;
+      if (newBody === current) {
+        form.remove();
+        body.style.display = "";
+        return;
+      }
+      try {
+        const c = await api("POST", "/api/edit", { comment_id: cid, body: newBody });
+        form.remove();
+        body.style.display = "";
+        applyEditedComment(node, c);
+      } catch (e) {
+        alert("Edit failed: " + e.message);
+      }
+    });
+  }
+
+  async function toggleHistory(node, cid) {
+    const existing = node.querySelector(".version-history");
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    let c = node.__prComment;
+    if (!c || c.id !== cid) {
+      try {
+        const list = await api("GET", "/api/comments?include_deleted=1");
+        c = list.find((x) => x.id === cid);
+        if (!c) return;
+        node.__prComment = c;
+      } catch (e) {
+        alert("Could not load history: " + e.message);
+        return;
+      }
+    }
+    const panel = document.createElement("div");
+    panel.className = "version-history";
+    const versions = c.versions || [];
+    const items = versions.map((v, i) => {
+      const ver = i + 1;
+      const who = v.edited_by ? esc(v.edited_by) : "original";
+      const when = v.edited_at ? ` at ${esc(v.edited_at)}` : "";
+      return `<li><div class="vh-meta">v${ver} (${who}${when})</div><pre>${esc(v.body || "")}</pre></li>`;
+    }).join("");
+    const currentVer = versions.length + 1;
+    const curWho = c.edited_by ? esc(c.edited_by) : "current";
+    const curWhen = c.edited_at ? ` at ${esc(c.edited_at)}` : "";
+    panel.innerHTML = `<ol>${items}<li class="current"><div class="vh-meta">v${currentVer} (${curWho}${curWhen}, current)</div><pre>${esc(c.body || "")}</pre></li></ol>`;
+    node.appendChild(panel);
+  }
+
   // Resolve / Unresolve / Delete / Reply — plain-click handlers, no drag involvement.
   document.addEventListener("click", (ev) => {
     if (ev.target.id === "add-global-btn") {
@@ -389,6 +511,20 @@
       const pid = replyBtn.dataset.replyTo;
       const threadEl = replyBtn.closest(".thread");
       if (threadEl) openReplyForm(threadEl, pid);
+      return;
+    }
+    const eb = ev.target.closest("[data-edit]");
+    if (eb) {
+      const cid = eb.dataset.edit;
+      const node = eb.closest(".comment");
+      if (node) openEditForm(node, cid);
+      return;
+    }
+    const hb = ev.target.closest("[data-history]");
+    if (hb) {
+      const cid = hb.dataset.history;
+      const node = hb.closest(".comment");
+      if (node) toggleHistory(node, cid);
       return;
     }
     const db = ev.target.closest("[data-delete]");

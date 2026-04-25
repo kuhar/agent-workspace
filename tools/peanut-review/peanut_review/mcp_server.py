@@ -208,6 +208,50 @@ def reply(
 
 
 @mcp.tool()
+def edit(
+    comment_id: str,
+    body: str | None = None,
+    severity: str | None = None,
+) -> str:
+    """Rewrite an existing comment's body and/or severity.
+
+    The original wording is preserved in version history (visible in the web
+    UI and via `peanut-review comments --show-edits`). Use this to refine a
+    comment after additional context, or — when this session is backed by a
+    GitHub PR — to clean up an agent-authored comment before pushing it.
+
+    Args:
+        comment_id: The comment to edit (c_xxxxxxxx).
+        body: New comment text. Omit to keep the current body.
+        severity: New severity (critical, warning, suggestion, nit). Omit
+            to keep the current severity.
+    """
+    sd = _session_dir()
+    author = _get_author()
+
+    if body is None and severity is None:
+        return "Error: at least one of body or severity is required"
+    if severity is not None and severity not in (
+        "critical", "warning", "suggestion", "nit"
+    ):
+        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+
+    all_comments = store.read_all_comments(sd)
+    target = next((c for c in all_comments if c.id == comment_id), None)
+    if target is None:
+        return f"Error: comment {comment_id} not found"
+
+    e = models.CommentEdit(
+        target_id=target.id,
+        author=author,
+        body=body,
+        severity=severity,
+    )
+    store.append_edit(sd, e)
+    return f"Edited {target.id} ({e.id})"
+
+
+@mcp.tool()
 def list_comments(
     since: str | None = None,
     severity: str | None = None,

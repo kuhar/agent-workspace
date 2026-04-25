@@ -227,6 +227,36 @@ def test_signal_all_triage_done_transitions_to_round2():
     assert s.state == "round2"
 
 
+def test_signal_all_triage_done_from_round1_also_transitions():
+    """Orchestrator may signal triage-done before writing triage.json (e.g.
+    no-op triage where everything was applied directly via fix commits).
+    State should still advance to round2 so subsequent agent comments are
+    tagged round=2 instead of silently staying at round=1."""
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
+
+    # Skip triage; jump straight from round1 to triage-done.
+    sess.transition_state(sd, models.SessionState.ROUND1.value)
+    rc = main(["--session", sd, "signal-all", "triage-done"])
+    assert rc == 0
+
+    s = sess.load_session(sd)
+    assert s.state == "round2"
+
+
+def test_signal_all_triage_done_after_complete_does_not_revert():
+    """If the session has already moved past Round 2 (complete/aborted),
+    signaling triage-done shouldn't reopen it."""
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
+    sess.transition_state(sd, models.SessionState.COMPLETE.value)
+
+    rc = main(["--session", sd, "signal-all", "triage-done"])
+    assert rc == 0
+    s = sess.load_session(sd)
+    assert s.state == "complete"
+
+
 def test_signal_all_other_event_does_not_transition():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])

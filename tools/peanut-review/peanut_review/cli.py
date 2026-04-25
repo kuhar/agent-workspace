@@ -338,6 +338,12 @@ def cmd_wait_all(args: argparse.Namespace) -> int:
     return 1
 
 
+_TRIAGE_DONE_PRIOR_STATES = {
+    models.SessionState.ROUND1.value,
+    models.SessionState.TRIAGE.value,
+}
+
+
 def cmd_signal_all(args: argparse.Namespace) -> int:
     """Signal all agents with an event."""
     session_dir = _get_session_dir(args)
@@ -346,8 +352,13 @@ def cmd_signal_all(args: argparse.Namespace) -> int:
     polling.signal_all(session_dir, agents, args.event)
     print(f"Signaled {args.event} to {', '.join(agents)}")
 
-    # Transition to round2 when triage is done
-    if args.event == "triage-done" and s.state == models.SessionState.TRIAGE.value:
+    # Triage-done advances the session into Round 2 so any comments agents
+    # post next are tagged round=2 (cli.cmd_add_comment defers to
+    # session.current_round(state) when --round isn't supplied). Allow the
+    # transition from either ROUND1 or TRIAGE — orchestrators sometimes
+    # signal before writing triage.json. Skipped if already past Round 2
+    # (COMPLETE/ABORTED) so we don't resurrect a closed session.
+    if args.event == "triage-done" and s.state in _TRIAGE_DONE_PRIOR_STATES:
         sess.transition_state(session_dir, models.SessionState.ROUND2.value)
 
     return 0

@@ -118,8 +118,18 @@ Read ALL prior context before forming opinions:
    `git diff <original-head>..<fix-commit>` to see the actual fixes.
 
 Now assess: for each dismissed finding with a rebuttal, do you agree with the
-dismissal? If you disagree, post a Round 2 comment explaining why the rebuttal
-is insufficient. Also flag any new issues you spot in the fix diff.
+dismissal? If you disagree, post a Round 2 comment as a **reply** to the
+original Round 1 comment so the discussion stays threaded:
+
+```
+${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
+    --severity <...> --body "Why the rebuttal doesn't hold: ..."
+```
+
+`<c_id>` is the original Round 1 comment ID from the triage JSON. The reply
+inherits its file/line from the parent. For brand-new findings you spot in
+the fix diff (not tied to a Round 1 comment), use a regular `add-comment`
+or `add-global-comment`.
 
 Then signal: `${PR_BIN} --session ${SESSION} signal round2-done`
 
@@ -132,7 +142,14 @@ ${PR_BIN} --session ${SESSION} add-comment --file __meta__ --line 0 --severity n
 
 # If blocked
 
+If you genuinely cannot proceed (a tool isn't on PATH, a venv isn't
+activated, you don't know how to navigate this repo's layout, etc.),
+ask the orchestrator for help — this blocks until they reply:
+
 ```
 ${PR_BIN} --session ${SESSION} ask "your question"
 ```
-This blocks until the orchestrator replies.
+
+This is the babysitting channel for being stuck. **Do not** use it for
+review discussion — for that, post a regular comment (or reply to an
+existing one with `--reply-to`).

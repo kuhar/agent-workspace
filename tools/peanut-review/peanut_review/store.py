@@ -114,6 +114,28 @@ def resolve_comment(
     return False
 
 
+def unresolve_comment(session_dir: str | Path, comment_id: str) -> bool:
+    """Clear the resolved flag on a comment. Returns True if found.
+
+    Mirrors `undelete_comment` for the resolve dimension.
+    """
+    cdir = _comments_dir(session_dir)
+    for f in cdir.glob("*.jsonl"):
+        comments = _read_jsonl(f)
+        found = False
+        for c in comments:
+            if c.id == comment_id:
+                c.resolved = False
+                c.resolved_by = None
+                c.resolved_at = None
+                found = True
+                break
+        if found:
+            _write_jsonl(f, comments)
+            return True
+    return False
+
+
 def delete_comment(
     session_dir: str | Path, comment_id: str, deleted_by: str | None = None,
 ) -> bool:
@@ -156,6 +178,34 @@ def undelete_comment(session_dir: str | Path, comment_id: str) -> bool:
             _write_jsonl(f, comments)
             return True
     return False
+
+
+def normalize_reply_to(comments: list[Comment], reply_to: str) -> str | None:
+    """Resolve a `reply_to` to a *top-level* comment id.
+
+    If the target itself is a reply, re-roots to its parent so threads stay
+    flat (GitHub-style: no nesting beyond depth 1). Returns None if the
+    target id doesn't exist among `comments`.
+    """
+    by_id = {c.id: c for c in comments}
+    target = by_id.get(reply_to)
+    if target is None:
+        return None
+    if target.reply_to and target.reply_to in by_id:
+        return target.reply_to
+    return target.id
+
+
+def thread_for(comments: list[Comment], parent_id: str) -> list[Comment]:
+    """Return the thread rooted at `parent_id`: parent first, then replies in
+    timestamp order. Excludes deleted entries.
+    """
+    parent = next((c for c in comments if c.id == parent_id and not c.deleted), None)
+    if parent is None:
+        return []
+    replies = [c for c in comments if c.reply_to == parent_id and not c.deleted]
+    replies.sort(key=lambda c: c.timestamp)
+    return [parent, *replies]
 
 
 def mark_stale(session_dir: str | Path) -> int:

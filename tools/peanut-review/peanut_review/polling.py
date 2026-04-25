@@ -145,6 +145,49 @@ def write_reply(
     return r
 
 
+def list_transcript(session_dir: str | Path) -> list[dict]:
+    """Return every question + (optional) reply pair across all agents.
+
+    Each entry is `{"agent", "id", "timestamp", "question", "reply"}` where
+    `reply` is `None` if the agent is still waiting, else the Reply dict.
+    Sorted by question timestamp ascending so the UI reads top-to-bottom in
+    the order things actually happened.
+    """
+    msgs = Path(session_dir) / "messages"
+    if not msgs.exists():
+        return []
+    out: list[dict] = []
+    for d in sorted(msgs.iterdir()):
+        if not d.is_dir():
+            continue
+        for qf in sorted(d.glob("q_*.json")):
+            try:
+                q = Question.from_json(qf.read_text())
+            except (json.JSONDecodeError, TypeError):
+                continue
+            entry = {
+                "agent": d.name,
+                "id": q.id,
+                "timestamp": q.timestamp,
+                "question": q.question,
+                "reply": None,
+            }
+            reply_path = qf.with_suffix(".reply")
+            if reply_path.exists():
+                try:
+                    r = Reply.from_json(reply_path.read_text())
+                    entry["reply"] = {
+                        "answered_by": r.answered_by,
+                        "timestamp": r.timestamp,
+                        "answer": r.answer,
+                    }
+                except (json.JSONDecodeError, ValueError):
+                    pass  # leave reply=None if file is half-written
+            out.append(entry)
+    out.sort(key=lambda e: e["timestamp"])
+    return out
+
+
 def list_unanswered(session_dir: str | Path, agent: str | None = None) -> list[Question]:
     """List all unanswered questions, optionally filtered by agent."""
     msgs = Path(session_dir) / "messages"

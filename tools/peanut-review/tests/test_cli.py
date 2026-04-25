@@ -482,6 +482,84 @@ def test_comments_listing_shows_global_marker():
     assert "foo.py" in text
 
 
+def test_add_comment_reply_to_inherits_parent_location():
+    """A reply gets the parent's file/line and a reply_to pointer."""
+    ws = _make_workspace({"foo.py": "alpha\nbeta\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    main(["--session", sd, "add-comment",
+          "--file", "foo.py", "--line", "2", "--body", "needs work",
+          "--author", "vera"])
+    from peanut_review.store import read_all_comments
+    parent_id = read_all_comments(sd)[0].id
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "add-comment",
+                   "--reply-to", parent_id, "--body", "agreed",
+                   "--author", "felix"])
+    assert rc == 0
+    assert f"reply to {parent_id}" in out.getvalue()
+
+    cs = read_all_comments(sd)
+    reply = [c for c in cs if c.author == "felix"][0]
+    assert reply.reply_to == parent_id
+    assert reply.file == "foo.py"
+    assert reply.line == 2
+
+
+def test_add_comment_reply_to_unknown_id_errors():
+    ws = _make_workspace({"foo.py": "a\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "add-comment",
+                   "--reply-to", "c_does_not_exist",
+                   "--body", "x", "--author", "vera"])
+    assert rc == 1
+    assert "not found" in err.getvalue()
+
+
+def test_add_comment_reply_to_a_reply_collapses_to_root():
+    """Trying to reply to a reply silently re-roots to the top-level."""
+    ws = _make_workspace({"foo.py": "a\nb\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    main(["--session", sd, "add-comment", "--file", "foo.py", "--line", "1",
+          "--body", "p", "--author", "vera"])
+    from peanut_review.store import read_all_comments
+    parent_id = read_all_comments(sd)[0].id
+    main(["--session", sd, "add-comment", "--reply-to", parent_id,
+          "--body", "r1", "--author", "felix"])
+    reply_id = [c.id for c in read_all_comments(sd) if c.author == "felix"][0]
+    main(["--session", sd, "add-comment", "--reply-to", reply_id,
+          "--body", "r2", "--author", "merlin"])
+    third = [c for c in read_all_comments(sd) if c.author == "merlin"][0]
+    # Should anchor at the original parent, not at reply_id.
+    assert third.reply_to == parent_id
+
+
+def test_unresolve_subcommand_reopens():
+    ws = _make_workspace({"foo.py": "x\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    main(["--session", sd, "add-comment", "--file", "foo.py", "--line", "1",
+          "--body", "x", "--author", "vera"])
+    from peanut_review.store import read_all_comments
+    cid = read_all_comments(sd)[0].id
+    main(["--session", sd, "resolve", cid, "--by", "jakub"])
+    assert read_all_comments(sd)[0].resolved is True
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "unresolve", cid])
+    assert rc == 0
+    assert "Unresolved" in out.getvalue()
+    assert read_all_comments(sd)[0].resolved is False
+
+
 def test_delete_hides_from_default_list_and_undelete_restores():
     ws = _make_workspace({"foo.py": "line1\nline2\n"})
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")

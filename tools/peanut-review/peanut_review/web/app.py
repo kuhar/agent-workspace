@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import store
+from .. import polling, store
 from ..models import Comment, Severity
 from ..session import (
     load_session,
@@ -257,9 +257,11 @@ class _Handler(BaseHTTPRequestHandler):
             files = diffmod.parse_diff(
                 session.workspace, session.base_ref, session.topic_ref,
             )
+            transcript = polling.list_transcript(session_dir)
             html_out = render_page(
                 load_session(session_dir), session_id, files, comments,
                 head_shifted=shifted, base_url=self.base_url,
+                inbox_transcript=transcript,
             )
             self._html(200, html_out)
             return
@@ -305,6 +307,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, [_comment_to_dict(c) for c in filtered])
             return
 
+        if tail == "/api/inbox":
+            self._json(200, polling.list_transcript(session_dir))
+            return
+
         self._error(404, f"no route for {tail}")
 
     def do_POST(self) -> None:  # noqa: N802
@@ -330,6 +336,9 @@ class _Handler(BaseHTTPRequestHandler):
         if tail == "/api/resolve":
             self._post_resolve(session_dir, data)
             return
+        if tail == "/api/unresolve":
+            self._post_unresolve(session_dir, data)
+            return
         if tail == "/api/delete":
             self._post_delete(session_dir, data)
             return
@@ -349,29 +358,43 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(400, f"invalid severity: {severity}")
         author = str(data.get("author") or _default_author())
 
-        # Global comments: scope=="global" OR file/line both absent/empty.
-        is_global = (
-            str(data.get("scope") or "") == "global"
-            or (not data.get("file") and data.get("line") is None)
-        )
-        if is_global:
-            file = ""
-            line = 0
+        # Reply mode: reply_to in payload. Inherits parent's file/line so
+        # the new comment lands in the existing thread.
+        reply_to_raw = data.get("reply_to")
+        reply_to: str | None = None
+        if reply_to_raw:
+            all_comments = store.read_all_comments(session_dir)
+            reply_to = store.normalize_reply_to(all_comments, str(reply_to_raw))
+            if reply_to is None:
+                return self._error(404, f"reply_to comment not found: {reply_to_raw}")
+            parent = next(c for c in all_comments if c.id == reply_to)
+            file = parent.file
+            line = parent.line
             end_line = None
         else:
-            if "file" not in data or "line" not in data:
-                return self._error(
-                    400, "missing field: file/line (or pass scope='global')")
-            file = str(data["file"])
-            try:
-                line = int(data["line"])
-            except (TypeError, ValueError):
-                return self._error(400, "line must be an integer")
-            end_line = data.get("end_line")
-            session = load_session(session_dir)
-            _, err = validate_comment_location(session.workspace, file, line)
-            if err:
-                return self._error(400, err)
+            # Global comments: scope=="global" OR file/line both absent/empty.
+            is_global = (
+                str(data.get("scope") or "") == "global"
+                or (not data.get("file") and data.get("line") is None)
+            )
+            if is_global:
+                file = ""
+                line = 0
+                end_line = None
+            else:
+                if "file" not in data or "line" not in data:
+                    return self._error(
+                        400, "missing field: file/line (or pass scope='global')")
+                file = str(data["file"])
+                try:
+                    line = int(data["line"])
+                except (TypeError, ValueError):
+                    return self._error(400, "line must be an integer")
+                end_line = data.get("end_line")
+                session = load_session(session_dir)
+                _, err = validate_comment_location(session.workspace, file, line)
+                if err:
+                    return self._error(400, err)
 
         session = load_session(session_dir)
         round_num = 2 if session.state == "round2" else 1
@@ -384,6 +407,7 @@ class _Handler(BaseHTTPRequestHandler):
             severity=severity,
             round=round_num,
             head_sha=session.current_head,
+            reply_to=reply_to,
         )
         store.append_comment(session_dir, comment)
         self._json(201, _comment_to_dict(comment))
@@ -396,6 +420,14 @@ class _Handler(BaseHTTPRequestHandler):
         if not store.resolve_comment(session_dir, cid, resolved_by=by):
             return self._error(404, f"comment not found: {cid}")
         self._json(200, {"resolved": cid})
+
+    def _post_unresolve(self, session_dir: Path, data: dict) -> None:
+        cid = str(data.get("comment_id") or "")
+        if not cid:
+            return self._error(400, "missing comment_id")
+        if not store.unresolve_comment(session_dir, cid):
+            return self._error(404, f"comment not found: {cid}")
+        self._json(200, {"unresolved": cid})
 
     def _post_delete(self, session_dir: Path, data: dict) -> None:
         cid = str(data.get("comment_id") or "")
@@ -434,6 +466,7 @@ def _comment_to_dict(c: Comment) -> dict:
         "deleted_by": c.deleted_by,
         "deleted_at": c.deleted_at,
         "head_sha": c.head_sha,
+        "reply_to": c.reply_to,
     }
 
 

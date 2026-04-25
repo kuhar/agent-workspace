@@ -59,26 +59,106 @@ def _file_anchor(path: str) -> str:
     return "f-" + _SLUG_RE.sub("-", path).strip("-")
 
 
-def _group_comments(comments: list[Comment]) -> dict[tuple[str, int], list[Comment]]:
-    """Key each comment by (file, anchor_line).
+def _organize_threads(comments: list[Comment]) -> list[list[Comment]]:
+    """Group comments into threads: [parent, *replies] each in timestamp order.
 
-    Soft-deleted comments are excluded — the server-rendered page mirrors what
-    agents see on a re-read (bad comments discarded by humans must not show up
-    as if they're still live). The audit trail remains in the JSONL.
-
-    For range comments (end_line set and different from line), anchor the thread
-    at end_line — where the user's drag ended and their eye is. Single-line
-    comments stay anchored at line.
+    Top-level parents come in timestamp order. Replies attach to their
+    `reply_to` parent. Soft-deleted comments are excluded everywhere.
+    Orphan replies (parent missing or also deleted) are dropped — there's no
+    sensible place to render them.
     """
-    g: dict[tuple[str, int], list[Comment]] = defaultdict(list)
-    for c in comments:
-        if c.deleted:
+    live = [c for c in comments if not c.deleted]
+    parents = [c for c in live if not c.reply_to]
+    parents.sort(key=lambda c: c.timestamp)
+    by_parent: dict[str, list[Comment]] = defaultdict(list)
+    for c in live:
+        if c.reply_to:
+            by_parent[c.reply_to].append(c)
+    threads: list[list[Comment]] = []
+    for p in parents:
+        replies = sorted(by_parent.get(p.id, []), key=lambda c: c.timestamp)
+        threads.append([p, *replies])
+    return threads
+
+
+def _group_threads_by_anchor(
+    comments: list[Comment],
+) -> dict[tuple[str, int], list[list[Comment]]]:
+    """Group threads by (file, anchor_line) for inline rendering.
+
+    Globals (file=="") are excluded — they render in their own top-level
+    section. For range comments (end_line different from line), anchor the
+    thread at end_line so the visual lines up with where the drag ended.
+    """
+    out: dict[tuple[str, int], list[list[Comment]]] = defaultdict(list)
+    for thread in _organize_threads(comments):
+        parent = thread[0]
+        if parent.file == GLOBAL_FILE:
             continue
-        if c.file == GLOBAL_FILE:
-            continue  # global comments render in their own top-level section
-        anchor = c.end_line if (c.end_line is not None and c.end_line != c.line) else c.line
-        g[(c.file, anchor)].append(c)
-    return g
+        anchor = (parent.end_line
+                  if (parent.end_line is not None and parent.end_line != parent.line)
+                  else parent.line)
+        out[(parent.file, anchor)].append(thread)
+    return out
+
+
+def render_inbox_section(transcript: list[dict]) -> str:
+    """Bottom-of-page section showing the agent help-channel transcript.
+
+    Read-only: humans/orchestrators reply via the CLI (`peanut-review reply`)
+    so the existing `ask`-blocking flow stays the source of truth. Polled by
+    the same JS loop as comments and reconciled in place.
+    """
+    if not transcript:
+        body = (
+            '<p class="muted">No agent questions yet. When an agent calls '
+            '<code>peanut-review ask</code>, the question and the '
+            'orchestrator\'s reply appear here.</p>'
+        )
+    else:
+        rows = []
+        for entry in transcript:
+            agent = html.escape(entry.get("agent", ""))
+            qid = html.escape(entry.get("id", ""))
+            qts = html.escape(entry.get("timestamp", ""))
+            qtext = html.escape(entry.get("question", ""))
+            reply = entry.get("reply")
+            row = [
+                f'<div class="ix-entry" data-qid="{qid}" '
+                f'data-key="{agent}/{qid}" '
+                f'data-replied="{1 if reply else 0}">',
+                f'<div class="ix-q"><span class="ix-meta">'
+                f'<span class="agent">{agent}</span>'
+                f'<span class="qid mono">{qid}</span>'
+                f'<span class="ts mono">{qts}</span>'
+                f'</span><pre class="ix-body">{qtext}</pre></div>',
+            ]
+            if reply:
+                ats = html.escape(reply.get("timestamp", ""))
+                aby = html.escape(reply.get("answered_by", "orchestrator"))
+                atext = html.escape(reply.get("answer", ""))
+                row.append(
+                    f'<div class="ix-r"><span class="ix-meta">'
+                    f'<span class="agent">↳ {aby}</span>'
+                    f'<span class="ts mono">{ats}</span>'
+                    f'</span><pre class="ix-body">{atext}</pre></div>'
+                )
+            else:
+                row.append('<div class="ix-r pending"><span class="ix-meta">'
+                           '<span class="agent">↳ awaiting reply…</span>'
+                           '</span></div>')
+            row.append('</div>')
+            rows.append("".join(row))
+        body = "".join(rows)
+    return (
+        '<section class="inbox-section" id="inbox">'
+        '<h2>Agent help inbox</h2>'
+        '<p class="hint muted">Babysitting channel for blocked agents '
+        '(<code>peanut-review ask</code> / <code>reply</code>). '
+        'Read-only here.</p>'
+        f'<div class="ix-list" id="inbox-list">{body}</div>'
+        '</section>'
+    )
 
 
 def _render_global_section(comments: list[Comment]) -> str:
@@ -87,8 +167,8 @@ def _render_global_section(comments: list[Comment]) -> str:
     Always renders — the "Add Comment" button is reachable even with no
     existing high-level comments.
     """
-    globals_live = [c for c in comments if c.file == GLOBAL_FILE and not c.deleted]
-    items = "".join(_render_comment(c) for c in globals_live)
+    threads = [t for t in _organize_threads(comments) if t[0].file == GLOBAL_FILE]
+    items = "".join(_render_thread(t) for t in threads)
     return (
         '<section class="global-section" id="global">'
         '<div class="global-header">'
@@ -100,30 +180,42 @@ def _render_global_section(comments: list[Comment]) -> str:
     )
 
 
-def _render_comment(c: Comment) -> str:
+def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
+    """Render a single comment node.
+
+    Resolve/Unresolve and Reply are thread-level actions (see _render_thread)
+    and live below the last comment in the thread, not on each comment.
+    Delete stays per-comment because soft-deleting one bad reply shouldn't
+    nuke the whole thread.
+    """
     classes = ["comment"]
+    if is_reply:
+        classes.append("reply")
     if c.stale:
         classes.append("stale")
     if c.resolved:
         classes.append("resolved")
     cid = html.escape(c.id)
-    buttons = []
-    if not c.resolved:
-        buttons.append(f'<button data-resolve="{cid}">Resolve</button>')
-    buttons.append(f'<button class="danger" data-delete="{cid}">Delete</button>')
+    buttons = [f'<button class="danger" data-delete="{cid}">Delete</button>']
     badges = []
     if c.end_line is not None and c.end_line != c.line:
         lo, hi = min(c.line, c.end_line), max(c.line, c.end_line)
         badges.append(f'<span class="round range">L{lo}–L{hi}</span>')
     if c.stale:
         badges.append('<span class="round">stale</span>')
-    if c.resolved:
+    if c.resolved and not is_reply:
         badges.append('<span class="round">resolved</span>')
+    # Replies don't carry their own severity — they inherit the thread's.
+    sev_html = (
+        ""
+        if is_reply
+        else f'<span class="sev {html.escape(c.severity)}">{html.escape(c.severity)}</span>'
+    )
     return (
         f'<div class="{" ".join(classes)}" data-cid="{cid}">'
         f'<div class="comment-meta">'
         f'<span class="author">{html.escape(c.author or "unknown")}</span>'
-        f'<span class="sev {html.escape(c.severity)}">{html.escape(c.severity)}</span>'
+        f'{sev_html}'
         f'<span class="round">R{c.round}</span>'
         f'{"".join(badges)}'
         f'{"".join(buttons)}'
@@ -133,7 +225,35 @@ def _render_comment(c: Comment) -> str:
     )
 
 
-def _render_file(fd: FileDiff, comments_at_line: dict[tuple[str, int], list[Comment]]) -> str:
+def _render_thread(thread: list[Comment]) -> str:
+    """Render a thread: parent comment, replies (inset), then thread actions.
+
+    `thread` is [parent, *replies] from `_organize_threads`. Reply +
+    Resolve/Unresolve sit at the bottom of every thread so they're always
+    where you'd look after reading the last reply.
+    """
+    parent = thread[0]
+    replies = thread[1:]
+    parent_html = _render_comment(parent)
+    replies_html = "".join(_render_comment(r, is_reply=True) for r in replies)
+    pid = html.escape(parent.id)
+    if parent.resolved:
+        toggle_btn = f'<button data-unresolve="{pid}">Unresolve</button>'
+    else:
+        toggle_btn = f'<button data-resolve="{pid}">Resolve</button>'
+    actions = (
+        f'<div class="thread-actions">'
+        f'<button class="reply-btn" data-reply-to="{pid}">Reply</button>'
+        f'{toggle_btn}'
+        f'</div>'
+    )
+    cls = "thread"
+    if parent.resolved:
+        cls += " resolved"
+    return f'<div class="{cls}" data-thread-id="{pid}">{parent_html}{replies_html}{actions}</div>'
+
+
+def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[Comment]]]) -> str:
     anchor = _file_anchor(fd.path)
     if fd.binary and not fd.lines:
         return (
@@ -170,17 +290,17 @@ def _render_file(fd: FileDiff, comments_at_line: dict[tuple[str, int], list[Comm
         )
         rows.append(row)
 
-        # Append comment thread for comments anchored at this new-file line.
-        # Comments are stored with the source-file (new) line number.
+        # Append the comment-thread row for threads anchored at this new-file
+        # line. Comments are stored with the source-file (new) line number.
+        # Multiple top-level threads can share the same line — they render as
+        # sibling .thread blocks inside one .comment-thread container.
         key = (fd.path, dl.new_lineno) if dl.new_lineno is not None else None
-        if key and key in comments_at_line:
-            thread = (
+        if key and key in threads_at_line:
+            inner = "".join(_render_thread(t) for t in threads_at_line[key])
+            rows.append(
                 f'<div class="comment-thread" data-file="{html.escape(fd.path)}"'
-                f' data-line="{dl.new_lineno}">'
-                + "".join(_render_comment(c) for c in comments_at_line[key])
-                + "</div>"
+                f' data-line="{dl.new_lineno}">{inner}</div>'
             )
-            rows.append(thread)
 
     return (
         f'<div class="file" id="{anchor}" data-file="{html.escape(fd.path)}">'
@@ -202,26 +322,29 @@ def _render_sidebar(
 ) -> str:
     # Sidebar counters reflect what's visible (deleted hidden), with a
     # separate "deleted" row so the audit count is still discoverable.
+    # Replies don't count toward open/total — a chatty thread shouldn't
+    # inflate the "5 open" badge — only top-level comments do.
     live = [c for c in comments if not c.deleted]
     deleted = len(comments) - len(live)
-    stale_count = sum(1 for c in live if c.stale)
-    resolved = sum(1 for c in live if c.resolved)
-    crit = sum(1 for c in live if c.severity == "critical")
+    top_level = [c for c in live if not c.reply_to]
+    stale_count = sum(1 for c in top_level if c.stale)
+    resolved = sum(1 for c in top_level if c.resolved)
+    crit = sum(1 for c in top_level if c.severity == "critical")
 
-    # Per-file counts: unresolved and total live. Keyed by file path so the
-    # JS poller can update these in place without re-rendering. Globals
-    # (file=="") are excluded — they get their own sidebar entry.
+    # Per-file counts: unresolved and total live, top-level only. Keyed by
+    # file path so the JS poller can update these in place. Globals
+    # (file=="") get their own sidebar entry.
     per_file_total: dict[str, int] = defaultdict(int)
     per_file_unresolved: dict[str, int] = defaultdict(int)
-    for c in live:
+    for c in top_level:
         if c.file == GLOBAL_FILE:
             continue
         per_file_total[c.file] += 1
         if not c.resolved:
             per_file_unresolved[c.file] += 1
 
-    global_total = sum(1 for c in live if c.file == GLOBAL_FILE)
-    global_open = sum(1 for c in live if c.file == GLOBAL_FILE and not c.resolved)
+    global_total = sum(1 for c in top_level if c.file == GLOBAL_FILE)
+    global_open = sum(1 for c in top_level if c.file == GLOBAL_FILE and not c.resolved)
     if global_open > 0:
         global_counts = (
             f'<span class="count open">{global_open}</span>'
@@ -431,14 +554,19 @@ def render_page(
     *,
     head_shifted: bool = False,
     base_url: str = "",
+    inbox_transcript: list[dict] | None = None,
 ) -> str:
     """Build the full HTML page for a session.
 
     `base_url` is the path prefix the app is mounted under (empty → root).
+    `inbox_transcript` is the agent ask/reply log to render at the bottom;
+    None falls back to an empty transcript so tests/non-server callers don't
+    have to pass it.
     """
-    comments_at = _group_comments(comments)
-    file_html = "".join(_render_file(fd, comments_at) for fd in files)
+    threads_at = _group_threads_by_anchor(comments)
+    file_html = "".join(_render_file(fd, threads_at) for fd in files)
     global_html = _render_global_section(comments)
+    inbox_html = render_inbox_section(inbox_transcript or [])
     sidebar = _render_sidebar(session, comments, files)
 
     head_badge = (
@@ -478,6 +606,7 @@ def render_page(
     {sidebar}
     {global_html}
     {file_html}
+    {inbox_html}
   </main>
   <script>
     window.PR_BASE_URL = {base_url_js};

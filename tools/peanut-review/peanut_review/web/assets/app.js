@@ -29,27 +29,50 @@
     return `<span class="round range">L${lo}–L${hi}</span>`;
   }
 
-  function renderComment(c) {
+  function renderComment(c, { isReply = false } = {}) {
     const cls = ["comment"];
+    if (isReply) cls.push("reply");
     if (c.stale) cls.push("stale");
-    if (c.resolved) cls.push("resolved");
-    const resolveBtn = c.resolved
-      ? ""
-      : `<button data-resolve="${esc(c.id)}">Resolve</button>`;
+    if (c.resolved && !isReply) cls.push("resolved");
     const deleteBtn = `<button class="danger" data-delete="${esc(c.id)}">Delete</button>`;
+    const sevHtml = isReply
+      ? ""
+      : `<span class="sev ${esc(c.severity)}">${esc(c.severity)}</span>`;
+    const resolvedBadge = c.resolved && !isReply ? '<span class="round">resolved</span>' : "";
     return `
       <div class="${cls.join(" ")}" data-cid="${esc(c.id)}">
         <div class="comment-meta">
           <span class="author">${esc(c.author || "unknown")}</span>
-          <span class="sev ${esc(c.severity)}">${esc(c.severity)}</span>
+          ${sevHtml}
           <span class="round">R${c.round}</span>
           ${rangeBadge(c)}
           ${c.stale ? '<span class="round">stale</span>' : ""}
-          ${c.resolved ? '<span class="round">resolved</span>' : ""}
-          ${resolveBtn}
+          ${resolvedBadge}
           ${deleteBtn}
         </div>
         <div class="comment-body">${esc(c.body)}</div>
+      </div>
+    `;
+  }
+
+  function renderThreadActions(parentId, resolved) {
+    const toggle = resolved
+      ? `<button data-unresolve="${esc(parentId)}">Unresolve</button>`
+      : `<button data-resolve="${esc(parentId)}">Resolve</button>`;
+    return `<div class="thread-actions">
+      <button class="reply-btn" data-reply-to="${esc(parentId)}">Reply</button>
+      ${toggle}
+    </div>`;
+  }
+
+  function renderThread(parent) {
+    // Initial render only — replies arrive via insertFetchedComment.
+    const cls = ["thread"];
+    if (parent.resolved) cls.push("resolved");
+    return `
+      <div class="${cls.join(" ")}" data-thread-id="${esc(parent.id)}">
+        ${renderComment(parent)}
+        ${renderThreadActions(parent.id, parent.resolved)}
       </div>
     `;
   }
@@ -127,12 +150,45 @@
       try {
         const c = await api("POST", "/api/comments", payload);
         const rendered = document.createElement("div");
-        rendered.innerHTML = renderComment(c);
+        rendered.innerHTML = renderThread(c);
         thread.insertBefore(rendered.firstElementChild, form);
         cleanup();
         form.remove();
       } catch (e) {
         alert("Post failed: " + e.message);
+      }
+    };
+  }
+
+  // --- Reply form (opens at thread bottom, posts with reply_to) ---
+  function openReplyForm(threadEl, parentId) {
+    if (threadEl.querySelector(".new-comment")) return;
+    const actions = threadEl.querySelector(".thread-actions");
+    const form = document.createElement("div");
+    form.className = "new-comment reply-form";
+    form.innerHTML = `
+      <textarea placeholder="Reply..."></textarea>
+      <div class="controls">
+        <button class="cancel">Cancel</button>
+        <button class="submit">Reply</button>
+      </div>
+    `;
+    if (actions) threadEl.insertBefore(form, actions);
+    else threadEl.appendChild(form);
+    form.querySelector("textarea").focus();
+    form.querySelector(".cancel").onclick = () => form.remove();
+    form.querySelector(".submit").onclick = async () => {
+      const body = form.querySelector("textarea").value.trim();
+      if (!body) return;
+      try {
+        const c = await api("POST", "/api/comments",
+                            { reply_to: parentId, body });
+        const rendered = document.createElement("div");
+        rendered.innerHTML = renderComment(c, { isReply: true });
+        threadEl.insertBefore(rendered.firstElementChild, form);
+        form.remove();
+      } catch (e) {
+        alert("Reply failed: " + e.message);
       }
     };
   }
@@ -262,7 +318,7 @@
         const c = await api("POST", "/api/comments",
                             { scope: "global", body, severity });
         const rendered = document.createElement("div");
-        rendered.innerHTML = renderComment(c);
+        rendered.innerHTML = renderThread(c);
         container.insertBefore(rendered.firstElementChild, form);
         form.remove();
       } catch (e) {
@@ -271,7 +327,43 @@
     };
   }
 
-  // Resolve / Delete buttons — plain-click handlers, no drag involvement.
+  function setThreadResolved(threadEl, resolved) {
+    if (!threadEl) return;
+    threadEl.classList.toggle("resolved", resolved);
+    const parent = threadEl.querySelector(".comment:not(.reply)");
+    if (parent) parent.classList.toggle("resolved", resolved);
+    // Swap the action button: Resolve <-> Unresolve.
+    const actions = threadEl.querySelector(".thread-actions");
+    if (actions) {
+      const tid = threadEl.dataset.threadId;
+      const old = actions.querySelector("[data-resolve], [data-unresolve]");
+      if (old) {
+        const repl = document.createElement("button");
+        if (resolved) {
+          repl.dataset.unresolve = tid;
+          repl.textContent = "Unresolve";
+        } else {
+          repl.dataset.resolve = tid;
+          repl.textContent = "Resolve";
+        }
+        old.replaceWith(repl);
+      }
+    }
+    // Toggle the resolved badge on the parent comment-meta.
+    if (parent) {
+      const meta = parent.querySelector(".comment-meta");
+      const badge = meta && meta.querySelector(".round.resolved-badge");
+      if (resolved && !badge && meta) {
+        const span = document.createElement("span");
+        span.className = "round resolved-badge";
+        span.textContent = "resolved";
+        meta.insertBefore(span, meta.querySelector("button"));
+      }
+      if (!resolved && badge) badge.remove();
+    }
+  }
+
+  // Resolve / Unresolve / Delete / Reply — plain-click handlers, no drag involvement.
   document.addEventListener("click", (ev) => {
     if (ev.target.id === "add-global-btn") {
       openGlobalForm();
@@ -281,10 +373,23 @@
     if (rb) {
       const cid = rb.dataset.resolve;
       api("POST", "/api/resolve", { comment_id: cid }).then(() => {
-        const c = rb.closest(".comment");
-        c.classList.add("resolved");
-        rb.remove();
+        setThreadResolved(rb.closest(".thread"), true);
       }).catch((e) => alert("Resolve failed: " + e.message));
+      return;
+    }
+    const ub = ev.target.closest("[data-unresolve]");
+    if (ub) {
+      const cid = ub.dataset.unresolve;
+      api("POST", "/api/unresolve", { comment_id: cid }).then(() => {
+        setThreadResolved(ub.closest(".thread"), false);
+      }).catch((e) => alert("Unresolve failed: " + e.message));
+      return;
+    }
+    const replyBtn = ev.target.closest("[data-reply-to]");
+    if (replyBtn) {
+      const pid = replyBtn.dataset.replyTo;
+      const threadEl = replyBtn.closest(".thread");
+      if (threadEl) openReplyForm(threadEl, pid);
       return;
     }
     const db = ev.target.closest("[data-delete]");
@@ -293,11 +398,19 @@
       if (!confirm("Delete this comment? It's a soft-delete — the record is kept but hidden from agents and the default view.")) return;
       api("POST", "/api/delete", { comment_id: cid }).then(() => {
         const node = db.closest(".comment");
-        const thread = node && node.closest(".comment-thread");
+        const threadEl = node && node.closest(".thread");
+        const anchor = node && node.closest(".comment-thread");
         if (node) node.remove();
-        // If the thread now has no live comments, drop it entirely.
-        if (thread && !thread.querySelector(".comment") && !thread.querySelector(".new-comment")) {
-          thread.remove();
+        // If we removed the parent comment, drop the entire thread block.
+        // If the thread block still has comments (replies remain after a top-
+        // level delete is impossible because the parent went, so this branch
+        // only applies to reply deletes), keep the actions intact.
+        if (threadEl && !threadEl.querySelector(".comment")) threadEl.remove();
+        // If the per-line .comment-thread anchor has no surviving threads or
+        // forms, drop it so the gap between code lines closes.
+        if (anchor && !anchor.querySelector(".comment") &&
+            !anchor.querySelector(".new-comment")) {
+          anchor.remove();
         }
       }).catch((e) => alert("Delete failed: " + e.message));
     }
@@ -322,32 +435,54 @@
     return (c.end_line != null && c.end_line !== c.line) ? c.end_line : c.line;
   }
 
+  function findThreadEl(parentId) {
+    return document.querySelector(`.thread[data-thread-id="${cssEsc(parentId)}"]`);
+  }
+
+  function insertReplyIntoThread(threadEl, c) {
+    const rendered = document.createElement("div");
+    rendered.innerHTML = renderComment(c, { isReply: true });
+    const node = rendered.firstElementChild;
+    // Replies sit between the existing replies and the thread-actions; if a
+    // reply form is open, drop the reply just above it so the user's
+    // in-progress composition stays at the bottom.
+    const form = threadEl.querySelector(".new-comment");
+    if (form) threadEl.insertBefore(node, form);
+    else {
+      const actions = threadEl.querySelector(".thread-actions");
+      if (actions) threadEl.insertBefore(node, actions);
+      else threadEl.appendChild(node);
+    }
+  }
+
   function insertFetchedComment(c) {
+    if (c.reply_to) {
+      const threadEl = findThreadEl(c.reply_to);
+      if (threadEl) insertReplyIntoThread(threadEl, c);
+      return;
+    }
+    // Top-level comment — render as a new .thread block in the appropriate
+    // container.
+    const newThread = document.createElement("div");
+    newThread.innerHTML = renderThread(c);
+    const threadEl = newThread.firstElementChild;
     if (!c.file) {
-      // Global comment — append to the dedicated container, before any
-      // in-progress composer.
       const container = document.getElementById("global-comments");
       if (!container) return;
-      const rendered = document.createElement("div");
-      rendered.innerHTML = renderComment(c);
-      const form = container.querySelector(".new-comment");
-      if (form) container.insertBefore(rendered.firstElementChild, form);
-      else container.appendChild(rendered.firstElementChild);
+      const composer = container.querySelector(".new-comment");
+      if (composer) container.insertBefore(threadEl, composer);
+      else container.appendChild(threadEl);
       return;
     }
     const fileEl = document.querySelector(`.file[data-file="${cssEsc(c.file)}"]`);
-    if (!fileEl) return;  // comment's file isn't in this diff
+    if (!fileEl) return;
     const anchor = anchorLineFor(c);
     const row = findRowForAnchor(fileEl, anchor);
-    if (!row) return;  // line is outside the diff window; skip
-    const thread = ensureThread(row, c.file, anchor);
-    const rendered = document.createElement("div");
-    rendered.innerHTML = renderComment(c);
-    const node = rendered.firstElementChild;
-    // Preserve any in-progress composer at the bottom of the thread.
-    const form = thread.querySelector(".new-comment");
-    if (form) thread.insertBefore(node, form);
-    else thread.appendChild(node);
+    if (!row) return;
+    const anchorContainer = ensureThread(row, c.file, anchor);
+    const composer = anchorContainer.querySelector(":scope > .new-comment");
+    if (composer) anchorContainer.insertBefore(threadEl, composer);
+    else anchorContainer.appendChild(threadEl);
   }
 
   function pickScrollAnchor() {
@@ -388,6 +523,7 @@
     const open = new Map();
     let globalTotal = 0, globalOpen = 0;
     for (const c of fetched) {
+      if (c.reply_to) continue;  // replies don't inflate the open badge
       if (!c.file) {
         globalTotal++;
         if (!c.resolved) globalOpen++;
@@ -433,7 +569,16 @@
     let anyStateChange = false;
     for (const el of domNodes) {
       const c = fetchedById.get(el.dataset.cid);
-      if (c && c.resolved && !el.classList.contains("resolved")) { anyStateChange = true; break; }
+      if (!c) continue;
+      const threadEl = el.closest(".thread");
+      if (!threadEl) continue;
+      const threadResolved = threadEl.classList.contains("resolved");
+      // Top-level comments drive the thread's resolved state; ignore reply
+      // resolved flags (they shouldn't be set in practice but defensively
+      // we don't want them to flicker the UI).
+      if (!c.reply_to && c.resolved !== threadResolved) {
+        anyStateChange = true; break;
+      }
     }
     if (!anyNew && !anyGone && !anyStateChange) return;
 
@@ -441,21 +586,26 @@
       // Removals first — a comment disappearing shifts content upward.
       for (const el of domNodes) {
         if (!fetchedById.has(el.dataset.cid)) {
-          const thread = el.closest(".comment-thread");
+          const threadEl = el.closest(".thread");
+          const anchor = el.closest(".comment-thread");
           el.remove();
-          if (thread && !thread.querySelector(".comment") && !thread.querySelector(".new-comment")) {
-            thread.remove();
+          // If we removed the parent (only top-levels can fully empty a
+          // .thread), drop the empty thread block.
+          if (threadEl && !threadEl.querySelector(".comment")) threadEl.remove();
+          if (anchor && !anchor.querySelector(".comment") &&
+              !anchor.querySelector(".new-comment")) {
+            anchor.remove();
           }
         }
       }
-      // State flips on what remains.
+      // State flips on what remains — toggle thread.resolved class + button.
       for (const el of document.querySelectorAll(".comment[data-cid]")) {
         const c = fetchedById.get(el.dataset.cid);
-        if (!c) continue;
-        if (c.resolved && !el.classList.contains("resolved")) {
-          el.classList.add("resolved");
-          const btn = el.querySelector("[data-resolve]");
-          if (btn) btn.remove();
+        if (!c || c.reply_to) continue;
+        const threadEl = el.closest(".thread");
+        if (!threadEl) continue;
+        if (c.resolved !== threadEl.classList.contains("resolved")) {
+          setThreadResolved(threadEl, !!c.resolved);
         }
       }
       // Inserts last so new IDs don't collide with nodes we're about to drop.
@@ -466,6 +616,109 @@
     });
   }
   setInterval(refreshComments, 3000);
+
+  // --- Inbox transcript (agent ask/reply) ---
+  // Read-only. Polled on the same 3s cadence as comments so a reviewer
+  // watching the page sees blocking questions appear and replies land
+  // without manual refresh.
+  function renderInboxEntry(entry) {
+    const agent = esc(entry.agent || "");
+    const qid = esc(entry.id || "");
+    const qts = esc(entry.timestamp || "");
+    const qtext = esc(entry.question || "");
+    let replyHtml;
+    if (entry.reply) {
+      const ats = esc(entry.reply.timestamp || "");
+      const aby = esc(entry.reply.answered_by || "orchestrator");
+      const atext = esc(entry.reply.answer || "");
+      replyHtml = `<div class="ix-r">
+          <span class="ix-meta">
+            <span class="agent">↳ ${aby}</span>
+            <span class="ts mono">${ats}</span>
+          </span>
+          <pre class="ix-body">${atext}</pre>
+        </div>`;
+    } else {
+      replyHtml = `<div class="ix-r pending">
+          <span class="ix-meta"><span class="agent">↳ awaiting reply…</span></span>
+        </div>`;
+    }
+    return `<div class="ix-entry" data-qid="${qid}">
+        <div class="ix-q">
+          <span class="ix-meta">
+            <span class="agent">${agent}</span>
+            <span class="qid mono">${qid}</span>
+            <span class="ts mono">${qts}</span>
+          </span>
+          <pre class="ix-body">${qtext}</pre>
+        </div>
+        ${replyHtml}
+      </div>`;
+  }
+
+  function inboxKey(entry) {
+    // Question id is unique only within an agent — combine with agent name.
+    return `${entry.agent}/${entry.id}`;
+  }
+
+  function entryReplied(entry) {
+    return entry.reply ? 1 : 0;
+  }
+
+  async function refreshInbox() {
+    const list = document.getElementById("inbox-list");
+    if (!list) return;
+    let fetched;
+    try {
+      const r = await fetch(sessionUrl + "/api/inbox");
+      if (!r.ok) return;
+      fetched = await r.json();
+    } catch { return; }
+
+    // Snapshot current DOM state keyed by qid + reply-flag so we can detect:
+    //   - new entries (insert)
+    //   - vanished entries (remove — rare, only via manual file deletion)
+    //   - reply landed on a previously-pending entry (replace that node)
+    const fetchedByKey = new Map();
+    for (const e of fetched) fetchedByKey.set(inboxKey(e), e);
+    const domByKey = new Map();
+    for (const el of list.querySelectorAll(".ix-entry")) {
+      const agent = el.parentElement && el.dataset.qid;
+      // Reconstruct the same key the server would emit. We store agent on
+      // the entry's first child via the ix-meta .agent text — that's
+      // brittle; instead we attach data-key directly. Fall back to qid only.
+      const key = el.dataset.key || el.dataset.qid;
+      domByKey.set(key, el);
+    }
+
+    // Cheap no-op short-circuit.
+    let dirty = fetched.length !== domByKey.size;
+    if (!dirty) {
+      for (const [key, e] of fetchedByKey) {
+        const el = domByKey.get(key);
+        if (!el) { dirty = true; break; }
+        const had = el.dataset.replied === "1";
+        if (had !== !!entryReplied(e)) { dirty = true; break; }
+      }
+    }
+    if (!dirty) return;
+
+    withStableScroll(() => {
+      // Rebuild the list in fetched order. Cheap because the count is
+      // small (one entry per agent question). Stable-scroll handles the
+      // reflow so reviewers reading mid-page don't jump.
+      list.innerHTML = "";
+      for (const e of fetched) {
+        const wrap = document.createElement("div");
+        wrap.innerHTML = renderInboxEntry(e);
+        const node = wrap.firstElementChild;
+        node.dataset.key = inboxKey(e);
+        node.dataset.replied = entryReplied(e) ? "1" : "0";
+        list.appendChild(node);
+      }
+    });
+  }
+  setInterval(refreshInbox, 3000);
 
   // --- Periodic session refresh (for state/signals) ---
   async function refreshSidebar() {

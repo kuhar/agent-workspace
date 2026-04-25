@@ -238,6 +238,152 @@ def test_server_post_global_via_omitted_file_and_line(session_dir: Path):
         srv.shutdown()
 
 
+def test_render_thread_includes_reply_button_and_replies_inset(
+    session_dir: Path, repo: Path
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    parent = Comment(author="vera", file="foo.py", line=1, body="parent",
+                     severity="warning", round=1)
+    store.append_comment(session_dir, parent)
+    reply = Comment(author="felix", file="foo.py", line=1, body="agreed",
+                    severity="suggestion", round=1, reply_to=parent.id)
+    store.append_comment(session_dir, reply)
+    html_out = render.render_page(s, s.id, files,
+                                  store.read_all_comments(session_dir),
+                                  head_shifted=False)
+    assert f'data-thread-id="{parent.id}"' in html_out
+    assert 'class="reply-btn"' in html_out
+    assert f'data-reply-to="{parent.id}"' in html_out
+    assert f'data-resolve="{parent.id}"' in html_out
+    # Reply renders with .reply class and no severity badge of its own.
+    cid_idx = html_out.index(f'data-cid="{reply.id}"')
+    div_open = html_out.rfind("<div ", 0, cid_idx)
+    assert "comment reply" in html_out[div_open:cid_idx]
+    # The reply-block body contains its meta but no severity span.
+    body_end = html_out.index("</div>", cid_idx)
+    assert "sev suggestion" not in html_out[cid_idx:body_end]
+
+
+def test_render_thread_swaps_to_unresolve_when_resolved(
+    session_dir: Path, repo: Path
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    parent = Comment(author="vera", file="foo.py", line=1, body="x",
+                     severity="warning", round=1, resolved=True)
+    store.append_comment(session_dir, parent)
+    html_out = render.render_page(s, s.id, files,
+                                  store.read_all_comments(session_dir),
+                                  head_shifted=False)
+    assert f'data-unresolve="{parent.id}"' in html_out
+    assert f'data-resolve="{parent.id}"' not in html_out
+
+
+def test_sidebar_counts_exclude_replies(session_dir: Path, repo: Path):
+    """A chatty thread of replies must not inflate the open count."""
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    parent = Comment(author="vera", file="foo.py", line=1, body="P",
+                     severity="warning", round=1)
+    store.append_comment(session_dir, parent)
+    for i in range(5):
+        store.append_comment(session_dir, Comment(
+            author="felix", file="foo.py", line=1, body=f"r{i}",
+            severity="suggestion", round=1, reply_to=parent.id,
+        ))
+    html_out = render.render_page(s, s.id, files,
+                                  store.read_all_comments(session_dir),
+                                  head_shifted=False)
+    # foo.py file row in sidebar should report 1 open / 1 total — replies don't count.
+    assert '<span class="count open">1</span>' in html_out
+    assert '<span class="count muted">/1</span>' in html_out
+
+
+def test_server_post_reply_and_unresolve(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        # Post parent
+        _, parent = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"file": "foo.py", "line": 1, "body": "p", "author": "vera"},
+        )
+        assert parent["reply_to"] is None
+        # Post reply
+        code, child = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"reply_to": parent["id"], "body": "r", "author": "felix"},
+        )
+        assert code == 201
+        assert child["reply_to"] == parent["id"]
+        assert child["file"] == "foo.py"
+        assert child["line"] == 1
+
+        # Resolve then unresolve via API
+        _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/resolve",
+            {"comment_id": parent["id"], "by": "jakub"},
+        )
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/unresolve",
+            {"comment_id": parent["id"]},
+        )
+        assert code == 200
+        assert data["unresolved"] == parent["id"]
+
+        cs = store.read_all_comments(session_dir)
+        parent_stored = next(c for c in cs if c.id == parent["id"])
+        assert parent_stored.resolved is False
+    finally:
+        srv.shutdown()
+
+
+def test_server_post_reply_unknown_parent_returns_404(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"reply_to": "c_nonexistent", "body": "r"},
+        )
+        assert code == 404
+        assert "not found" in data["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_server_inbox_endpoint_and_render(session_dir: Path, tmp_path: Path):
+    """Posting an ask + reply via polling.write_question/write_reply lands
+    in /api/inbox and in the rendered transcript section."""
+    from peanut_review import polling
+    polling.write_question(session_dir, "vera", "python isn't on PATH")
+    polling.write_reply(session_dir, "vera", "q_001",
+                        "source .venv/bin/activate first")
+
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _get(f"http://127.0.0.1:{port}/{session_id}/api/inbox")
+        assert code == 200
+        entries = json.loads(data)
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["agent"] == "vera"
+        assert e["id"] == "q_001"
+        assert e["question"].startswith("python isn't")
+        assert e["reply"] is not None
+        assert e["reply"]["answer"].startswith("source .venv")
+
+        # Page render must include the inbox section + a data-key per entry.
+        code, body = _get(f"http://127.0.0.1:{port}/{session_id}")
+        assert code == 200
+        text = body.decode("utf-8")
+        assert 'id="inbox"' in text
+        assert 'Agent help inbox' in text
+        assert 'data-key="vera/q_001"' in text
+        assert 'data-replied="1"' in text
+    finally:
+        srv.shutdown()
+
+
 def test_render_stale_and_resolved_classes(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
@@ -777,17 +923,18 @@ def test_render_range_comment_anchored_at_end_line(session_dir: Path, repo: Path
     assert 'data-line="1"' in html_out  # single-line thread anchor
 
 
-def test_group_comments_anchors_range_at_end_line():
-    from peanut_review.web.render import _group_comments
+def test_group_threads_by_anchor_uses_end_line_for_ranges():
+    from peanut_review.web.render import _group_threads_by_anchor
     comments = [
         Comment(author="a", file="foo.py", line=5, body="single"),
         Comment(author="b", file="foo.py", line=5, end_line=10, body="range"),
         Comment(author="c", file="foo.py", line=10, end_line=10, body="degenerate"),
     ]
-    g = _group_comments(comments)
-    # Single-line and range-ending-at-10 share an anchor at line 10.
+    g = _group_threads_by_anchor(comments)
+    # Range-ending-at-10 and the line=10 single-line both anchor at 10 →
+    # two distinct top-level threads at that key.
     assert len(g[("foo.py", 10)]) == 2
-    # Single at line 5 has its own anchor.
+    # Single at line 5 has its own anchor with one thread.
     assert len(g[("foo.py", 5)]) == 1
 
 

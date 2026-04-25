@@ -134,29 +134,53 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
         print("Error: --body or --body-file is required", file=sys.stderr)
         return 1
 
-    # Global comment mode: --global OR neither --file nor --line given.
-    is_global = getattr(args, "global_", False) or (not args.file and args.line is None)
-    file_lines: list[str] | None = None
-    if is_global:
-        if args.file or args.line is not None or args.end_line is not None:
-            print("Error: --global cannot be combined with --file/--line/--end-line",
+    # Reply mode: --reply-to <id>. Inherits the parent's file/line so the
+    # reply renders in the same thread.
+    reply_to_arg = getattr(args, "reply_to", None)
+    reply_to: str | None = None
+    if reply_to_arg:
+        all_comments = store.read_all_comments(session_dir)
+        reply_to = store.normalize_reply_to(all_comments, reply_to_arg)
+        if reply_to is None:
+            print(f"Error: --reply-to comment not found: {reply_to_arg}",
                   file=sys.stderr)
             return 1
-        file = sess.GLOBAL_FILE
-        line = 0
+        if args.file or args.line is not None or args.end_line is not None \
+                or getattr(args, "global_", False):
+            print("Error: --reply-to cannot be combined with "
+                  "--file/--line/--end-line/--global "
+                  "(replies inherit the parent's location)", file=sys.stderr)
+            return 1
+        parent = next(c for c in all_comments if c.id == reply_to)
+        file = parent.file
+        line = parent.line
         end_line = None
+        is_global = (file == sess.GLOBAL_FILE)
+        file_lines = None
     else:
-        if not args.file or args.line is None:
-            print("Error: --file and --line are required for anchored comments; "
-                  "use --global for high-level feedback", file=sys.stderr)
-            return 1
-        file = args.file
-        line = args.line
-        end_line = args.end_line
-        file_lines, err = sess.validate_comment_location(s.workspace, file, line)
-        if err:
-            print(f"Error: {err}", file=sys.stderr)
-            return 1
+        # Global comment mode: --global OR neither --file nor --line given.
+        is_global = getattr(args, "global_", False) or (not args.file and args.line is None)
+        file_lines: list[str] | None = None
+        if is_global:
+            if args.file or args.line is not None or args.end_line is not None:
+                print("Error: --global cannot be combined with --file/--line/--end-line",
+                      file=sys.stderr)
+                return 1
+            file = sess.GLOBAL_FILE
+            line = 0
+            end_line = None
+        else:
+            if not args.file or args.line is None:
+                print("Error: --file and --line are required for anchored comments; "
+                      "use --global for high-level feedback", file=sys.stderr)
+                return 1
+            file = args.file
+            line = args.line
+            end_line = args.end_line
+            file_lines, err = sess.validate_comment_location(s.workspace, file, line)
+            if err:
+                print(f"Error: {err}", file=sys.stderr)
+                return 1
 
     comment = models.Comment(
         author=author,
@@ -167,11 +191,14 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
         severity=args.severity,
         round=round_num,
         head_sha=s.current_head,
+        reply_to=reply_to,
     )
 
     store.append_comment(session_dir, comment)
 
-    if is_global:
+    if reply_to:
+        print(f"{comment.id} (reply to {reply_to})")
+    elif is_global:
         print(f"{comment.id} (global)")
     elif file_lines and line >= 1:
         print(f"{file}:{line}: {file_lines[line - 1]}")
@@ -256,6 +283,16 @@ def cmd_undelete(args: argparse.Namespace) -> int:
     session_dir = _get_session_dir(args)
     if store.undelete_comment(session_dir, args.comment_id):
         print(f"Undeleted {args.comment_id}")
+        return 0
+    print(f"Comment {args.comment_id} not found", file=sys.stderr)
+    return 1
+
+
+def cmd_unresolve(args: argparse.Namespace) -> int:
+    """Reopen a previously resolved comment thread."""
+    session_dir = _get_session_dir(args)
+    if store.unresolve_comment(session_dir, args.comment_id):
+        print(f"Unresolved {args.comment_id}")
         return 0
     print(f"Comment {args.comment_id} not found", file=sys.stderr)
     return 1
@@ -628,6 +665,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--end-line", type=int, default=None, help="End line number")
     sp.add_argument("--global", dest="global_", action="store_true",
                     help="Post a high-level comment with no file/line anchor")
+    sp.add_argument("--reply-to", dest="reply_to", default=None, metavar="ID",
+                    help="Post as a reply to an existing comment thread "
+                         "(file/line are inherited from the parent)")
     sp.add_argument("--body", help="Comment text (watch for shell-eaten backticks — prefer --body-file)")
     sp.add_argument("--body-file", help="Read comment text from FILE (safer for bodies with backticks or $ chars)")
     sp.add_argument("--severity", default="suggestion",
@@ -663,6 +703,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("resolve", help="Resolve a comment")
     sp.add_argument("comment_id", help="Comment ID to resolve")
     sp.add_argument("--by", help="Resolved by (default: git config user.name)")
+
+    # unresolve
+    sp = sub.add_parser("unresolve", help="Reopen a resolved comment thread")
+    sp.add_argument("comment_id", help="Comment ID to reopen")
 
     # delete
     sp = sub.add_parser("delete", help="Soft-delete a comment (hides it from default views)")
@@ -771,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
         "add-global-comment": cmd_add_global_comment,
         "comments": cmd_comments,
         "resolve": cmd_resolve,
+        "unresolve": cmd_unresolve,
         "delete": cmd_delete,
         "undelete": cmd_undelete,
         "signal": cmd_signal,

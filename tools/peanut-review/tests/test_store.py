@@ -194,6 +194,66 @@ def test_filter_comments_hides_deleted_by_default():
     assert filter_comments([live, gone], include_deleted=True) == [live, gone]
 
 
+def test_unresolve_clears_resolved_metadata():
+    sd = _make_session()
+    c = Comment(author="vera", file="a.py", line=1, body="x")
+    append_comment(sd, c)
+    assert resolve_comment(sd, c.id, resolved_by="jakub")
+
+    from peanut_review.store import unresolve_comment
+    assert unresolve_comment(sd, c.id) is True
+    stored = read_agent_comments(sd, "vera")[0]
+    assert stored.resolved is False
+    assert stored.resolved_by is None
+    assert stored.resolved_at is None
+
+
+def test_unresolve_missing_returns_false():
+    sd = _make_session()
+    from peanut_review.store import unresolve_comment
+    assert unresolve_comment(sd, "c_does_not_exist") is False
+
+
+def test_reply_to_round_trips_in_store():
+    sd = _make_session()
+    parent = Comment(author="vera", file="a.py", line=1, body="parent")
+    append_comment(sd, parent)
+    reply = Comment(author="felix", file="a.py", line=1, body="reply",
+                    reply_to=parent.id)
+    append_comment(sd, reply)
+
+    cs = read_agent_comments(sd, "felix")
+    assert cs[0].reply_to == parent.id
+
+
+def test_normalize_reply_to_re_roots_replies():
+    """Replying to a reply collapses to the same parent — flat threads only."""
+    from peanut_review.store import normalize_reply_to
+    parent = Comment(id="c_aaaa", author="x", file="a.py", line=1, body="p")
+    reply = Comment(id="c_bbbb", author="y", file="a.py", line=1, body="r",
+                    reply_to="c_aaaa")
+    cs = [parent, reply]
+    # Targeting the reply collapses to the parent's id.
+    assert normalize_reply_to(cs, "c_bbbb") == "c_aaaa"
+    # Targeting the parent stays the parent.
+    assert normalize_reply_to(cs, "c_aaaa") == "c_aaaa"
+    # Unknown id returns None.
+    assert normalize_reply_to(cs, "c_zzzz") is None
+
+
+def test_thread_for_returns_parent_then_replies_in_time_order():
+    from peanut_review.store import thread_for
+    parent = Comment(id="c_p", author="x", file="a.py", line=1, body="p",
+                     timestamp="2026-04-01T00:00:00+00:00")
+    r1 = Comment(id="c_r1", author="y", file="a.py", line=1, body="r1",
+                 reply_to="c_p", timestamp="2026-04-02T00:00:00+00:00")
+    r2 = Comment(id="c_r2", author="z", file="a.py", line=1, body="r2",
+                 reply_to="c_p", timestamp="2026-04-03T00:00:00+00:00")
+    # Out of order on purpose.
+    out = thread_for([r2, parent, r1], "c_p")
+    assert [c.id for c in out] == ["c_p", "c_r1", "c_r2"]
+
+
 def test_global_comment_stores_with_empty_file_and_zero_line():
     """High-level / global comments use file="" and line=0 as the sentinel."""
     sd = _make_session()

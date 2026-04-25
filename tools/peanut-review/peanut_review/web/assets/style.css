@@ -64,6 +64,56 @@ main {
   margin: 0 auto;
 }
 
+.inbox-section {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 6px;
+  margin-top: 30px;
+  padding: 12px 16px;
+  background: #131820;
+}
+.inbox-section h2 {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.inbox-section .hint { margin: 0 0 10px 0; font-size: 11px; }
+.inbox-section .hint code {
+  background: #0a0e12; padding: 1px 4px; border-radius: 2px;
+  font-size: 11px; color: var(--fg);
+}
+.inbox-section .ix-entry {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+.inbox-section .ix-entry:first-child { border-top: 0; }
+.inbox-section .ix-q, .inbox-section .ix-r { margin: 4px 0; }
+.inbox-section .ix-r { margin-left: 20px; }
+.inbox-section .ix-r.pending .agent { color: var(--warning); }
+.inbox-section .ix-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.inbox-section .ix-meta .agent { color: var(--fg); font-weight: 600; }
+.inbox-section .ix-body {
+  margin: 0;
+  padding: 6px 10px;
+  background: #0f1419;
+  border-radius: 3px;
+  border-left: 2px solid var(--border);
+  font-family: inherit;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.inbox-section .ix-r .ix-body { border-left-color: var(--accent); }
+
 .global-section {
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -177,6 +227,31 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   background: #141a22;
   padding: 10px 14px;
 }
+.thread + .thread { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.thread.resolved .comment.top-level { opacity: 0.85; }
+.thread-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  padding-left: 12px;  /* line up with the reply indent */
+}
+.thread-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 3px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.thread-actions button:hover { color: var(--fg); border-color: var(--accent); }
+.thread-actions .reply-btn { color: var(--fg); }
+
+.comment.reply {
+  margin-left: 24px;
+  border-left-color: var(--muted);
+}
+.comment.reply .comment-meta { font-size: 11px; }
 .comment {
   margin-bottom: 10px;
   padding: 8px 10px;

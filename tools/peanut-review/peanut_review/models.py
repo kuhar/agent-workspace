@@ -68,6 +68,10 @@ class Comment:
     deleted: bool = False
     deleted_by: str | None = None
     deleted_at: str | None = None
+    # Threading — replies point at a top-level comment id. Replies do not
+    # nest: setting reply_to on a reply silently re-roots to its parent's
+    # parent, so trees are at most one level deep (GitHub-style).
+    reply_to: str | None = None
 
     def to_json(self) -> str:
         d = asdict(self)

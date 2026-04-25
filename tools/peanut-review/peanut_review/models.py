@@ -221,6 +221,16 @@ class Verdict:
     body: str = ""
     timestamp: str = field(default_factory=_now_iso)
     agents_summary: list[dict] = field(default_factory=list)
+    # Set after a successful `gh-push-verdict` so re-runs are idempotent.
+    external_review_id: str | None = None
+    external_review_url: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
+        d = asdict(self)
+        d = {k: v for k, v in d.items() if v not in (None, [])}
+        return json.dumps(d, indent=2)
+
+    @classmethod
+    def from_json(cls, text: str) -> Verdict:
+        d = json.loads(text)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})

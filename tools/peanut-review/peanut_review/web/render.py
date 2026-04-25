@@ -227,6 +227,15 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
             f'data-history="{cid}" title="{html.escape(title)}">'
             f'edited</button>'
         )
+    external_html = ""
+    if c.external_url:
+        # Tiny "↗ gh" link to view this comment on GitHub. Sits next to the
+        # author/edit indicators in comment-meta. New tab so a midstream click
+        # doesn't lose the local review state.
+        external_html = (
+            f'<a class="external-link" href="{html.escape(c.external_url)}" '
+            f'target="_blank" rel="noopener" title="View on GitHub">↗ gh</a>'
+        )
     return (
         f'<div class="{" ".join(classes)}" data-cid="{cid}">'
         f'<div class="comment-meta">'
@@ -234,6 +243,7 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         f'{sev_html}'
         f'{"".join(badges)}'
         f'{edited_html}'
+        f'{external_html}'
         f'{"".join(buttons)}'
         f'</div>'
         f'<div class="comment-body">{html.escape(c.body)}</div>'

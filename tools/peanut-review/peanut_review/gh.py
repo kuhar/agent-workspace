@@ -169,3 +169,55 @@ def post_issue_comment(repo: str, number: int, *, body: str) -> dict:
         method="POST", payload={"body": body},
     )
     return json.loads(out)
+
+
+def post_review_reply(repo: str, number: int, parent_id: str, *,
+                      body: str) -> dict:
+    """POST a reply to an existing review comment. The reply auto-inherits
+    path/line/commit from the parent — only `body` is needed.
+    """
+    out = _api(
+        f"repos/{repo}/pulls/{number}/comments/{parent_id}/replies",
+        method="POST", payload={"body": body},
+    )
+    return json.loads(out)
+
+
+def patch_review_comment(repo: str, ext_id: str, *, body: str) -> dict:
+    """PATCH an existing review comment's body. Note the endpoint omits the
+    PR number — review comments are addressed globally by id within a repo.
+    """
+    out = _api(
+        f"repos/{repo}/pulls/comments/{ext_id}",
+        method="PATCH", payload={"body": body},
+    )
+    return json.loads(out)
+
+
+def patch_issue_comment(repo: str, ext_id: str, *, body: str) -> dict:
+    """PATCH an existing issue/PR-level comment's body. Endpoint omits the
+    issue number — issue comments are addressed globally by id within a repo.
+    """
+    out = _api(
+        f"repos/{repo}/issues/comments/{ext_id}",
+        method="PATCH", payload={"body": body},
+    )
+    return json.loads(out)
+
+
+def post_pr_review(repo: str, number: int, *, event: str,
+                   body: str = "") -> dict:
+    """Submit a PR review (verdict). `event` must be one of APPROVE,
+    REQUEST_CHANGES, COMMENT (GitHub's enum). `body` is optional except
+    REQUEST_CHANGES which requires it.
+    """
+    if event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
+        raise ValueError(f"event must be APPROVE/REQUEST_CHANGES/COMMENT, got {event!r}")
+    payload: dict = {"event": event}
+    if body:
+        payload["body"] = body
+    out = _api(
+        f"repos/{repo}/pulls/{number}/reviews",
+        method="POST", payload=payload,
+    )
+    return json.loads(out)

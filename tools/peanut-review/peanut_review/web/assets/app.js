@@ -36,6 +36,10 @@
     if (n) title += ` (${n} prior version${n === 1 ? "" : "s"})`;
     return `<button class="edited-badge" type="button" data-history="${esc(c.id)}" title="${esc(title)}">edited</button>`;
   }
+  function externalLink(c) {
+    if (!c.external_url) return "";
+    return `<a class="external-link" href="${esc(c.external_url)}" target="_blank" rel="noopener" title="View on GitHub">↗ gh</a>`;
+  }
 
   function renderComment(c, { isReply = false } = {}) {
     const cls = ["comment"];
@@ -58,6 +62,7 @@
           ${c.stale ? '<span class="round">stale</span>' : ""}
           ${resolvedBadge}
           ${editedBadge(c)}
+          ${externalLink(c)}
           ${editBtn}
           ${deleteBtn}
         </div>

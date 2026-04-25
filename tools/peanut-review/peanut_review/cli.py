@@ -346,14 +346,23 @@ def _require_github(session_dir: str) -> tuple[models.Session, models.GitHubPR] 
 
 
 def cmd_gh_push(args: argparse.Namespace) -> int:
-    """Push local comments without an external_id to the GitHub PR.
+    """Push local comments to the GitHub PR.
 
-    Anchored comments → review-comments endpoint with `commit_id =
-    Session.current_head` (the SHA agents reviewed, not necessarily
-    `github.head_sha` if the PR has moved). Globals → issue-comments
-    endpoint. Replies are skipped here; stage 2B will handle them.
-    Idempotent: comments already carrying an `external_id` are not
-    re-pushed.
+    Three categories handled in order:
+      1. New top-level (no external_id, no reply_to): POST to review or issue
+         endpoint; anchored uses `commit_id = Session.current_head` (the SHA
+         agents actually reviewed, not Session.github.head_sha which may have
+         moved on a force-push).
+      2. New replies (reply_to set, no external_id): POST to /pulls/{n}/
+         comments/{parent}/replies. Parent must already have external_id —
+         freshly-pushed parents in step 1 count, so a parent + reply written
+         locally in the same session push together.
+      3. Edits (external_id set, body != external_synced_body): PATCH the
+         existing comment. Anchored uses /pulls/comments/{id}, global uses
+         /issues/comments/{id} — both endpoints address comments globally
+         within the repo, no PR/issue number needed.
+
+    All idempotent: a re-run after a successful push is a no-op.
     """
     from . import gh
     session_dir = _get_session_dir(args)
@@ -363,43 +372,59 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
     s, ghpr = pair
 
     comments = store.read_all_comments(session_dir)
-    candidates: list[models.Comment] = []
-    skipped_replies = 0
+
+    new_top: list[models.Comment] = []
+    new_replies: list[models.Comment] = []
+    edits: list[models.Comment] = []
     skipped_meta = 0
     for c in comments:
-        if c.deleted or c.external_id is not None:
+        if c.deleted:
             continue
         # __meta__ is an agent-only sentinel (test execution reports).
-        # GitHub has no equivalent and the path doesn't exist in the repo.
+        # GitHub has no equivalent — skip in both new and edit paths.
         if c.file == sess.META_FILE:
             skipped_meta += 1
             continue
-        if c.reply_to is not None:
-            skipped_replies += 1
-            continue
-        candidates.append(c)
+        if c.external_id is None:
+            (new_replies if c.reply_to else new_top).append(c)
+        elif c.body != (c.external_synced_body or ""):
+            edits.append(c)
 
-    skip_msgs = []
-    if skipped_replies:
-        skip_msgs.append(f"{skipped_replies} reply/replies")
+    # external_id map: local_id → GitHub id. Built from already-pushed
+    # comments and updated as we push new top-levels in this run.
+    ext_map: dict[str, str] = {
+        c.id: c.external_id for c in comments
+        if c.external_id is not None
+    }
+
+    skip_msgs: list[str] = []
     if skipped_meta:
         skip_msgs.append(f"{skipped_meta} __meta__")
-    skip_summary = f" (skipped {', '.join(skip_msgs)})" if skip_msgs else ""
 
-    if not candidates:
-        print(f"Nothing to push{skip_summary}.")
+    total = len(new_top) + len(new_replies) + len(edits)
+    if total == 0:
+        suffix = f" (skipped {', '.join(skip_msgs)})" if skip_msgs else ""
+        print(f"Nothing to push{suffix}.")
         return 0
 
     if args.dry_run:
-        for c in candidates:
+        for c in new_top:
             kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
             print(f"[dry-run] {c.id} ({c.severity}) → {kind}")
+        for c in new_replies:
+            parent_ext = ext_map.get(c.reply_to)
+            tag = f"reply→gh#{parent_ext}" if parent_ext else "reply→<parent not pushed>"
+            print(f"[dry-run] {c.id} → {tag}")
+        for c in edits:
+            print(f"[dry-run] {c.id} EDIT → gh#{c.external_id}")
         if skip_msgs:
             print(f"[dry-run] skipped {', '.join(skip_msgs)}")
         return 0
 
-    pushed, failed = 0, 0
-    for c in candidates:
+    pushed, failed, orphaned = 0, 0, 0
+
+    # 1. New top-level
+    for c in new_top:
         try:
             if c.file == sess.GLOBAL_FILE:
                 resp = gh.post_issue_comment(ghpr.repo, ghpr.number, body=c.body)
@@ -416,19 +441,71 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
             print(f"  {c.id}: FAILED — {e}", file=sys.stderr)
             failed += 1
             continue
+        ext_id = str(resp["id"])
         store.update_comment_external(
             session_dir, c.id,
             external_source="github",
-            external_id=str(resp["id"]),
+            external_id=ext_id,
             external_url=resp.get("html_url", ""),
             external_synced_body=c.body,
         )
-        print(f"  {c.id} → gh#{resp['id']}")
+        ext_map[c.id] = ext_id
+        print(f"  {c.id} → gh#{ext_id}")
+        pushed += 1
+
+    # 2. New replies — need the parent's external_id (from this run or prior).
+    for c in new_replies:
+        parent_ext = ext_map.get(c.reply_to or "")
+        if not parent_ext:
+            print(f"  {c.id}: SKIPPED — parent {c.reply_to} has no external_id "
+                  f"(push the parent first, or it was filtered out)",
+                  file=sys.stderr)
+            orphaned += 1
+            continue
+        try:
+            resp = gh.post_review_reply(
+                ghpr.repo, ghpr.number, parent_ext, body=c.body,
+            )
+        except gh.GhError as e:
+            print(f"  {c.id}: FAILED — {e}", file=sys.stderr)
+            failed += 1
+            continue
+        ext_id = str(resp["id"])
+        store.update_comment_external(
+            session_dir, c.id,
+            external_source="github",
+            external_id=ext_id,
+            external_url=resp.get("html_url", ""),
+            external_in_reply_to=parent_ext,
+            external_synced_body=c.body,
+        )
+        ext_map[c.id] = ext_id
+        print(f"  {c.id} → gh#{ext_id} (reply to gh#{parent_ext})")
+        pushed += 1
+
+    # 3. PATCH edits.
+    for c in edits:
+        try:
+            if c.file == sess.GLOBAL_FILE:
+                gh.patch_issue_comment(ghpr.repo, c.external_id, body=c.body)
+            else:
+                gh.patch_review_comment(ghpr.repo, c.external_id, body=c.body)
+        except gh.GhError as e:
+            print(f"  {c.id}: FAILED — {e}", file=sys.stderr)
+            failed += 1
+            continue
+        store.update_comment_external(
+            session_dir, c.id,
+            external_synced_body=c.body,
+        )
+        print(f"  {c.id} EDIT → gh#{c.external_id}")
         pushed += 1
 
     summary = [f"Pushed {pushed}"]
     if failed:
         summary.append(f"failed {failed}")
+    if orphaned:
+        summary.append(f"orphaned {orphaned}")
     summary.extend(f"skipped {m}" for m in skip_msgs)
     print(", ".join(summary) + ".")
     return 0 if failed == 0 else 1
@@ -437,9 +514,17 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
 def cmd_gh_pull(args: argparse.Namespace) -> int:
     """Fetch GitHub PR comments into the local session.
 
-    Dedupes by (external_source, external_id) — re-running is idempotent.
-    New comments land as `gh:<login>` so the source is obvious in the UI.
-    Reply threading and edit detection are deferred to stage 2B.
+    Three things happen, all keyed on `external_id`:
+      1. New comments (no local match) are appended as `gh:<login>` authors.
+         Replies land threaded — `in_reply_to_id` is resolved to the
+         corresponding local comment and stored as `reply_to`, normalized
+         to a top-level via `store.normalize_reply_to`.
+      2. Existing comments whose GitHub body diverges from our last
+         `external_synced_body` get an `edit_comment` applied locally so
+         the change shows up in version history.
+      3. Already-synced comments (matching id, matching body) are skipped.
+
+    Idempotent: re-running with no upstream changes is a no-op.
     """
     from . import gh
     session_dir = _get_session_dir(args)
@@ -455,22 +540,60 @@ def cmd_gh_pull(args: argparse.Namespace) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    existing_ext_ids = {
-        c.external_id for c in store.read_all_comments(session_dir)
+    # Build a map from GitHub id → local Comment for both lookup paths
+    # (dedupe + reply threading).
+    local_by_ext: dict[str, models.Comment] = {
+        c.external_id: c for c in store.read_all_comments(session_dir)
         if c.external_source == "github" and c.external_id
     }
 
     new_anchored = 0
     new_global = 0
+    edited = 0
     skipped = 0
+
+    def _resolve_reply_to(raw: dict) -> str | None:
+        """Map GitHub's in_reply_to_id to a *local* comment id, normalized
+        to the thread root (matches our flat-thread invariant)."""
+        parent_ext = raw.get("in_reply_to_id")
+        if not parent_ext:
+            return None
+        parent_local = local_by_ext.get(str(parent_ext))
+        if parent_local is None:
+            # Parent isn't local yet — earlier in this same pull pass it'll
+            # arrive (GitHub returns chronologically), but if we somehow
+            # miss it, leave reply_to None and only stash external_in_reply_to.
+            return None
+        all_local = store.read_all_comments(session_dir)
+        return store.normalize_reply_to(all_local, parent_local.id)
+
     for raw in review_comments:
         ext_id = str(raw["id"])
-        if ext_id in existing_ext_ids:
-            skipped += 1
+        body = raw.get("body", "")
+        existing = local_by_ext.get(ext_id)
+
+        if existing is not None:
+            if body != (existing.external_synced_body or ""):
+                if args.dry_run:
+                    edited += 1
+                    continue
+                login = raw.get("user", {}).get("login", "unknown")
+                store.edit_comment(
+                    session_dir, existing.id, body=body,
+                    edited_by=f"gh:{login}",
+                )
+                store.update_comment_external(
+                    session_dir, existing.id, external_synced_body=body,
+                )
+                edited += 1
+            else:
+                skipped += 1
             continue
+
         if args.dry_run:
             new_anchored += 1
             continue
+
         login = raw.get("user", {}).get("login", "unknown")
         c = models.Comment(
             author=f"gh:{login}",
@@ -479,7 +602,7 @@ def cmd_gh_pull(args: argparse.Namespace) -> int:
             end_line=(raw.get("start_line")
                       if raw.get("start_line") and raw["start_line"] != raw.get("line")
                       else None),
-            body=raw.get("body", ""),
+            body=body,
             severity=models.Severity.SUGGESTION.value,
             head_sha=raw.get("commit_id"),
             external_source="github",
@@ -487,38 +610,120 @@ def cmd_gh_pull(args: argparse.Namespace) -> int:
             external_url=raw.get("html_url", ""),
             external_in_reply_to=(str(raw["in_reply_to_id"])
                                   if raw.get("in_reply_to_id") else None),
-            external_synced_body=raw.get("body", ""),
+            external_synced_body=body,
+            reply_to=_resolve_reply_to(raw),
         )
         store.append_comment(session_dir, c)
+        local_by_ext[ext_id] = c
         new_anchored += 1
 
     for raw in issue_comments:
         ext_id = str(raw["id"])
-        if ext_id in existing_ext_ids:
-            skipped += 1
+        body = raw.get("body", "")
+        existing = local_by_ext.get(ext_id)
+
+        if existing is not None:
+            if body != (existing.external_synced_body or ""):
+                if args.dry_run:
+                    edited += 1
+                    continue
+                login = raw.get("user", {}).get("login", "unknown")
+                store.edit_comment(
+                    session_dir, existing.id, body=body,
+                    edited_by=f"gh:{login}",
+                )
+                store.update_comment_external(
+                    session_dir, existing.id, external_synced_body=body,
+                )
+                edited += 1
+            else:
+                skipped += 1
             continue
+
         if args.dry_run:
             new_global += 1
             continue
+
         login = raw.get("user", {}).get("login", "unknown")
         c = models.Comment(
             author=f"gh:{login}",
             file=sess.GLOBAL_FILE,
             line=0,
-            body=raw.get("body", ""),
+            body=body,
             severity=models.Severity.SUGGESTION.value,
             head_sha=s.current_head,
             external_source="github",
             external_id=ext_id,
             external_url=raw.get("html_url", ""),
-            external_synced_body=raw.get("body", ""),
+            external_synced_body=body,
         )
         store.append_comment(session_dir, c)
+        local_by_ext[ext_id] = c
         new_global += 1
 
     prefix = "[dry-run] " if args.dry_run else ""
-    print(f"{prefix}Pulled {new_anchored} anchored + {new_global} global "
-          f"({skipped} already local).")
+    bits = [
+        f"{new_anchored} anchored",
+        f"{new_global} global",
+    ]
+    if edited:
+        bits.append(f"{edited} edited")
+    print(f"{prefix}Pulled {' + '.join(bits)} ({skipped} already local).")
+    return 0
+
+
+def cmd_gh_push_verdict(args: argparse.Namespace) -> int:
+    """Submit `result.json` as a GitHub PR review (verdict).
+
+    Maps decision: approve → APPROVE, request-changes → REQUEST_CHANGES.
+    Refuses if no result.json exists or the verdict has already been
+    submitted (Verdict.external_review_id set) unless --force is passed.
+    """
+    from . import gh
+    session_dir = _get_session_dir(args)
+    pair = _require_github(session_dir)
+    if pair is None:
+        return 1
+    _, ghpr = pair
+
+    result_path = Path(session_dir) / "result.json"
+    if not result_path.exists():
+        print(f"Error: no result.json — record a verdict first with "
+              f"`peanut-review verdict --approve|--request-changes`",
+              file=sys.stderr)
+        return 1
+    v = models.Verdict.from_json(result_path.read_text())
+
+    if v.external_review_id and not args.force:
+        print(f"Already submitted (review {v.external_review_id}). "
+              f"Use --force to re-submit.", file=sys.stderr)
+        return 1
+
+    event_map = {"approve": "APPROVE", "request-changes": "REQUEST_CHANGES"}
+    event = event_map.get(v.decision)
+    if event is None:
+        print(f"Error: unknown verdict decision {v.decision!r} "
+              f"(expected approve or request-changes)", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        body_preview = v.body[:80].replace("\n", " ")
+        print(f"[dry-run] {event} on PR {ghpr.repo}#{ghpr.number}"
+              + (f' — "{body_preview}…"' if v.body else ""))
+        return 0
+
+    try:
+        resp = gh.post_pr_review(
+            ghpr.repo, ghpr.number, event=event, body=v.body,
+        )
+    except gh.GhError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    v.external_review_id = str(resp["id"])
+    v.external_review_url = resp.get("html_url", "")
+    result_path.write_text(v.to_json() + "\n")
+    print(f"Submitted {event} → review {v.external_review_id}")
     return 0
 
 
@@ -986,9 +1191,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # gh-pull
     sp = sub.add_parser("gh-pull",
-                        help="Fetch new comments from the GitHub PR into the local session")
+                        help="Fetch new comments + edits from the GitHub PR into the local session")
     sp.add_argument("--dry-run", action="store_true",
                     help="Print what would be pulled without writing locally")
+
+    # gh-push-verdict
+    sp = sub.add_parser("gh-push-verdict",
+                        help="Submit result.json as a GitHub PR review (approve/request-changes)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print the planned event without submitting")
+    sp.add_argument("--force", action="store_true",
+                    help="Re-submit even if a prior review id is already recorded")
 
     # edit
     sp = sub.add_parser("edit",
@@ -1112,6 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
         "comments": cmd_comments,
         "gh-push": cmd_gh_push,
         "gh-pull": cmd_gh_pull,
+        "gh-push-verdict": cmd_gh_push_verdict,
         "edit": cmd_edit,
         "resolve": cmd_resolve,
         "unresolve": cmd_unresolve,

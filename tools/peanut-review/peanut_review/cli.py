@@ -365,25 +365,37 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
     comments = store.read_all_comments(session_dir)
     candidates: list[models.Comment] = []
     skipped_replies = 0
+    skipped_meta = 0
     for c in comments:
         if c.deleted or c.external_id is not None:
+            continue
+        # __meta__ is an agent-only sentinel (test execution reports).
+        # GitHub has no equivalent and the path doesn't exist in the repo.
+        if c.file == sess.META_FILE:
+            skipped_meta += 1
             continue
         if c.reply_to is not None:
             skipped_replies += 1
             continue
         candidates.append(c)
 
+    skip_msgs = []
+    if skipped_replies:
+        skip_msgs.append(f"{skipped_replies} reply/replies")
+    if skipped_meta:
+        skip_msgs.append(f"{skipped_meta} __meta__")
+    skip_summary = f" (skipped {', '.join(skip_msgs)})" if skip_msgs else ""
+
     if not candidates:
-        print(f"Nothing to push (skipped {skipped_replies} reply/replies)."
-              if skipped_replies else "Nothing to push.")
+        print(f"Nothing to push{skip_summary}.")
         return 0
 
     if args.dry_run:
         for c in candidates:
             kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
             print(f"[dry-run] {c.id} ({c.severity}) → {kind}")
-        if skipped_replies:
-            print(f"[dry-run] {skipped_replies} reply/replies skipped (not yet supported)")
+        if skip_msgs:
+            print(f"[dry-run] skipped {', '.join(skip_msgs)}")
         return 0
 
     pushed, failed = 0, 0
@@ -417,8 +429,7 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
     summary = [f"Pushed {pushed}"]
     if failed:
         summary.append(f"failed {failed}")
-    if skipped_replies:
-        summary.append(f"skipped {skipped_replies} reply/replies")
+    summary.extend(f"skipped {m}" for m in skip_msgs)
     print(", ".join(summary) + ".")
     return 0 if failed == 0 else 1
 

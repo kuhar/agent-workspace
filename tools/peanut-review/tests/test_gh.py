@@ -456,6 +456,34 @@ def test_gh_push_skips_replies_for_now(gh_shim, tmp_path):
     assert "skipped 1" in out.getvalue()
 
 
+def test_gh_push_skips_meta_comments(gh_shim, tmp_path):
+    """`__meta__` is an agent-only sentinel (test exec reports). The path
+    doesn't exist in the repo, so pushing it would fail at GitHub. Skip
+    silently like we skip replies."""
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="vera", file="__meta__", line=0, body="## Test execution: ok",
+        severity="nit",
+    ))
+    store.append_comment(sd, models.Comment(
+        author="vera", file="src/x.py", line=10, body="real finding",
+    ))
+
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/comments"],
+        "stdout": json.dumps({"id": 1, "html_url": ""}),
+    }])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-push"])
+    assert rc == 0
+    posts = [c for c in gh_shim.calls() if "-X" in c["argv"]]
+    assert len(posts) == 1  # real finding only
+    assert json.loads(posts[0]["stdin"])["body"] == "real finding"
+    assert "skipped 1 __meta__" in out.getvalue()
+
+
 def test_gh_push_dry_run_does_not_call_gh(gh_shim, tmp_path):
     sd = _make_gh_session(tmp_path)
     store.append_comment(sd, models.Comment(

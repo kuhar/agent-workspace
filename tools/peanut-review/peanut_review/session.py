@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AgentConfig, AgentStatus, Session, SessionState, _now_iso
+from .models import AgentConfig, AgentStatus, GitHubPR, Session, SessionState, _now_iso
 
 META_FILE = "__meta__"
 # Sentinel for "high-level / global" comments not tied to any file or line.
@@ -18,10 +18,26 @@ META_FILE = "__meta__"
 GLOBAL_FILE = ""
 
 
+_VALID_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _generate_session_id() -> str:
     now = datetime.now(timezone.utc)
     short = uuid.uuid4().hex[:4]
     return f"{now.strftime('%Y%m%d-%H%M%S')}-{short}"
+
+
+def _validate_session_id(sid: str) -> None:
+    """Session ids become URL path segments — must be slug-safe and not
+    collide with reserved web routes. Raises ValueError on bad input.
+    """
+    if not _VALID_ID_RE.match(sid):
+        raise ValueError(
+            f"invalid session id {sid!r}: only [A-Za-z0-9_-] allowed"
+        )
+    # Mirrors web/app.py:RESERVED_ROOTS — keep them in sync.
+    if sid in {"api"}:
+        raise ValueError(f"session id {sid!r} collides with a reserved route")
 
 
 def _run_git(workspace: str, *args: str) -> str:
@@ -50,9 +66,22 @@ def create_session(
     personas_dir: str | None = None,
     timeout: int = 1200,
     session_dir: str | None = None,
+    session_id: str | None = None,
+    github: GitHubPR | None = None,
 ) -> tuple[Session, str]:
-    """Create a new review session directory and session.json. Returns (session, session_dir)."""
-    sid = _generate_session_id()
+    """Create a new review session directory and session.json. Returns (session, session_dir).
+
+    `session_id` overrides the auto-generated `<timestamp>-<hex4>` slug. It
+    must be URL-safe (`[A-Za-z0-9_-]+`) and not collide with reserved web
+    routes (currently `api`). When `github` is supplied, it is stamped onto
+    the session as PR provenance — push/pull use it to know which PR to
+    talk to.
+    """
+    if session_id is not None:
+        _validate_session_id(session_id)
+        sid = session_id
+    else:
+        sid = _generate_session_id()
     if session_dir is None:
         session_dir = f"/tmp/peanut-review/{sid}"
     sdir = Path(session_dir)
@@ -92,6 +121,7 @@ def create_session(
         agents=agent_configs,
         state=SessionState.INIT.value,
         timeout=timeout,
+        github=github,
     )
 
     save_session(sdir, session)

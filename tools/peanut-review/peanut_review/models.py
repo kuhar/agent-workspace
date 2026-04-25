@@ -155,9 +155,6 @@ class Session:
     current_head: str = ""
     diff_commands: list[str] = field(default_factory=list)
     diff_stat: str = ""
-    # "git" (default — diff is `git diff base...topic`) or "gh-pr" (diff is
-    # cached in <session_dir>/pr.diff and provenance lives in self.github).
-    diff_source: str = "git"
     bead_id: str | None = None
     agents: list[AgentConfig] = field(default_factory=list)
     state: str = SessionState.INIT.value

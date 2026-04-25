@@ -723,12 +723,11 @@ def test_edit_command_unknown_comment_errors():
 def test_session_with_github_field_round_trips():
     s = models.Session(
         id="x", workspace="/tmp/repo", base_ref="main", topic_ref="HEAD",
-        original_head="abc", current_head="abc", diff_source="gh-pr",
+        original_head="abc", current_head="abc",
         github=models.GitHubPR(repo="o/r", number=42, url="https://example.com",
                                 head_sha="abc", base_sha="def", title="t"),
     )
     s2 = models.Session.from_json(s.to_json())
-    assert s2.diff_source == "gh-pr"
     assert s2.github is not None
     assert s2.github.repo == "o/r"
     assert s2.github.number == 42

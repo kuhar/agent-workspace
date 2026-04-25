@@ -63,17 +63,54 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     personas_dir = args.personas_dir or _default_personas_dir()
 
+    # --gh-pr resolves PR metadata up front: defaults base/topic to PR's
+    # base/head SHAs, populates session.github, and (unless overridden) gives
+    # the session a readable id like `<owner>-<repo>-pr-<n>` so URLs are
+    # nicer than the timestamp+hex auto-generated form.
+    # base_ref/topic_ref default to None so we can distinguish "user passed
+    # the same string as the default" from "user didn't pass anything". This
+    # matters for --gh-pr: if the user explicitly passes refs, honor them;
+    # otherwise default to the PR's SHAs (or main/HEAD without --gh-pr).
+    session_id = args.id
+    github = None
+    if args.gh_pr:
+        from . import gh
+        try:
+            repo, number = gh.parse_pr_spec(args.gh_pr)
+            pr_info = gh.fetch_pr_info(repo, number)
+        except (ValueError, gh.GhError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        base_ref = args.base if args.base is not None else pr_info.base_sha
+        topic_ref = args.topic if args.topic is not None else pr_info.head_sha
+        if session_id is None:
+            owner, repo_name = pr_info.repo.split("/", 1)
+            session_id = f"{owner}-{repo_name}-pr-{pr_info.number}"
+        github = models.GitHubPR(
+            repo=pr_info.repo,
+            number=pr_info.number,
+            url=pr_info.url,
+            head_sha=pr_info.head_sha,
+            base_sha=pr_info.base_sha,
+            title=pr_info.title,
+        )
+    else:
+        base_ref = args.base if args.base is not None else "main"
+        topic_ref = args.topic if args.topic is not None else "HEAD"
+
     try:
         session, session_dir = sess.create_session(
             workspace=os.path.abspath(args.workspace),
-            base_ref=args.base,
-            topic_ref=args.topic,
+            base_ref=base_ref,
+            topic_ref=topic_ref,
             agents=agents,
             personas_dir=personas_dir if personas_dir else None,
             timeout=args.timeout,
             session_dir=args.session,
+            session_id=session_id,
+            github=github,
         )
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -291,6 +328,186 @@ def cmd_edit(args: argparse.Namespace) -> int:
         print(f"Error: comment {args.comment_id} not found", file=sys.stderr)
         return 1
     print(f"Edited {args.comment_id}")
+    return 0
+
+
+def _require_github(session_dir: str) -> tuple[models.Session, models.GitHubPR] | None:
+    """Load the session and require it be GitHub-backed.
+
+    Returns (session, github) on success, or None after printing an error
+    so the caller can `return 1` instead of process-exiting.
+    """
+    s = sess.load_session(session_dir)
+    if s.github is None:
+        print("Error: this session is not GitHub-backed "
+              "(re-init with --gh-pr to enable push/pull)", file=sys.stderr)
+        return None
+    return s, s.github
+
+
+def cmd_gh_push(args: argparse.Namespace) -> int:
+    """Push local comments without an external_id to the GitHub PR.
+
+    Anchored comments → review-comments endpoint with `commit_id =
+    Session.current_head` (the SHA agents reviewed, not necessarily
+    `github.head_sha` if the PR has moved). Globals → issue-comments
+    endpoint. Replies are skipped here; stage 2B will handle them.
+    Idempotent: comments already carrying an `external_id` are not
+    re-pushed.
+    """
+    from . import gh
+    session_dir = _get_session_dir(args)
+    pair = _require_github(session_dir)
+    if pair is None:
+        return 1
+    s, ghpr = pair
+
+    comments = store.read_all_comments(session_dir)
+    candidates: list[models.Comment] = []
+    skipped_replies = 0
+    for c in comments:
+        if c.deleted or c.external_id is not None:
+            continue
+        if c.reply_to is not None:
+            skipped_replies += 1
+            continue
+        candidates.append(c)
+
+    if not candidates:
+        print(f"Nothing to push (skipped {skipped_replies} reply/replies)."
+              if skipped_replies else "Nothing to push.")
+        return 0
+
+    if args.dry_run:
+        for c in candidates:
+            kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
+            print(f"[dry-run] {c.id} ({c.severity}) → {kind}")
+        if skipped_replies:
+            print(f"[dry-run] {skipped_replies} reply/replies skipped (not yet supported)")
+        return 0
+
+    pushed, failed = 0, 0
+    for c in candidates:
+        try:
+            if c.file == sess.GLOBAL_FILE:
+                resp = gh.post_issue_comment(ghpr.repo, ghpr.number, body=c.body)
+            else:
+                resp = gh.post_review_comment(
+                    ghpr.repo, ghpr.number,
+                    body=c.body,
+                    commit_id=s.current_head,
+                    path=c.file,
+                    line=c.line,
+                    start_line=c.end_line,
+                )
+        except gh.GhError as e:
+            print(f"  {c.id}: FAILED — {e}", file=sys.stderr)
+            failed += 1
+            continue
+        store.update_comment_external(
+            session_dir, c.id,
+            external_source="github",
+            external_id=str(resp["id"]),
+            external_url=resp.get("html_url", ""),
+            external_synced_body=c.body,
+        )
+        print(f"  {c.id} → gh#{resp['id']}")
+        pushed += 1
+
+    summary = [f"Pushed {pushed}"]
+    if failed:
+        summary.append(f"failed {failed}")
+    if skipped_replies:
+        summary.append(f"skipped {skipped_replies} reply/replies")
+    print(", ".join(summary) + ".")
+    return 0 if failed == 0 else 1
+
+
+def cmd_gh_pull(args: argparse.Namespace) -> int:
+    """Fetch GitHub PR comments into the local session.
+
+    Dedupes by (external_source, external_id) — re-running is idempotent.
+    New comments land as `gh:<login>` so the source is obvious in the UI.
+    Reply threading and edit detection are deferred to stage 2B.
+    """
+    from . import gh
+    session_dir = _get_session_dir(args)
+    pair = _require_github(session_dir)
+    if pair is None:
+        return 1
+    s, ghpr = pair
+
+    try:
+        review_comments = gh.fetch_review_comments(ghpr.repo, ghpr.number)
+        issue_comments = gh.fetch_issue_comments(ghpr.repo, ghpr.number)
+    except gh.GhError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    existing_ext_ids = {
+        c.external_id for c in store.read_all_comments(session_dir)
+        if c.external_source == "github" and c.external_id
+    }
+
+    new_anchored = 0
+    new_global = 0
+    skipped = 0
+    for raw in review_comments:
+        ext_id = str(raw["id"])
+        if ext_id in existing_ext_ids:
+            skipped += 1
+            continue
+        if args.dry_run:
+            new_anchored += 1
+            continue
+        login = raw.get("user", {}).get("login", "unknown")
+        c = models.Comment(
+            author=f"gh:{login}",
+            file=raw.get("path", ""),
+            line=raw.get("line") or raw.get("original_line") or 0,
+            end_line=(raw.get("start_line")
+                      if raw.get("start_line") and raw["start_line"] != raw.get("line")
+                      else None),
+            body=raw.get("body", ""),
+            severity=models.Severity.SUGGESTION.value,
+            head_sha=raw.get("commit_id"),
+            external_source="github",
+            external_id=ext_id,
+            external_url=raw.get("html_url", ""),
+            external_in_reply_to=(str(raw["in_reply_to_id"])
+                                  if raw.get("in_reply_to_id") else None),
+            external_synced_body=raw.get("body", ""),
+        )
+        store.append_comment(session_dir, c)
+        new_anchored += 1
+
+    for raw in issue_comments:
+        ext_id = str(raw["id"])
+        if ext_id in existing_ext_ids:
+            skipped += 1
+            continue
+        if args.dry_run:
+            new_global += 1
+            continue
+        login = raw.get("user", {}).get("login", "unknown")
+        c = models.Comment(
+            author=f"gh:{login}",
+            file=sess.GLOBAL_FILE,
+            line=0,
+            body=raw.get("body", ""),
+            severity=models.Severity.SUGGESTION.value,
+            head_sha=s.current_head,
+            external_source="github",
+            external_id=ext_id,
+            external_url=raw.get("html_url", ""),
+            external_synced_body=raw.get("body", ""),
+        )
+        store.append_comment(session_dir, c)
+        new_global += 1
+
+    prefix = "[dry-run] " if args.dry_run else ""
+    print(f"{prefix}Pulled {new_anchored} anchored + {new_global} global "
+          f"({skipped} already local).")
     return 0
 
 
@@ -677,12 +894,24 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     sp = sub.add_parser("init", help="Create a new review session")
     sp.add_argument("--workspace", required=True, help="Repository path")
-    sp.add_argument("--base", default="main", help="Base ref (default: main)")
-    sp.add_argument("--topic", default="HEAD", help="Topic ref (default: HEAD)")
+    sp.add_argument("--base", default=None,
+                    help="Base ref (default: main, or PR baseRefOid with --gh-pr)")
+    sp.add_argument("--topic", default=None,
+                    help="Topic ref (default: HEAD, or PR headRefOid with --gh-pr)")
     sp.add_argument("--agents", help="Agent config JSON array (inline or file path)")
     sp.add_argument("--personas-dir", help="Source dir for persona files")
     sp.add_argument("--timeout", type=int, default=1200, help="Agent timeout (default: 1200)")
     sp.add_argument("--bead", action="store_true", help="Create a br bead")
+    sp.add_argument("--id", default=None, metavar="SLUG",
+                    help="Override the auto-generated session id "
+                         "([A-Za-z0-9_-], must not be 'api'). Becomes the URL "
+                         "path segment for the web UI.")
+    sp.add_argument("--gh-pr", default=None, metavar="OWNER/REPO#N",
+                    help="Back this session with a GitHub PR. Accepts "
+                         "owner/repo#N, owner/repo/pull/N, or a github.com URL. "
+                         "Defaults --base/--topic to the PR's base/head SHAs "
+                         "and --id to <owner>-<repo>-pr-<N> when not given. "
+                         "The workspace must already be a local checkout.")
 
     # launch
     sp = sub.add_parser("launch", help="Spawn all agents")
@@ -737,6 +966,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "history below it (JSON mode always includes it)")
     sp.add_argument("--format", default="table", choices=["json", "table"],
                     help="Output format (default: table)")
+
+    # gh-push
+    sp = sub.add_parser("gh-push",
+                        help="Push local comments to the GitHub PR (anchored + global only; replies/edits in stage 2B)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print what would be pushed without calling gh")
+
+    # gh-pull
+    sp = sub.add_parser("gh-pull",
+                        help="Fetch new comments from the GitHub PR into the local session")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print what would be pulled without writing locally")
 
     # edit
     sp = sub.add_parser("edit",
@@ -858,6 +1099,8 @@ def main(argv: list[str] | None = None) -> int:
         "add-comment": cmd_add_comment,
         "add-global-comment": cmd_add_global_comment,
         "comments": cmd_comments,
+        "gh-push": cmd_gh_push,
+        "gh-pull": cmd_gh_pull,
         "edit": cmd_edit,
         "resolve": cmd_resolve,
         "unresolve": cmd_unresolve,

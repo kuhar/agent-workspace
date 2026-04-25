@@ -12,6 +12,10 @@ from pathlib import Path
 from .models import AgentConfig, AgentStatus, Session, SessionState, _now_iso
 
 META_FILE = "__meta__"
+# Sentinel for "high-level / global" comments not tied to any file or line.
+# Stored as file="" line=0 so existing JSONL data (where these fields
+# defaulted to empty) is already compatible.
+GLOBAL_FILE = ""
 
 
 def _generate_session_id() -> str:
@@ -174,11 +178,12 @@ def validate_comment_location(
 ) -> tuple[list[str] | None, str | None]:
     """Validate file/line for a comment. Returns (lines, error_message).
 
-    For __meta__ files, returns (None, None) — no validation needed.
+    For __meta__ files and global comments (file==""), returns (None, None)
+    — no validation needed.
     On success, returns (file_lines, None).
     On error, returns (None, error_string).
     """
-    if file == META_FILE:
+    if file == META_FILE or file == GLOBAL_FILE:
         return None, None
     file_path = Path(workspace) / file
     if not file_path.exists():

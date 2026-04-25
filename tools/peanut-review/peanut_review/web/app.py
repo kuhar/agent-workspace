@@ -341,32 +341,45 @@ class _Handler(BaseHTTPRequestHandler):
     # -------- endpoints --------
 
     def _post_comment(self, session_dir: Path, data: dict) -> None:
-        required = ("file", "line", "body")
-        for k in required:
-            if k not in data:
-                return self._error(400, f"missing field: {k}")
-        file = str(data["file"])
-        try:
-            line = int(data["line"])
-        except (TypeError, ValueError):
-            return self._error(400, "line must be an integer")
+        if "body" not in data:
+            return self._error(400, "missing field: body")
         body = str(data["body"])
         severity = str(data.get("severity") or "suggestion")
         if severity not in VALID_SEVERITIES:
             return self._error(400, f"invalid severity: {severity}")
         author = str(data.get("author") or _default_author())
 
-        session = load_session(session_dir)
-        _, err = validate_comment_location(session.workspace, file, line)
-        if err:
-            return self._error(400, err)
+        # Global comments: scope=="global" OR file/line both absent/empty.
+        is_global = (
+            str(data.get("scope") or "") == "global"
+            or (not data.get("file") and data.get("line") is None)
+        )
+        if is_global:
+            file = ""
+            line = 0
+            end_line = None
+        else:
+            if "file" not in data or "line" not in data:
+                return self._error(
+                    400, "missing field: file/line (or pass scope='global')")
+            file = str(data["file"])
+            try:
+                line = int(data["line"])
+            except (TypeError, ValueError):
+                return self._error(400, "line must be an integer")
+            end_line = data.get("end_line")
+            session = load_session(session_dir)
+            _, err = validate_comment_location(session.workspace, file, line)
+            if err:
+                return self._error(400, err)
 
+        session = load_session(session_dir)
         round_num = 2 if session.state == "round2" else 1
         comment = Comment(
             author=author,
             file=file,
             line=line,
-            end_line=data.get("end_line"),
+            end_line=end_line,
             body=body,
             severity=severity,
             round=round_num,

@@ -229,8 +229,54 @@
     }
   });
 
+  // --- Global ("high-level") comment composer ---
+  function openGlobalForm() {
+    const container = document.getElementById("global-comments");
+    if (!container) return;
+    if (container.querySelector(".new-comment")) return;  // already open
+
+    const form = document.createElement("div");
+    form.className = "new-comment";
+    form.innerHTML = `
+      <textarea placeholder="High-level feedback (architecture, scope, testing strategy, etc.)..."></textarea>
+      <div class="controls">
+        <button class="cancel">Cancel</button>
+        <select class="sev">
+          <option value="suggestion">suggestion</option>
+          <option value="warning">warning</option>
+          <option value="critical">critical</option>
+          <option value="nit">nit</option>
+        </select>
+        <button class="submit">Post</button>
+      </div>
+    `;
+    container.appendChild(form);
+    form.querySelector("textarea").focus();
+
+    form.querySelector(".cancel").onclick = () => { form.remove(); };
+    form.querySelector(".submit").onclick = async () => {
+      const body = form.querySelector("textarea").value.trim();
+      if (!body) return;
+      const severity = form.querySelector(".sev").value;
+      try {
+        const c = await api("POST", "/api/comments",
+                            { scope: "global", body, severity });
+        const rendered = document.createElement("div");
+        rendered.innerHTML = renderComment(c);
+        container.insertBefore(rendered.firstElementChild, form);
+        form.remove();
+      } catch (e) {
+        alert("Post failed: " + e.message);
+      }
+    };
+  }
+
   // Resolve / Delete buttons — plain-click handlers, no drag involvement.
   document.addEventListener("click", (ev) => {
+    if (ev.target.id === "add-global-btn") {
+      openGlobalForm();
+      return;
+    }
     const rb = ev.target.closest("[data-resolve]");
     if (rb) {
       const cid = rb.dataset.resolve;
@@ -277,6 +323,18 @@
   }
 
   function insertFetchedComment(c) {
+    if (!c.file) {
+      // Global comment — append to the dedicated container, before any
+      // in-progress composer.
+      const container = document.getElementById("global-comments");
+      if (!container) return;
+      const rendered = document.createElement("div");
+      rendered.innerHTML = renderComment(c);
+      const form = container.querySelector(".new-comment");
+      if (form) container.insertBefore(rendered.firstElementChild, form);
+      else container.appendChild(rendered.firstElementChild);
+      return;
+    }
     const fileEl = document.querySelector(`.file[data-file="${cssEsc(c.file)}"]`);
     if (!fileEl) return;  // comment's file isn't in this diff
     const anchor = anchorLineFor(c);
@@ -316,6 +374,40 @@
     if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
   }
 
+  function renderCountsHTML(open, total) {
+    if (open > 0) {
+      return `<span class="count open">${open}</span>` +
+             `<span class="count muted">/${total}</span>`;
+    }
+    if (total > 0) return `<span class="count muted">${total}</span>`;
+    return `<span class="count empty">—</span>`;
+  }
+
+  function updateFileCounts(fetched) {
+    const total = new Map();
+    const open = new Map();
+    let globalTotal = 0, globalOpen = 0;
+    for (const c of fetched) {
+      if (!c.file) {
+        globalTotal++;
+        if (!c.resolved) globalOpen++;
+        continue;
+      }
+      total.set(c.file, (total.get(c.file) || 0) + 1);
+      if (!c.resolved) open.set(c.file, (open.get(c.file) || 0) + 1);
+    }
+    for (const li of document.querySelectorAll('#sidebar ul.files li.file-row')) {
+      const cell = li.querySelector('[data-counts]');
+      if (!cell) continue;
+      if (li.dataset.global) {
+        cell.innerHTML = renderCountsHTML(globalOpen, globalTotal);
+      } else {
+        const file = li.dataset.file;
+        cell.innerHTML = renderCountsHTML(open.get(file) || 0, total.get(file) || 0);
+      }
+    }
+  }
+
   async function refreshComments() {
     let fetched;
     try {
@@ -323,6 +415,8 @@
       if (!r.ok) return;
       fetched = await r.json();
     } catch { return; }
+
+    updateFileCounts(fetched);
 
     const fetchedById = new Map();
     for (const c of fetched) fetchedById.set(c.id, c);

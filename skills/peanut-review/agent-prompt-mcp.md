@@ -12,6 +12,7 @@ use Shell commands for peanut-review operations. The tools are:
 
 - **status** — show session state, agents, comment counts
 - **add_comment** — post a review finding (file, line, severity, body)
+- **add_global_comment** — post a HIGH-LEVEL finding not tied to any file/line
 - **list_comments** — list/filter existing comments
 - **signal** — signal phase completion (e.g., "round1-done")
 - **wait** — wait for orchestrator signal (e.g., "triage-done")
@@ -49,6 +50,16 @@ For each finding, call the `add_comment` tool with:
 - `severity`: critical (bugs/security), warning (likely problems),
   suggestion (improvements), or nit (style/naming)
 - `body`: description of the finding
+
+## High-level (global) feedback
+
+For findings that don't anchor to a single line — architecture, scope,
+testing strategy, missing telemetry/error handling, missing docs, or
+cross-cutting concerns — call `add_global_comment` with `body` and
+`severity` instead. Pick this when the fix is "do this in addition to /
+before everything else" rather than "change this specific line". Don't
+duplicate: if the concern naturally lands on a single line, post an
+anchored `add_comment`.
 
 When done with all findings, call `signal` with event "round1-done".
 

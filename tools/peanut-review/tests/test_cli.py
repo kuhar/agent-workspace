@@ -398,6 +398,90 @@ def test_add_comment_body_file_missing():
     assert "could not read --body-file" in err.getvalue()
 
 
+def test_add_global_comment_via_subcommand_persists_with_empty_file():
+    """add-global-comment stores file="" line=0 and skips workspace validation."""
+    ws = _make_workspace()  # no files needed
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "add-global-comment",
+                   "--body", "Tests are missing for the new auth path",
+                   "--severity", "warning", "--author", "vera"])
+    assert rc == 0
+    assert "(global)" in out.getvalue()
+
+    from peanut_review.store import read_all_comments
+    comments = read_all_comments(sd)
+    assert len(comments) == 1
+    assert comments[0].file == ""
+    assert comments[0].line == 0
+    assert comments[0].severity == "warning"
+    assert comments[0].body.startswith("Tests are missing")
+
+
+def test_add_comment_global_flag_is_equivalent():
+    """`add-comment --global` produces the same record as `add-global-comment`."""
+    ws = _make_workspace()
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    rc = main(["--session", sd, "add-comment", "--global",
+               "--body", "scope question", "--author", "vera"])
+    assert rc == 0
+    from peanut_review.store import read_all_comments
+    cs = read_all_comments(sd)
+    assert len(cs) == 1 and cs[0].file == "" and cs[0].line == 0
+
+
+def test_add_comment_global_combined_with_file_rejected():
+    ws = _make_workspace({"foo.py": "a\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "add-comment", "--global",
+                   "--file", "foo.py", "--line", "1",
+                   "--body", "x", "--author", "vera"])
+    assert rc == 1
+    assert "--global cannot be combined" in err.getvalue()
+
+
+def test_add_comment_omitting_file_and_line_is_rejected_without_global():
+    """Bare `add-comment --body x` is ambiguous; require --global to opt in."""
+    ws = _make_workspace()
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "add-comment",
+                   "--body", "x", "--author", "vera"])
+    # Treated as a global because both --file and --line are absent — this is a
+    # convenience: agents typing `add-comment --body ...` shouldn't have to know
+    # about the --global flag. The output line includes "(global)".
+    assert rc == 0
+    assert "(global)" in out.getvalue()
+
+
+def test_comments_listing_shows_global_marker():
+    ws = _make_workspace({"foo.py": "a\nb\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    main(["--session", sd, "add-global-comment",
+          "--body", "scope concern", "--severity", "warning", "--author", "vera"])
+    main(["--session", sd, "add-comment",
+          "--file", "foo.py", "--line", "1",
+          "--body", "anchored", "--author", "felix"])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        main(["--session", sd, "comments"])
+    text = out.getvalue()
+    assert "[global]" in text
+    assert "foo.py" in text
+
+
 def test_delete_hides_from_default_list_and_undelete_restores():
     ws = _make_workspace({"foo.py": "line1\nline2\n"})
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")

@@ -122,6 +122,122 @@ def test_render_comment_escapes_html(session_dir: Path, repo: Path):
     assert "&lt;script&gt;" in html
 
 
+def test_render_sidebar_files_list_with_counts(session_dir: Path, repo: Path):
+    """Sidebar lists each changed file with unresolved/total counts and an anchor."""
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    # Two comments on foo.py: one open + one resolved → 1 open / 2 total.
+    c_open = Comment(author="felix", file="foo.py", line=1, body="a", severity="nit", round=1)
+    c_done = Comment(author="vera", file="foo.py", line=2, body="b", severity="nit",
+                     round=1, resolved=True)
+    store.append_comment(session_dir, c_open)
+    store.append_comment(session_dir, c_done)
+    html = render.render_page(s, s.id, files, store.read_all_comments(session_dir),
+                              head_shifted=False)
+
+    assert "<h3>Files " in html, "sidebar should have a Files heading"
+    assert 'class="files"' in html
+    # Anchor id on file section + matching href in sidebar.
+    assert 'id="f-foo-py"' in html
+    assert 'href="#f-foo-py"' in html
+    # The file's per-file count cell should carry open and muted/total spans.
+    assert '<span class="count open">1</span>' in html
+    assert '<span class="count muted">/2</span>' in html
+
+
+def test_render_sidebar_files_dash_when_no_comments(session_dir: Path, repo: Path):
+    """Files without any live comments show an em-dash placeholder, not a zero."""
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+    assert '<span class="count empty">—</span>' in html
+
+
+def test_render_global_section_appears_above_files(session_dir: Path, repo: Path):
+    """The high-level feedback section is rendered, contains the add button,
+    and includes any file=='' comment in its own block."""
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    g = Comment(author="vera", file="", line=0, body="scope concern",
+                severity="warning", round=1)
+    a = Comment(author="felix", file="foo.py", line=1, body="anchored",
+                severity="nit", round=1)
+    store.append_comment(session_dir, g)
+    store.append_comment(session_dir, a)
+    html = render.render_page(s, s.id, files,
+                              store.read_all_comments(session_dir),
+                              head_shifted=False)
+    # The section exists with the expected anchor and add button.
+    assert 'id="global"' in html
+    assert 'id="add-global-btn"' in html
+    assert "High-level feedback" in html
+    # Global comment renders inside the global container.
+    g_idx = html.index('id="global-comments"')
+    g_close = html.index("</section>", g_idx)
+    assert "scope concern" in html[g_idx:g_close]
+    # Anchored comment is still in its file thread, not the global section.
+    assert "anchored" in html
+    assert "anchored" not in html[g_idx:g_close]
+    # Sidebar gets a high-level row that links to #global.
+    assert 'href="#global"' in html
+    assert "High-level feedback" in html
+
+
+def test_render_global_section_excludes_globals_from_per_file_counts(
+    session_dir: Path, repo: Path
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    # 2 globals (1 open + 1 resolved), 0 per-file → file row shows em-dash.
+    g1 = Comment(author="vera", file="", line=0, body="A", severity="warning", round=1)
+    g2 = Comment(author="vera", file="", line=0, body="B", severity="suggestion",
+                 round=1, resolved=True)
+    store.append_comment(session_dir, g1)
+    store.append_comment(session_dir, g2)
+    html = render.render_page(s, s.id, files,
+                              store.read_all_comments(session_dir),
+                              head_shifted=False)
+    # Per-file count cell for foo.py is empty (em-dash placeholder).
+    assert 'data-file="foo.py"' in html
+    # Global sidebar row reports 1 open / 2 total.
+    assert '<span class="count open">1</span>' in html
+    assert '<span class="count muted">/2</span>' in html
+
+
+def test_server_post_global_comment(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"scope": "global", "body": "missing rollback plan",
+             "severity": "warning", "author": "jakub"},
+        )
+        assert code == 201
+        assert data["file"] == ""
+        assert data["line"] == 0
+        assert data["body"] == "missing rollback plan"
+
+        cs = store.read_all_comments(session_dir)
+        assert len(cs) == 1
+        assert cs[0].file == "" and cs[0].line == 0
+    finally:
+        srv.shutdown()
+
+
+def test_server_post_global_via_omitted_file_and_line(session_dir: Path):
+    """Posting with neither `file` nor `line` is treated as a global comment."""
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"body": "high-level concern", "severity": "suggestion"},
+        )
+        assert code == 201
+        assert data["file"] == ""
+    finally:
+        srv.shutdown()
+
+
 def test_render_stale_and_resolved_classes(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)

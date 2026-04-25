@@ -194,6 +194,18 @@ def test_filter_comments_hides_deleted_by_default():
     assert filter_comments([live, gone], include_deleted=True) == [live, gone]
 
 
+def test_global_comment_stores_with_empty_file_and_zero_line():
+    """High-level / global comments use file="" and line=0 as the sentinel."""
+    sd = _make_session()
+    g = Comment(author="vera", file="", line=0, body="scope concern",
+                severity="warning")
+    append_comment(sd, g)
+    cs = read_agent_comments(sd, "vera")
+    assert len(cs) == 1
+    assert cs[0].file == ""
+    assert cs[0].line == 0
+
+
 def test_mark_stale_skips_deleted():
     sd = _make_session()
     keep = Comment(author="felix", file="a.py", line=1, body="keep")

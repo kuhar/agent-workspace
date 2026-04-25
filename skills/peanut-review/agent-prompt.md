@@ -71,6 +71,22 @@ ${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --severity <
 Severity guide: critical = bugs/security, warning = likely problems,
 suggestion = improvements, nit = style/naming.
 
+## High-level (global) feedback
+
+For findings that don't belong on a single line — architecture, scope,
+testing strategy, missing telemetry/error handling, missing docs, or
+cross-cutting concerns — use a global comment instead. Pick this when the
+fix is "do this in addition to / before everything else" rather than
+"change this specific line".
+
+```
+${PR_BIN} --session ${SESSION} add-global-comment --severity <...> --body "<description>"
+```
+
+Don't duplicate: if the concern naturally anchors to a specific line, post
+an anchored comment. Reserve global comments for things with no good single
+line to point at.
+
 IMPORTANT: if your body contains backticks (`foo`) or `$(...)`, the shell
 will command-substitute them and silently eat the content. Use `--body-file`
 instead: write the body to a temp file with your Write tool, then pass the

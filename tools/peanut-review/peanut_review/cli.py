@@ -112,7 +112,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
 
 
 def cmd_add_comment(args: argparse.Namespace) -> int:
-    """Add a structured comment."""
+    """Add a structured comment — either anchored (file+line) or global."""
     session_dir = _get_session_dir(args)
     author = _get_author(args)
 
@@ -134,17 +134,35 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
         print("Error: --body or --body-file is required", file=sys.stderr)
         return 1
 
-    # Validate file/line
-    lines, err = sess.validate_comment_location(s.workspace, args.file, args.line)
-    if err:
-        print(f"Error: {err}", file=sys.stderr)
-        return 1
+    # Global comment mode: --global OR neither --file nor --line given.
+    is_global = getattr(args, "global_", False) or (not args.file and args.line is None)
+    file_lines: list[str] | None = None
+    if is_global:
+        if args.file or args.line is not None or args.end_line is not None:
+            print("Error: --global cannot be combined with --file/--line/--end-line",
+                  file=sys.stderr)
+            return 1
+        file = sess.GLOBAL_FILE
+        line = 0
+        end_line = None
+    else:
+        if not args.file or args.line is None:
+            print("Error: --file and --line are required for anchored comments; "
+                  "use --global for high-level feedback", file=sys.stderr)
+            return 1
+        file = args.file
+        line = args.line
+        end_line = args.end_line
+        file_lines, err = sess.validate_comment_location(s.workspace, file, line)
+        if err:
+            print(f"Error: {err}", file=sys.stderr)
+            return 1
 
     comment = models.Comment(
         author=author,
-        file=args.file,
-        line=args.line,
-        end_line=args.end_line,
+        file=file,
+        line=line,
+        end_line=end_line,
         body=body,
         severity=args.severity,
         round=round_num,
@@ -153,12 +171,22 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
 
     store.append_comment(session_dir, comment)
 
-    # Echo the actual source line so the agent can verify
-    if lines and args.line >= 1:
-        print(f"{args.file}:{args.line}: {lines[args.line - 1]}")
+    if is_global:
+        print(f"{comment.id} (global)")
+    elif file_lines and line >= 1:
+        print(f"{file}:{line}: {file_lines[line - 1]}")
     else:
         print(comment.id)
     return 0
+
+
+def cmd_add_global_comment(args: argparse.Namespace) -> int:
+    """Convenience wrapper: posts a high-level (global) comment."""
+    args.file = None
+    args.line = None
+    args.end_line = None
+    args.global_ = True
+    return cmd_add_comment(args)
 
 
 def cmd_comments(args: argparse.Namespace) -> int:
@@ -195,7 +223,9 @@ def cmd_comments(args: argparse.Namespace) -> int:
             else:
                 flag = " "
             body = c.body[:60].replace("\n", " ")
-            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {c.file:<30} {c.line:>5} {c.round:>2}{flag} {body}")
+            file_col = "[global]" if c.file == sess.GLOBAL_FILE else c.file
+            line_col = "" if c.file == sess.GLOBAL_FILE else str(c.line)
+            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {file_col:<30} {line_col:>5} {c.round:>2}{flag} {body}")
     return 0
 
 
@@ -589,10 +619,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cli-json", help="Path to cli.json for agent permissions")
 
     # add-comment
-    sp = sub.add_parser("add-comment", help="Add a structured comment")
-    sp.add_argument("--file", required=True, help="Relative file path")
-    sp.add_argument("--line", type=int, required=True, help="Line number")
+    sp = sub.add_parser("add-comment",
+                        help="Add a structured comment (anchored or global)")
+    sp.add_argument("--file", default=None,
+                    help="Relative file path (omit + use --global for high-level feedback)")
+    sp.add_argument("--line", type=int, default=None,
+                    help="Line number (omit + use --global for high-level feedback)")
     sp.add_argument("--end-line", type=int, default=None, help="End line number")
+    sp.add_argument("--global", dest="global_", action="store_true",
+                    help="Post a high-level comment with no file/line anchor")
+    sp.add_argument("--body", help="Comment text (watch for shell-eaten backticks — prefer --body-file)")
+    sp.add_argument("--body-file", help="Read comment text from FILE (safer for bodies with backticks or $ chars)")
+    sp.add_argument("--severity", default="suggestion",
+                    choices=["critical", "warning", "suggestion", "nit"],
+                    help="Severity (default: suggestion)")
+    sp.add_argument("--author", help="Author name (default: git config user.name)")
+    sp.add_argument("--round", type=int, default=None, help="Round number (default: auto)")
+
+    # add-global-comment (convenience wrapper around `add-comment --global`)
+    sp = sub.add_parser("add-global-comment",
+                        help="Add a high-level comment not tied to any file/line")
     sp.add_argument("--body", help="Comment text (watch for shell-eaten backticks — prefer --body-file)")
     sp.add_argument("--body-file", help="Read comment text from FILE (safer for bodies with backticks or $ chars)")
     sp.add_argument("--severity", default="suggestion",
@@ -722,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init,
         "launch": cmd_launch,
         "add-comment": cmd_add_comment,
+        "add-global-comment": cmd_add_global_comment,
         "comments": cmd_comments,
         "resolve": cmd_resolve,
         "delete": cmd_delete,

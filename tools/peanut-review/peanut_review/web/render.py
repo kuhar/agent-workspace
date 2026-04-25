@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from pygments.lexers import TextLexer, get_lexer_for_filename
 from pygments.util import ClassNotFound
 
 from ..models import Comment, Session
+from ..session import GLOBAL_FILE
 from .diff import FileDiff
 
 ASSETS_DIR = Path(__file__).parent / "assets"
@@ -49,6 +51,14 @@ def _highlight_file(path: str, lines: list[str]) -> list[str]:
     return out_lines[: len(lines)]
 
 
+_SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def _file_anchor(path: str) -> str:
+    """HTML id for a file section. Sidebar links jump here."""
+    return "f-" + _SLUG_RE.sub("-", path).strip("-")
+
+
 def _group_comments(comments: list[Comment]) -> dict[tuple[str, int], list[Comment]]:
     """Key each comment by (file, anchor_line).
 
@@ -64,9 +74,30 @@ def _group_comments(comments: list[Comment]) -> dict[tuple[str, int], list[Comme
     for c in comments:
         if c.deleted:
             continue
+        if c.file == GLOBAL_FILE:
+            continue  # global comments render in their own top-level section
         anchor = c.end_line if (c.end_line is not None and c.end_line != c.line) else c.line
         g[(c.file, anchor)].append(c)
     return g
+
+
+def _render_global_section(comments: list[Comment]) -> str:
+    """Top-of-page block for high-level (file/line-less) comments.
+
+    Always renders — the "Add Comment" button is reachable even with no
+    existing high-level comments.
+    """
+    globals_live = [c for c in comments if c.file == GLOBAL_FILE and not c.deleted]
+    items = "".join(_render_comment(c) for c in globals_live)
+    return (
+        '<section class="global-section" id="global">'
+        '<div class="global-header">'
+        '<button id="add-global-btn" type="button">Add Comment</button>'
+        '<h2>High-level feedback</h2>'
+        '</div>'
+        f'<div class="global-comments" id="global-comments">{items}</div>'
+        '</section>'
+    )
 
 
 def _render_comment(c: Comment) -> str:
@@ -103,9 +134,10 @@ def _render_comment(c: Comment) -> str:
 
 
 def _render_file(fd: FileDiff, comments_at_line: dict[tuple[str, int], list[Comment]]) -> str:
+    anchor = _file_anchor(fd.path)
     if fd.binary and not fd.lines:
         return (
-            f'<div class="file" data-file="{html.escape(fd.path)}">'
+            f'<div class="file" id="{anchor}" data-file="{html.escape(fd.path)}">'
             f'<div class="file-header">'
             f'<span class="status">[{html.escape(fd.status)}]</span>'
             f'<span class="path">{html.escape(fd.path)}</span>'
@@ -151,7 +183,7 @@ def _render_file(fd: FileDiff, comments_at_line: dict[tuple[str, int], list[Comm
             rows.append(thread)
 
     return (
-        f'<div class="file" data-file="{html.escape(fd.path)}">'
+        f'<div class="file" id="{anchor}" data-file="{html.escape(fd.path)}">'
         f'<div class="file-header">'
         f'<span class="status">[{html.escape(fd.status)}]</span>'
         f'<span class="path">{html.escape(fd.path)}</span>'
@@ -165,7 +197,9 @@ def _render_file(fd: FileDiff, comments_at_line: dict[tuple[str, int], list[Comm
     )
 
 
-def _render_sidebar(session: Session, comments: list[Comment]) -> str:
+def _render_sidebar(
+    session: Session, comments: list[Comment], files: list[FileDiff]
+) -> str:
     # Sidebar counters reflect what's visible (deleted hidden), with a
     # separate "deleted" row so the audit count is still discoverable.
     live = [c for c in comments if not c.deleted]
@@ -173,6 +207,43 @@ def _render_sidebar(session: Session, comments: list[Comment]) -> str:
     stale_count = sum(1 for c in live if c.stale)
     resolved = sum(1 for c in live if c.resolved)
     crit = sum(1 for c in live if c.severity == "critical")
+
+    # Per-file counts: unresolved and total live. Keyed by file path so the
+    # JS poller can update these in place without re-rendering. Globals
+    # (file=="") are excluded — they get their own sidebar entry.
+    per_file_total: dict[str, int] = defaultdict(int)
+    per_file_unresolved: dict[str, int] = defaultdict(int)
+    for c in live:
+        if c.file == GLOBAL_FILE:
+            continue
+        per_file_total[c.file] += 1
+        if not c.resolved:
+            per_file_unresolved[c.file] += 1
+
+    global_total = sum(1 for c in live if c.file == GLOBAL_FILE)
+    global_open = sum(1 for c in live if c.file == GLOBAL_FILE and not c.resolved)
+    if global_open > 0:
+        global_counts = (
+            f'<span class="count open">{global_open}</span>'
+            f'<span class="count muted">/{global_total}</span>'
+        )
+    elif global_total > 0:
+        global_counts = f'<span class="count muted">{global_total}</span>'
+    else:
+        global_counts = '<span class="count empty">—</span>'
+    global_row = (
+        '<li class="file-row global-row" data-global="1" '
+        'title="High-level feedback (no file/line anchor)">'
+        '<a href="#global" class="path-link">'
+        '<div class="top-row">'
+        '<span class="status s-G">G</span>'
+        '<span class="name">High-level feedback</span>'
+        f'<span class="counts" data-counts>{global_counts}</span>'
+        '</div>'
+        '</a>'
+        '</li>'
+    )
+
     agent_rows = "".join(
         f'<li><span>{html.escape(a.name)}</span>'
         f'<span class="v">{html.escape(a.status)}</span></li>'
@@ -182,8 +253,15 @@ def _render_sidebar(session: Session, comments: list[Comment]) -> str:
         f'<li data-k="deleted"><span>deleted</span><span class="v">{deleted}</span></li>'
         if deleted else ""
     )
+    file_rows = "".join(
+        _render_file_row(fd, per_file_unresolved.get(fd.path, 0),
+                         per_file_total.get(fd.path, 0))
+        for fd in files
+    ) or '<li class="muted">(no files)</li>'
     return (
         '<aside id="sidebar">'
+        f'<h3>Files ({len(files)})</h3>'
+        f'<ul class="files">{global_row}{file_rows}</ul>'
         '<h3>Session</h3>'
         '<ul>'
         f'<li data-k="state"><span>state</span><span class="v">{html.escape(session.state)}</span></li>'
@@ -198,6 +276,56 @@ def _render_sidebar(session: Session, comments: list[Comment]) -> str:
         '<h3>Agents</h3>'
         f'<ul>{agent_rows or "<li>(none)</li>"}</ul>'
         '</aside>'
+    )
+
+
+def _render_file_row(fd: FileDiff, unresolved: int, total: int) -> str:
+    """One entry in the sidebar's Files list.
+
+    Two lines: filename + counts on top; directory + add/del on the muted
+    subline. Full path lands in the title attribute for hover.
+    `data-file` lets the live poller update counts without re-rendering.
+    """
+    anchor = _file_anchor(fd.path)
+    name = fd.path.rsplit("/", 1)[-1]
+    dirpath = fd.path[: -len(name) - 1] if "/" in fd.path else ""
+    status = html.escape(fd.status) if fd.status else ""
+    stats = (
+        f'<span class="add">+{fd.additions}</span> '
+        f'<span class="del">-{fd.deletions}</span>'
+    ) if not fd.binary else '<span class="muted">bin</span>'
+    if unresolved > 0:
+        counts_html = (
+            f'<span class="count open">{unresolved}</span>'
+            f'<span class="count muted">/{total}</span>'
+        )
+    elif total > 0:
+        counts_html = f'<span class="count muted">{total}</span>'
+    else:
+        counts_html = '<span class="count empty">—</span>'
+    # U+200E (LRM) forces LTR bidi inside an element set to `direction: rtl`
+    # so ASCII slashes don't visually flip; the CSS reverses only the overflow
+    # direction so the ellipsis lands at the *prefix*, preserving the suffix
+    # (the segments nearest the filename — the informative ones).
+    dir_html = (
+        f'<span class="dir">‎{html.escape(dirpath)}/</span>'
+        if dirpath else '<span class="dir"></span>'
+    )
+    return (
+        f'<li class="file-row" data-file="{html.escape(fd.path)}" '
+        f'title="{html.escape(fd.path)}">'
+        f'<a href="#{anchor}" class="path-link">'
+        f'<div class="top-row">'
+        f'<span class="status s-{status}">{status}</span>'
+        f'<span class="name">{html.escape(name)}</span>'
+        f'<span class="counts" data-counts>{counts_html}</span>'
+        f'</div>'
+        f'<div class="sub-row">'
+        f'{dir_html}'
+        f'<span class="stats">{stats}</span>'
+        f'</div>'
+        f'</a>'
+        f'</li>'
     )
 
 
@@ -310,7 +438,8 @@ def render_page(
     """
     comments_at = _group_comments(comments)
     file_html = "".join(_render_file(fd, comments_at) for fd in files)
-    sidebar = _render_sidebar(session, comments)
+    global_html = _render_global_section(comments)
+    sidebar = _render_sidebar(session, comments, files)
 
     head_badge = (
         '<span class="badge head state-triage">HEAD shifted</span>'
@@ -347,6 +476,7 @@ def render_page(
   </header>
   <main>
     {sidebar}
+    {global_html}
     {file_html}
   </main>
   <script>

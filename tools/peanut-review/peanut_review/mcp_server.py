@@ -88,6 +88,10 @@ def add_comment(
 ) -> str:
     """Post a review comment on a specific file and line.
 
+    For high-level / cross-cutting feedback that doesn't belong on a single
+    line (architecture, scope, testing strategy, missing telemetry, etc.),
+    use `add_global_comment` instead.
+
     Args:
         file: Relative file path (use "__meta__" for test execution reports)
         line: Line number in the SOURCE FILE (not the diff output). Must be >= 1 for real files.
@@ -128,6 +132,43 @@ def add_comment(
 
 
 @mcp.tool()
+def add_global_comment(
+    body: str,
+    severity: str = "suggestion",
+) -> str:
+    """Post a HIGH-LEVEL comment that isn't tied to any file or line.
+
+    Use this for review feedback that spans multiple files, calls out missing
+    pieces (tests, docs, telemetry, error handling), questions the overall
+    approach, or flags scope/architecture concerns. Do NOT use this for
+    file/line findings — use add_comment for those.
+
+    Args:
+        body: Comment text.
+        severity: One of: critical, warning, suggestion, nit.
+    """
+    sd = _session_dir()
+    s = sess.load_session(sd)
+    author = _get_author()
+    round_num = sess.current_round(s.state)
+
+    if severity not in ("critical", "warning", "suggestion", "nit"):
+        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+
+    comment = models.Comment(
+        author=author,
+        file=sess.GLOBAL_FILE,
+        line=0,
+        body=body,
+        severity=severity,
+        round=round_num,
+        head_sha=s.current_head,
+    )
+    store.append_comment(sd, comment)
+    return f"Global comment {comment.id} stored."
+
+
+@mcp.tool()
 def list_comments(
     round_num: int | None = None,
     severity: str | None = None,
@@ -152,7 +193,8 @@ def list_comments(
     for c in comments:
         stale = " [stale]" if c.stale else ""
         resolved = " [resolved]" if c.resolved else ""
-        lines.append(f"[{c.id}] {c.author} {c.severity} {c.file}:{c.line} R{c.round}{stale}{resolved}")
+        loc = "[global]" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
+        lines.append(f"[{c.id}] {c.author} {c.severity} {loc} R{c.round}{stale}{resolved}")
         lines.append(f"  {c.body}")
         lines.append("")
     return "\n".join(lines)

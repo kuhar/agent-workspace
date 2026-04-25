@@ -300,7 +300,7 @@ class _Handler(BaseHTTPRequestHandler):
                 agent=(q.get("agent", [None])[0]),
                 file=(q.get("file", [None])[0]),
                 severity=(q.get("severity", [None])[0]),
-                round_num=int(q["round"][0]) if "round" in q else None,
+                since=(q.get("since", [None])[0]),
                 unresolved="unresolved" in q,
                 include_deleted="include_deleted" in q,
             )
@@ -397,7 +397,6 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._error(400, err)
 
         session = load_session(session_dir)
-        round_num = 2 if session.state == "round2" else 1
         comment = Comment(
             author=author,
             file=file,
@@ -405,7 +404,6 @@ class _Handler(BaseHTTPRequestHandler):
             end_line=end_line,
             body=body,
             severity=severity,
-            round=round_num,
             head_sha=session.current_head,
             reply_to=reply_to,
         )
@@ -457,7 +455,6 @@ def _comment_to_dict(c: Comment) -> dict:
         "end_line": c.end_line,
         "body": c.body,
         "severity": c.severity,
-        "round": c.round,
         "resolved": c.resolved,
         "resolved_by": c.resolved_by,
         "resolved_at": c.resolved_at,

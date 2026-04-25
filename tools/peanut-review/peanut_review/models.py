@@ -9,7 +9,11 @@ from enum import Enum
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Microsecond precision so two comments posted in the same wall-clock
+    # second by different authors still get a strict ordering. The store
+    # merges per-author JSONL files by sorting on this timestamp, and the
+    # `--since <id>` cursor relies on that order being deterministic.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _short_id(prefix: str = "c") -> str:
@@ -25,9 +29,7 @@ class Severity(str, Enum):
 
 class SessionState(str, Enum):
     INIT = "init"
-    ROUND1 = "round1"
-    TRIAGE = "triage"
-    ROUND2 = "round2"
+    ROUND = "round"
     COMPLETE = "complete"
     ABORTED = "aborted"
 
@@ -37,11 +39,6 @@ class AgentStatus(str, Enum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
-
-
-class TriageAction(str, Enum):
-    APPLIED = "applied"
-    DISMISSED = "dismissed"
 
 
 @dataclass
@@ -56,7 +53,6 @@ class Comment:
     side: str = "right"
     body: str = ""
     severity: str = Severity.SUGGESTION.value
-    round: int = 1
     resolved: bool = False
     resolved_by: str | None = None
     resolved_at: str | None = None
@@ -138,45 +134,6 @@ class Session:
         s = cls(**filtered)
         s.agents = agents
         return s
-
-
-@dataclass
-class TriageDecision:
-    comment_id: str = ""
-    action: str = ""
-    description: str | None = None
-    rebuttal: str | None = None
-
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        return {k: v for k, v in d.items() if v is not None}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> TriageDecision:
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-
-
-@dataclass
-class Triage:
-    triaged_at: str = field(default_factory=_now_iso)
-    original_head: str = ""
-    triage_commit: str = ""
-    fix_diff_commands: list[str] = field(default_factory=list)
-    decisions: list[TriageDecision] = field(default_factory=list)
-
-    def to_json(self) -> str:
-        d = asdict(self)
-        d["decisions"] = [td.to_dict() for td in self.decisions]
-        return json.dumps(d, indent=2)
-
-    @classmethod
-    def from_json(cls, text: str) -> Triage:
-        d = json.loads(text)
-        decisions = [TriageDecision.from_dict(td) for td in d.pop("decisions", [])]
-        filtered = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-        t = cls(**filtered)
-        t.decisions = decisions
-        return t
 
 
 @dataclass

@@ -44,7 +44,6 @@
         <div class="comment-meta">
           <span class="author">${esc(c.author || "unknown")}</span>
           ${sevHtml}
-          <span class="round">R${c.round}</span>
           ${rangeBadge(c)}
           ${c.stale ? '<span class="round">stale</span>' : ""}
           ${resolvedBadge}

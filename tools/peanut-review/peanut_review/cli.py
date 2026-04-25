@@ -117,7 +117,6 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
     author = _get_author(args)
 
     s = sess.load_session(session_dir)
-    round_num = args.round if args.round is not None else sess.current_round(s.state)
 
     # Body source: --body-file > --body (exactly one required). --body-file is
     # preferred for agent-authored comments because the shell eats backticks
@@ -189,7 +188,6 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
         end_line=end_line,
         body=body,
         severity=args.severity,
-        round=round_num,
         head_sha=s.current_head,
         reply_to=reply_to,
     )
@@ -225,7 +223,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
         agent=args.agent,
         file=args.file,
         severity=args.severity,
-        round_num=args.round,
+        since=args.since,
         unresolved=args.unresolved,
         include_deleted=args.include_deleted,
     )
@@ -237,7 +235,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
         if not comments:
             print("No comments found.")
             return 0
-        hdr = f"{'ID':<14} {'Agent':<10} {'Sev':<10} {'File':<30} {'Line':>5} {'R':>2} {'Body'}"
+        hdr = f"{'ID':<14} {'Agent':<10} {'Sev':<10} {'File':<30} {'Line':>5}    {'Body'}"
         print(hdr)
         print("-" * len(hdr))
         for c in comments:
@@ -252,7 +250,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
             body = c.body[:60].replace("\n", " ")
             file_col = "[global]" if c.file == sess.GLOBAL_FILE else c.file
             line_col = "" if c.file == sess.GLOBAL_FILE else str(c.line)
-            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {file_col:<30} {line_col:>5} {c.round:>2}{flag} {body}")
+            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {file_col:<30} {line_col:>5} {flag}  {body}")
     return 0
 
 
@@ -338,29 +336,52 @@ def cmd_wait_all(args: argparse.Namespace) -> int:
     return 1
 
 
-_TRIAGE_DONE_PRIOR_STATES = {
-    models.SessionState.ROUND1.value,
-    models.SessionState.TRIAGE.value,
-}
+def _clear_signals_matching(session_dir: str, suffixes: list[str]) -> None:
+    """Remove signals/{*}.{suffix} files for each suffix.
+
+    Used when advancing rounds so stale `next-round` and `round-done` files
+    from prior rounds don't auto-satisfy a fresh wait in the next round.
+    """
+    sigs = Path(session_dir) / "signals"
+    if not sigs.is_dir():
+        return
+    for path in sigs.iterdir():
+        if not path.is_file():
+            continue
+        for suffix in suffixes:
+            if path.name.endswith(f".{suffix}"):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                break
 
 
 def cmd_signal_all(args: argparse.Namespace) -> int:
-    """Signal all agents with an event."""
+    """Signal all agents with an event.
+
+    Special-case `next-round`: clears any stale `next-round` / `round-done`
+    signal files so a fresh `wait next-round` in the new pass doesn't
+    auto-satisfy on a leftover file, and lifts the session out of INIT into
+    ROUND on first call. No-op for sessions that are already COMPLETE or
+    ABORTED.
+    """
     session_dir = _get_session_dir(args)
     s = sess.load_session(session_dir)
     agents = [a.name for a in s.agents]
+
+    if args.event == "next-round":
+        if s.state in (models.SessionState.COMPLETE.value,
+                       models.SessionState.ABORTED.value):
+            print(f"Cannot signal next-round: session state is {s.state}",
+                  file=sys.stderr)
+            return 1
+        _clear_signals_matching(session_dir, ["next-round", "round-done"])
+        if s.state == models.SessionState.INIT.value:
+            sess.transition_state(session_dir, models.SessionState.ROUND.value)
+
     polling.signal_all(session_dir, agents, args.event)
     print(f"Signaled {args.event} to {', '.join(agents)}")
-
-    # Triage-done advances the session into Round 2 so any comments agents
-    # post next are tagged round=2 (cli.cmd_add_comment defers to
-    # session.current_round(state) when --round isn't supplied). Allow the
-    # transition from either ROUND1 or TRIAGE — orchestrators sometimes
-    # signal before writing triage.json. Skipped if already past Round 2
-    # (COMPLETE/ABORTED) so we don't resurrect a closed session.
-    if args.event == "triage-done" and s.state in _TRIAGE_DONE_PRIOR_STATES:
-        sess.transition_state(session_dir, models.SessionState.ROUND2.value)
-
     return 0
 
 
@@ -398,43 +419,6 @@ def cmd_reply(args: argparse.Namespace) -> int:
     session_dir = _get_session_dir(args)
     polling.write_reply(session_dir, args.agent, args.id, args.answer)
     print(f"Replied to {args.agent}/{args.id}")
-    return 0
-
-
-def cmd_triage(args: argparse.Namespace) -> int:
-    """Write triage.json from applied/dismissed decisions."""
-    session_dir = _get_session_dir(args)
-    s = sess.load_session(session_dir)
-
-    decisions = []
-    if args.applied:
-        for d in json.loads(args.applied):
-            decisions.append(models.TriageDecision(
-                comment_id=d["comment_id"],
-                action=models.TriageAction.APPLIED.value,
-                description=d.get("description", ""),
-            ))
-    if args.dismissed:
-        for d in json.loads(args.dismissed):
-            decisions.append(models.TriageDecision(
-                comment_id=d["comment_id"],
-                action=models.TriageAction.DISMISSED.value,
-                rebuttal=d.get("rebuttal", ""),
-            ))
-
-    triage = models.Triage(
-        original_head=s.original_head,
-        triage_commit=args.commit or "",
-        fix_diff_commands=[f"git diff {s.original_head}..{args.commit}"] if args.commit else [],
-        decisions=decisions,
-    )
-
-    triage_path = Path(session_dir) / "triage.json"
-    triage_path.write_text(triage.to_json() + "\n")
-
-    # Transition state
-    sess.transition_state(session_dir, models.SessionState.TRIAGE.value)
-    print(f"Wrote triage.json with {len(decisions)} decisions")
     return 0
 
 
@@ -685,7 +669,6 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["critical", "warning", "suggestion", "nit"],
                     help="Severity (default: suggestion)")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
-    sp.add_argument("--round", type=int, default=None, help="Round number (default: auto)")
 
     # add-global-comment (convenience wrapper around `add-comment --global`)
     sp = sub.add_parser("add-global-comment",
@@ -696,14 +679,16 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["critical", "warning", "suggestion", "nit"],
                     help="Severity (default: suggestion)")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
-    sp.add_argument("--round", type=int, default=None, help="Round number (default: auto)")
 
     # comments
     sp = sub.add_parser("comments", help="List/filter comments")
     sp.add_argument("--agent", help="Filter by agent")
     sp.add_argument("--file", help="Filter by file")
     sp.add_argument("--severity", help="Filter by severity")
-    sp.add_argument("--round", type=int, help="Filter by round")
+    sp.add_argument("--since", metavar="ID",
+                    help="Return only comments posted after the comment with "
+                         "this id (use to poll for new activity since the "
+                         "last time you read)")
     sp.add_argument("--unresolved", action="store_true", help="Only unresolved")
     sp.add_argument("--include-deleted", action="store_true",
                     help="Include soft-deleted comments (hidden by default)")
@@ -730,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # signal
     sp = sub.add_parser("signal", help="Signal an event")
-    sp.add_argument("event", help="Event name (e.g. round1-done)")
+    sp.add_argument("event", help="Event name (e.g. round-done)")
 
     # wait
     sp = sub.add_parser("wait", help="Wait for a signal")
@@ -762,12 +747,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent", required=True, help="Agent name")
     sp.add_argument("--id", required=True, help="Question ID")
     sp.add_argument("answer", help="Answer text")
-
-    # triage
-    sp = sub.add_parser("triage", help="Write triage decisions")
-    sp.add_argument("--applied", help="JSON array of applied decisions")
-    sp.add_argument("--dismissed", help="JSON array of dismissed decisions")
-    sp.add_argument("--commit", help="Triage fix commit SHA")
 
     # verdict
     sp = sub.add_parser("verdict", help="Record final verdict")
@@ -836,7 +815,6 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "inbox": cmd_inbox,
         "reply": cmd_reply,
-        "triage": cmd_triage,
         "verdict": cmd_verdict,
         "migrate": cmd_migrate,
         "status": cmd_status,

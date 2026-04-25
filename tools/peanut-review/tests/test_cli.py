@@ -1,4 +1,4 @@
-"""Integration tests for the CLI — init→add-comment→triage→verdict flow."""
+"""Integration tests for the CLI — init→add-comment→verdict flow."""
 import io
 import json
 import os
@@ -122,17 +122,17 @@ def test_signal_and_wait(mock_git):
 
     # Signal
     with patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Vera"}):
-        rc = main(["--session", sd, "signal", "round1-done"])
+        rc = main(["--session", sd, "signal", "round-done"])
     assert rc == 0
 
     # Wait (should return immediately since already signaled)
     with patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Vera"}):
-        rc = main(["--session", sd, "wait", "round1-done", "--timeout", "1"])
+        rc = main(["--session", sd, "wait", "round-done", "--timeout", "1"])
     assert rc == 0
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
-def test_triage_and_verdict_flow(mock_git):
+def test_verdict_flow(mock_git):
     ws = _make_workspace({
         "a.py": "x = 1\ny = 2\nz = 3\n",
         "b.py": "a\nb\nc\nd\ne\nf\n",
@@ -144,30 +144,10 @@ def test_triage_and_verdict_flow(mock_git):
     main(["--session", sd, "add-comment",
           "--file", "a.py", "--line", "1", "--body", "Critical bug",
           "--severity", "critical", "--author", "vera"])
-    main(["--session", sd, "add-comment",
-          "--file", "b.py", "--line", "5", "--body", "Nit: spacing",
-          "--severity", "nit", "--author", "vera"])
 
-    from peanut_review.store import read_all_comments
-    comments = read_all_comments(sd)
-    c1_id = comments[0].id
-    c2_id = comments[1].id
-
-    # Triage
-    applied = json.dumps([{"comment_id": c1_id, "description": "Added null check"}])
-    dismissed = json.dumps([{"comment_id": c2_id, "rebuttal": "Style preference"}])
-    rc = main(["--session", sd, "triage",
-               "--applied", applied, "--dismissed", dismissed,
-               "--commit", "def789"])
-    assert rc == 0
-    assert (Path(sd) / "triage.json").exists()
-
-    # Verdict
     rc = main(["--session", sd, "verdict", "--approve", "--body", "LGTM"])
     assert rc == 0
     assert (Path(sd) / "result.json").exists()
-
-    # Check final state
     result = json.loads((Path(sd) / "result.json").read_text())
     assert result["decision"] == "approve"
 
@@ -205,88 +185,95 @@ def test_ask_and_reply(mock_git):
     assert len(list_unanswered(sd)) == 0
 
 
-# ── New tests for post-testing fixes ──────────────────────────────────
+# ── Multi-pass wake-up + cursor tests ─────────────────────────────────
 
 
-# Issue 2: signal-all triage-done transitions state to round2
-
-def test_signal_all_triage_done_transitions_to_round2():
+def test_signal_all_next_round_writes_wake_signals_and_clears_stale():
+    """Round-bound signals (next-round, round-done) from prior passes must
+    be cleared, otherwise a fresh `wait next-round` in the next pass would
+    auto-satisfy on the leftover file. There is no round counter — this is
+    purely a wake-up signal."""
+    from peanut_review import polling
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
-    _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
+    _init_session(sd, agents=[
+        {"name": "vera", "model": "opus", "persona": "vera.md"},
+        {"name": "felix", "model": "sonnet", "persona": "felix.md"},
+    ])
+    sess.transition_state(sd, models.SessionState.ROUND.value)
 
-    # Manually set state to triage (simulating triage command)
-    sess.transition_state(sd, models.SessionState.TRIAGE.value)
-    s = sess.load_session(sd)
-    assert s.state == "triage"
+    # Simulate the first pass finishing and orchestrator already having
+    # signaled next-round once (so leftover files exist).
+    polling.write_signal(sd, "vera", "round-done")
+    polling.write_signal(sd, "felix", "round-done")
+    polling.write_signal(sd, "vera", "next-round")
 
-    # signal-all triage-done should transition to round2
-    rc = main(["--session", sd, "signal-all", "triage-done"])
+    rc = main(["--session", sd, "signal-all", "next-round"])
     assert rc == 0
 
-    s = sess.load_session(sd)
-    assert s.state == "round2"
+    sigs = Path(sd) / "signals"
+    assert not (sigs / "vera.round-done").exists()
+    assert not (sigs / "felix.round-done").exists()
+    assert (sigs / "vera.next-round").exists()
+    assert (sigs / "felix.next-round").exists()
 
 
-def test_signal_all_triage_done_from_round1_also_transitions():
-    """Orchestrator may signal triage-done before writing triage.json (e.g.
-    no-op triage where everything was applied directly via fix commits).
-    State should still advance to round2 so subsequent agent comments are
-    tagged round=2 instead of silently staying at round=1."""
+def test_signal_all_next_round_from_init_lifts_to_round_state():
+    """First `signal-all next-round` from INIT moves the session into
+    ROUND so subsequent state-aware logic kicks in."""
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
+    assert sess.load_session(sd).state == "init"
 
-    # Skip triage; jump straight from round1 to triage-done.
-    sess.transition_state(sd, models.SessionState.ROUND1.value)
-    rc = main(["--session", sd, "signal-all", "triage-done"])
+    rc = main(["--session", sd, "signal-all", "next-round"])
     assert rc == 0
-
-    s = sess.load_session(sd)
-    assert s.state == "round2"
+    assert sess.load_session(sd).state == "round"
 
 
-def test_signal_all_triage_done_after_complete_does_not_revert():
-    """If the session has already moved past Round 2 (complete/aborted),
-    signaling triage-done shouldn't reopen it."""
+def test_signal_all_next_round_after_complete_refused():
+    """Once a session is COMPLETE/ABORTED, signaling next-round shouldn't
+    silently resurrect it."""
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
     sess.transition_state(sd, models.SessionState.COMPLETE.value)
 
-    rc = main(["--session", sd, "signal-all", "triage-done"])
-    assert rc == 0
-    s = sess.load_session(sd)
-    assert s.state == "complete"
+    rc = main(["--session", sd, "signal-all", "next-round"])
+    assert rc != 0
+    assert sess.load_session(sd).state == "complete"
 
 
-def test_signal_all_other_event_does_not_transition():
+def test_signal_all_other_event_does_not_change_state():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
 
-    # State is init; signal-all with random event should not change state
     rc = main(["--session", sd, "signal-all", "some-event"])
     assert rc == 0
-
-    s = sess.load_session(sd)
-    assert s.state == "init"
+    assert sess.load_session(sd).state == "init"
 
 
-# Issue 2: auto-detect round=2 after triage-done signal
-
-def test_add_comment_auto_detects_round2():
-    ws = _make_workspace({"a.py": "line1\nline2\n"})
+def test_comments_since_filter_returns_only_newer():
+    """`comments --since <id>` is the cursor-based replacement for the old
+    `--round N` filter: orchestrators record the last comment id they saw
+    and ask for everything posted after."""
+    ws = _make_workspace({"a.py": "line1\nline2\nline3\n"})
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, workspace=ws, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
 
-    # Set state to round2
-    sess.transition_state(sd, models.SessionState.ROUND2.value)
-
-    rc = main(["--session", sd, "add-comment",
-               "--file", "a.py", "--line", "1", "--body", "Rebuttal",
-               "--author", "vera"])
-    assert rc == 0
+    for n, body in enumerate(["first", "second", "third"], start=1):
+        main(["--session", sd, "add-comment",
+              "--file", "a.py", "--line", str(n), "--body", body,
+              "--author", "vera"])
 
     from peanut_review.store import read_all_comments
-    comments = read_all_comments(sd)
-    assert comments[0].round == 2
+    all_c = read_all_comments(sd)
+    cursor = all_c[0].id  # first comment
+
+    f = io.StringIO()
+    with redirect_stdout(f):
+        rc = main(["--session", sd, "comments",
+                   "--since", cursor, "--format", "json"])
+    assert rc == 0
+    data = json.loads(f.getvalue())
+    assert [c["body"] for c in data] == ["second", "third"]
 
 
 # Issue 4: empty diff warning

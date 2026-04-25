@@ -49,15 +49,36 @@ def test_multiple_agents():
 
 def test_filter_comments():
     sd = _make_session()
-    append_comment(sd, Comment(author="vera", file="a.py", line=1, body="X", severity="critical", round=1))
-    append_comment(sd, Comment(author="vera", file="b.py", line=2, body="Y", severity="nit", round=1))
-    append_comment(sd, Comment(author="felix", file="a.py", line=5, body="Z", severity="warning", round=2))
+    append_comment(sd, Comment(author="vera", file="a.py", line=1, body="X", severity="critical"))
+    append_comment(sd, Comment(author="vera", file="b.py", line=2, body="Y", severity="nit"))
+    append_comment(sd, Comment(author="felix", file="a.py", line=5, body="Z", severity="warning"))
 
     all_c = read_all_comments(sd)
     assert len(filter_comments(all_c, agent="vera")) == 2
     assert len(filter_comments(all_c, file="a.py")) == 2
     assert len(filter_comments(all_c, severity="critical")) == 1
-    assert len(filter_comments(all_c, round_num=2)) == 1
+
+
+def test_filter_comments_since_id_returns_only_newer():
+    """`--since <id>` is the cursor for "what's new" polling; replaces the
+    old `--round N` filter. Same-second timestamps are handled by
+    position-in-sorted-list, not raw timestamp comparison."""
+    sd = _make_session()
+    a = Comment(author="vera", file="a.py", line=1, body="A", severity="nit")
+    b = Comment(author="felix", file="a.py", line=2, body="B", severity="nit")
+    c = Comment(author="vera", file="a.py", line=3, body="C", severity="nit")
+    append_comment(sd, a)
+    append_comment(sd, b)
+    append_comment(sd, c)
+
+    all_c = read_all_comments(sd)
+    # since=a → b, c
+    after_a = filter_comments(all_c, since=a.id)
+    assert [x.body for x in after_a] == ["B", "C"]
+    # since=c → empty (c is the most recent)
+    assert filter_comments(all_c, since=c.id) == []
+    # unknown id → return everything (caller's problem to validate)
+    assert len(filter_comments(all_c, since="c_doesnotexist")) == 3
 
 
 def test_resolve_comment():

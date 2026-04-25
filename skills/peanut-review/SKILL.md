@@ -80,61 +80,60 @@ peanut-review reply --agent <name> --id <qid> "your answer"
 
 Wait for all agents to complete Round 1:
 ```bash
-peanut-review wait-all round1-done --timeout 900
+peanut-review wait-all round-done --timeout 900
 ```
 
-### Step 5 — Review and triage findings
+### Step 5 — Triage findings
 
-View all Round 1 comments:
+View all comments posted so far:
 ```bash
-peanut-review comments --round 1
+peanut-review comments
 ```
 
-For critical/warning findings:
-1. Evaluate each comment
-2. Apply fixes for valid findings
-3. Commit the fixes
+Remember the id of the last comment you reviewed — you'll use it as
+`--since <id>` in later passes to see only what's new.
 
-### Step 6 — Record triage decisions
+For each finding, evaluate it and either:
+- Resolve the comment (`peanut-review resolve <c_id>`) to mark it applied,
+  ideally after applying the fix in code
+- Reply to it (`peanut-review add-comment --reply-to <c_id> --body "..."`)
+  to record a rebuttal or note any partial fix
 
-```bash
-peanut-review triage \
-  --applied '[{"comment_id": "c_xxx", "description": "Added null check"}]' \
-  --dismissed '[{"comment_id": "c_yyy", "rebuttal": "Already covered by test X"}]' \
-  --commit <FIX_COMMIT_SHA>
-```
-
-### Step 7 — Migrate HEAD (if fixes were committed)
-
-If you committed fixes during triage, update the session HEAD so comments
-are correctly marked stale:
+Commit any fixes you applied. Then update the session HEAD so prior
+comments anchored to old line numbers get correctly marked stale:
 ```bash
 peanut-review migrate
 ```
 
-### Step 8 — Signal agents for Round 2
+### Step 6 — Wake agents for the next pass
 
 ```bash
-peanut-review signal-all triage-done
+peanut-review signal-all next-round
 ```
 
-### Step 8 — Monitor Round 2
+This unblocks any agents waiting on `next-round`. There is no round
+counter — each pass is just another batch of comments, and the orchestrator
+tracks "what's new since last time" via `--since <comment-id>`.
+
+### Step 7 — Monitor the next pass
 
 Same as Step 4:
 ```bash
 peanut-review inbox
-peanut-review wait-all round2-done --timeout 600
+peanut-review wait-all round-done --timeout 600
 ```
 
-### Step 9 — Review Round 2 comments
+### Step 8 — Review the new comments
 
 ```bash
-peanut-review comments --round 2
+peanut-review comments --since <last-comment-id>
 ```
 
-Apply any additional fixes if needed.
+Apply any additional fixes if needed. For human-led reviews you may
+repeat Steps 5–7 with another `signal-all next-round` as many times as
+useful; there is no built-in limit on passes.
 
-### Step 10 — Record verdict
+### Step 9 — Record verdict
 
 ```bash
 peanut-review verdict --approve --update-bead --body "All critical issues addressed"
@@ -145,7 +144,7 @@ Or if changes still needed:
 peanut-review verdict --request-changes --body "Outstanding critical issue in X"
 ```
 
-### Step 11 — (Optional) Archive to git notes
+### Step 10 — (Optional) Archive to git notes
 
 ```bash
 peanut-review archive

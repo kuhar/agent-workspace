@@ -216,7 +216,6 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         f'<div class="comment-meta">'
         f'<span class="author">{html.escape(c.author or "unknown")}</span>'
         f'{sev_html}'
-        f'<span class="round">R{c.round}</span>'
         f'{"".join(badges)}'
         f'{"".join(buttons)}'
         f'</div>'
@@ -570,7 +569,7 @@ def render_page(
     sidebar = _render_sidebar(session, comments, files)
 
     head_badge = (
-        '<span class="badge head state-triage">HEAD shifted</span>'
+        '<span class="badge head head-shifted">HEAD shifted</span>'
         if head_shifted else '<span class="badge head"></span>'
     )
     state_class = f"state-{session.state}"

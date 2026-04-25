@@ -105,7 +105,6 @@ def add_comment(
     sd = _session_dir()
     s = sess.load_session(sd)
     author = _get_author()
-    round_num = sess.current_round(s.state)
 
     if severity not in ("critical", "warning", "suggestion", "nit"):
         return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
@@ -121,7 +120,6 @@ def add_comment(
         end_line=end_line,
         body=body,
         severity=severity,
-        round=round_num,
         head_sha=s.current_head,
     )
     store.append_comment(sd, comment)
@@ -150,7 +148,6 @@ def add_global_comment(
     sd = _session_dir()
     s = sess.load_session(sd)
     author = _get_author()
-    round_num = sess.current_round(s.state)
 
     if severity not in ("critical", "warning", "suggestion", "nit"):
         return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
@@ -161,7 +158,6 @@ def add_global_comment(
         line=0,
         body=body,
         severity=severity,
-        round=round_num,
         head_sha=s.current_head,
     )
     store.append_comment(sd, comment)
@@ -169,22 +165,67 @@ def add_global_comment(
 
 
 @mcp.tool()
+def reply(
+    parent_id: str,
+    body: str,
+    severity: str = "suggestion",
+) -> str:
+    """Reply to an existing comment, threading the discussion.
+
+    Use this in Round 2+ to push back on a rebuttal or follow up on a
+    Round 1 finding. Replies inherit the parent's file/line, so the thread
+    stays anchored to the original spot.
+
+    Args:
+        parent_id: The Round 1 comment ID you're replying to (c_xxxxxxxx).
+        body: Reply text.
+        severity: One of: critical, warning, suggestion, nit.
+    """
+    sd = _session_dir()
+    s = sess.load_session(sd)
+    author = _get_author()
+
+    if severity not in ("critical", "warning", "suggestion", "nit"):
+        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+
+    all_comments = store.read_all_comments(sd)
+    rooted = store.normalize_reply_to(all_comments, parent_id)
+    if rooted is None:
+        return f"Error: parent comment not found: {parent_id}"
+    parent = next(c for c in all_comments if c.id == rooted)
+
+    comment = models.Comment(
+        author=author,
+        file=parent.file,
+        line=parent.line,
+        body=body,
+        severity=severity,
+        head_sha=s.current_head,
+        reply_to=rooted,
+    )
+    store.append_comment(sd, comment)
+    return f"Reply {comment.id} stored (to {rooted})."
+
+
+@mcp.tool()
 def list_comments(
-    round_num: int | None = None,
+    since: str | None = None,
     severity: str | None = None,
     file: str | None = None,
 ) -> str:
     """List review comments, optionally filtered.
 
     Args:
-        round_num: Filter by round (1 or 2)
+        since: Comment ID — return only comments posted after this one. Use
+            this to poll for new activity since you last looked. Pass the id
+            of the most recent comment you've seen.
         severity: Filter by severity (critical, warning, suggestion, nit)
         file: Filter by file path
     """
     sd = _session_dir()
     comments = store.read_all_comments(sd)
     comments = store.filter_comments(
-        comments, file=file, severity=severity, round_num=round_num,
+        comments, file=file, severity=severity, since=since,
     )
     if not comments:
         return "No comments found."
@@ -194,7 +235,7 @@ def list_comments(
         stale = " [stale]" if c.stale else ""
         resolved = " [resolved]" if c.resolved else ""
         loc = "[global]" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
-        lines.append(f"[{c.id}] {c.author} {c.severity} {loc} R{c.round}{stale}{resolved}")
+        lines.append(f"[{c.id}] {c.author} {c.severity} {loc}{stale}{resolved}")
         lines.append(f"  {c.body}")
         lines.append("")
     return "\n".join(lines)
@@ -202,10 +243,10 @@ def list_comments(
 
 @mcp.tool()
 def signal(event: str) -> str:
-    """Signal that you have completed a phase (e.g., "round1-done", "round2-done").
+    """Signal that you have completed a phase (e.g., "round-done").
 
     Args:
-        event: Event name, typically "round1-done" or "round2-done"
+        event: Event name, typically "round-done" when finishing a round.
     """
     sd = _session_dir()
     agent = _get_author()
@@ -215,12 +256,12 @@ def signal(event: str) -> str:
 
 @mcp.tool()
 def wait(event: str, timeout: int = 600) -> str:
-    """Wait for the orchestrator to signal an event (e.g., "triage-done").
+    """Wait for the orchestrator to signal an event (e.g., "next-round").
 
     This blocks until the signal arrives or timeout expires.
 
     Args:
-        event: Event name to wait for (e.g., "triage-done")
+        event: Event name to wait for (e.g., "next-round")
         timeout: Maximum seconds to wait (default: 600)
     """
     sd = _session_dir()
@@ -249,20 +290,6 @@ def ask(question: str, timeout: int = 600) -> str:
     if reply:
         return f"Reply: {reply.answer}"
     return f"Timeout after {timeout}s waiting for reply to: {question}"
-
-
-@mcp.tool()
-def read_triage() -> str:
-    """Read the triage decisions from Round 1 (available after triage-done signal).
-
-    Returns the triage JSON showing which comments were applied vs dismissed,
-    with descriptions and rebuttals.
-    """
-    sd = _session_dir()
-    triage_path = Path(sd) / "triage.json"
-    if not triage_path.exists():
-        return "No triage.json found yet. Wait for the triage-done signal first."
-    return triage_path.read_text()
 
 
 @mcp.tool()

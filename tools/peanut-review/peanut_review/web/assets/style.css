@@ -55,8 +55,8 @@ header .badge {
   letter-spacing: 0.5px;
 }
 header .badge.state-complete { background: #2d5a3d; color: #fff; }
-header .badge.state-round1, header .badge.state-round2 { background: #3d4a6a; color: #fff; }
-header .badge.state-triage { background: #5d4a2a; color: #fff; }
+header .badge.state-round { background: #3d4a6a; color: #fff; }
+header .badge.head-shifted { background: #5d4a2a; color: #fff; }
 
 main {
   padding: 20px;
@@ -500,8 +500,7 @@ table.sessions td.counts .n.muted { color: var(--muted); }
 table.sessions td.counts .sub { color: var(--muted); font-size: 11px; }
 
 .badge.state-init { background: #3a3a3a; }
-.badge.state-round1, .badge.state-round2 { background: #3d4a6a; color: #fff; }
-.badge.state-triage { background: #5d4a2a; color: #fff; }
+.badge.state-round { background: #3d4a6a; color: #fff; }
 .badge.state-complete { background: #2d5a3d; color: #fff; }
 .badge.state-aborted { background: #5a2d2d; color: #fff; }
 .badge {

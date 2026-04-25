@@ -71,14 +71,8 @@ def test_state_transitions(mock_git):
     session_dir = os.path.join(sd, "session")
     create_session(workspace="/tmp/repo", session_dir=session_dir)
 
-    s = transition_state(session_dir, SessionState.ROUND1.value)
-    assert s.state == "round1"
-
-    s = transition_state(session_dir, SessionState.TRIAGE.value)
-    assert s.state == "triage"
-
-    s = transition_state(session_dir, SessionState.ROUND2.value)
-    assert s.state == "round2"
+    s = transition_state(session_dir, SessionState.ROUND.value)
+    assert s.state == "round"
 
     s = transition_state(session_dir, SessionState.COMPLETE.value)
     assert s.state == "complete"
@@ -141,11 +135,11 @@ def test_session_json_roundtrip():
         agents=[
             AgentConfig(name="vera", model="opus", persona="vera.md"),
         ],
-        state="round1",
+        state="round",
     )
     text = s.to_json()
     s2 = Session.from_json(text)
     assert s2.id == "test-123"
     assert len(s2.agents) == 1
     assert s2.agents[0].name == "vera"
-    assert s2.state == "round1"
+    assert s2.state == "round"

@@ -97,7 +97,7 @@ def test_parse_diff_new_file(repo: Path, tmp_path: Path):
 def test_render_page_smoke(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    c = Comment(author="felix", file="foo.py", line=2, body="nice", severity="suggestion", round=1)
+    c = Comment(author="felix", file="foo.py", line=2, body="nice", severity="suggestion")
     store.append_comment(session_dir, c)
     comments = store.read_all_comments(session_dir)
 
@@ -114,7 +114,7 @@ def test_render_comment_escapes_html(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     c = Comment(author="felix", file="foo.py", line=1,
-                body="<script>alert(1)</script>", severity="critical", round=1)
+                body="<script>alert(1)</script>", severity="critical")
     store.append_comment(session_dir, c)
 
     html = render.render_page(s, s.id, files, [c], head_shifted=False)
@@ -127,9 +127,9 @@ def test_render_sidebar_files_list_with_counts(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     # Two comments on foo.py: one open + one resolved → 1 open / 2 total.
-    c_open = Comment(author="felix", file="foo.py", line=1, body="a", severity="nit", round=1)
+    c_open = Comment(author="felix", file="foo.py", line=1, body="a", severity="nit")
     c_done = Comment(author="vera", file="foo.py", line=2, body="b", severity="nit",
-                     round=1, resolved=True)
+                     resolved=True)
     store.append_comment(session_dir, c_open)
     store.append_comment(session_dir, c_done)
     html = render.render_page(s, s.id, files, store.read_all_comments(session_dir),
@@ -159,9 +159,9 @@ def test_render_global_section_appears_above_files(session_dir: Path, repo: Path
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     g = Comment(author="vera", file="", line=0, body="scope concern",
-                severity="warning", round=1)
+                severity="warning")
     a = Comment(author="felix", file="foo.py", line=1, body="anchored",
-                severity="nit", round=1)
+                severity="nit")
     store.append_comment(session_dir, g)
     store.append_comment(session_dir, a)
     html = render.render_page(s, s.id, files,
@@ -189,9 +189,9 @@ def test_render_global_section_excludes_globals_from_per_file_counts(
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     # 2 globals (1 open + 1 resolved), 0 per-file → file row shows em-dash.
-    g1 = Comment(author="vera", file="", line=0, body="A", severity="warning", round=1)
+    g1 = Comment(author="vera", file="", line=0, body="A", severity="warning")
     g2 = Comment(author="vera", file="", line=0, body="B", severity="suggestion",
-                 round=1, resolved=True)
+                 resolved=True)
     store.append_comment(session_dir, g1)
     store.append_comment(session_dir, g2)
     html = render.render_page(s, s.id, files,
@@ -244,10 +244,10 @@ def test_render_thread_includes_reply_button_and_replies_inset(
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     parent = Comment(author="vera", file="foo.py", line=1, body="parent",
-                     severity="warning", round=1)
+                     severity="warning")
     store.append_comment(session_dir, parent)
     reply = Comment(author="felix", file="foo.py", line=1, body="agreed",
-                    severity="suggestion", round=1, reply_to=parent.id)
+                    severity="suggestion", reply_to=parent.id)
     store.append_comment(session_dir, reply)
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -271,7 +271,7 @@ def test_render_thread_swaps_to_unresolve_when_resolved(
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     parent = Comment(author="vera", file="foo.py", line=1, body="x",
-                     severity="warning", round=1, resolved=True)
+                     severity="warning", resolved=True)
     store.append_comment(session_dir, parent)
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -285,12 +285,12 @@ def test_sidebar_counts_exclude_replies(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     parent = Comment(author="vera", file="foo.py", line=1, body="P",
-                     severity="warning", round=1)
+                     severity="warning")
     store.append_comment(session_dir, parent)
     for i in range(5):
         store.append_comment(session_dir, Comment(
             author="felix", file="foo.py", line=1, body=f"r{i}",
-            severity="suggestion", round=1, reply_to=parent.id,
+            severity="suggestion", reply_to=parent.id,
         ))
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -388,9 +388,9 @@ def test_render_stale_and_resolved_classes(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     c1 = Comment(author="felix", file="foo.py", line=1, body="stale one",
-                 severity="nit", round=1, stale=True)
+                 severity="nit", stale=True)
     c2 = Comment(author="vera", file="foo.py", line=2, body="resolved one",
-                 severity="nit", round=1, resolved=True)
+                 severity="nit", resolved=True)
     html = render.render_page(s, s.id, files, [c1, c2], head_shifted=False)
     assert "comment stale" in html
     assert "comment resolved" in html or "resolved" in html
@@ -903,11 +903,11 @@ def test_render_range_comment_anchored_at_end_line(session_dir: Path, repo: Path
     """A comment with end_line must appear in the thread anchored at end_line."""
     store.append_comment(session_dir, Comment(
         author="vera", file="foo.py", line=1, end_line=2,
-        body="spans two lines", severity="warning", round=1,
+        body="spans two lines", severity="warning",
     ))
     store.append_comment(session_dir, Comment(
         author="vera", file="foo.py", line=1,
-        body="single line", severity="nit", round=1,
+        body="single line", severity="nit",
     ))
     s = sess.load_session(session_dir)
     from peanut_review.web import diff as diffmod
@@ -999,17 +999,17 @@ def test_session_page_emits_prefixed_session_url(session_dir: Path):
         srv.shutdown()
 
 
-def test_server_filter_comments_by_round(session_dir: Path):
-    store.append_comment(session_dir, Comment(
-        author="felix", file="foo.py", line=1, body="r1", severity="nit", round=1,
-    ))
-    store.append_comment(session_dir, Comment(
-        author="felix", file="foo.py", line=2, body="r2", severity="nit", round=2,
-    ))
+def test_server_filter_comments_since_id(session_dir: Path):
+    """The `--since <id>` cursor (replaces the old `--round N` filter) lets
+    the orchestrator poll for new activity since they last looked."""
+    c1 = Comment(author="felix", file="foo.py", line=1, body="r1", severity="nit")
+    c2 = Comment(author="felix", file="foo.py", line=2, body="r2", severity="nit")
+    store.append_comment(session_dir, c1)
+    store.append_comment(session_dir, c2)
     srv, session_id, port = _start_server(session_dir)
     try:
         code, raw = _get(
-            f"http://127.0.0.1:{port}/{session_id}/api/comments?round=2",
+            f"http://127.0.0.1:{port}/{session_id}/api/comments?since={c1.id}",
         )
         assert code == 200
         data = json.loads(raw)

@@ -218,7 +218,7 @@ def launch_agents(
 
     prompts = render_all_prompts(session_dir, template_path)
 
-    session.state = SessionState.ROUND1.value
+    session.state = SessionState.ROUND.value
     save_session(sdir, session)
 
     results = []

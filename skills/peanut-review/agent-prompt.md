@@ -94,44 +94,45 @@ path. Example: `--body-file /tmp/c42.md` instead of `--body "…\`foo\`…"`.
 
 When done with all findings, signal completion:
 ```
-${PR_BIN} --session ${SESSION} signal round1-done
+${PR_BIN} --session ${SESSION} signal round-done
 ```
 
-# Wait for triage
+# Wait for the next round
 
 ```
-${PR_BIN} --session ${SESSION} wait triage-done --timeout 600
+${PR_BIN} --session ${SESSION} wait next-round --timeout 600
 ```
 
 # Round 2 — Post-triage rebuttal
 
 Read ALL prior context before forming opinions:
 
-1. **All Round 1 comments** (yours and other reviewers'):
-   `${PR_BIN} --session ${SESSION} comments --round 1 --format json`
+1. **All prior comments** (yours and other reviewers'):
+   `${PR_BIN} --session ${SESSION} comments --format json`
 
-2. **Triage decisions** (which comments were applied vs dismissed, with rebuttals):
-   `cat ${SESSION}/triage.json`
+2. **Orchestrator decisions** — comments resolved by the orchestrator were
+   applied; replies on Round 1 comments are the orchestrator's rebuttals
+   for findings they chose not to fix.
 
 3. **Fix diff** (what the orchestrator changed in response to Round 1):
    `cd ${WORKSPACE} && git log --oneline -5` to find the fix commit, then
    `git diff <original-head>..<fix-commit>` to see the actual fixes.
 
-Now assess: for each dismissed finding with a rebuttal, do you agree with the
-dismissal? If you disagree, post a Round 2 comment as a **reply** to the
-original Round 1 comment so the discussion stays threaded:
+Now assess: for each rebutted finding, do you agree with the rebuttal? If
+you disagree, post a Round 2 comment as a **reply** to the original Round 1
+comment so the discussion stays threaded:
 
 ```
 ${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
     --severity <...> --body "Why the rebuttal doesn't hold: ..."
 ```
 
-`<c_id>` is the original Round 1 comment ID from the triage JSON. The reply
-inherits its file/line from the parent. For brand-new findings you spot in
-the fix diff (not tied to a Round 1 comment), use a regular `add-comment`
-or `add-global-comment`.
+`<c_id>` is the original Round 1 comment ID. The reply inherits its
+file/line from the parent. For brand-new findings you spot in the fix diff
+(not tied to a Round 1 comment), use a regular `add-comment` or
+`add-global-comment`.
 
-Then signal: `${PR_BIN} --session ${SESSION} signal round2-done`
+Then signal: `${PR_BIN} --session ${SESSION} signal round-done`
 
 # Test execution (mandatory)
 

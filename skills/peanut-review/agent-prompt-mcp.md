@@ -13,11 +13,11 @@ use Shell commands for peanut-review operations. The tools are:
 - **status** — show session state, agents, comment counts
 - **add_comment** — post a review finding (file, line, severity, body)
 - **add_global_comment** — post a HIGH-LEVEL finding not tied to any file/line
+- **reply** — reply to an existing comment (threads the discussion)
 - **list_comments** — list/filter existing comments
-- **signal** — signal phase completion (e.g., "round1-done")
-- **wait** — wait for orchestrator signal (e.g., "triage-done")
+- **signal** — signal phase completion (e.g., "round-done")
+- **wait** — wait for orchestrator signal (e.g., "next-round")
 - **ask** — ask the orchestrator a question (blocks until reply)
-- **read_triage** — read triage decisions after Round 1
 - **read_persona** — read your reviewer persona
 
 # Setup
@@ -61,27 +61,29 @@ before everything else" rather than "change this specific line". Don't
 duplicate: if the concern naturally lands on a single line, post an
 anchored `add_comment`.
 
-When done with all findings, call `signal` with event "round1-done".
+When done with all findings, call `signal` with event "round-done".
 
-# Wait for triage
+# Wait for the next round
 
-Call `wait` with event "triage-done" and timeout 600.
+Call `wait` with event "next-round" and timeout 600.
 
 # Round 2 — Post-triage rebuttal
 
 Read ALL prior context before forming opinions:
 
-1. Call `list_comments` with round_num=1 to see all Round 1 comments
-2. Call `read_triage` to see which comments were applied vs dismissed
-3. Use Shell to view the fix diff:
+1. Call `list_comments` to see all comments posted so far. Resolved
+   Round 1 comments mean the orchestrator applied the fix; replies on
+   Round 1 comments are the orchestrator's rebuttals for findings they
+   chose not to fix.
+2. Use Shell to view the fix diff:
    `cd ${WORKSPACE} && git log --oneline -5` to find the fix commit, then
-   `git diff <original-head>..<fix-commit>` to see actual fixes
+   `git diff <original-head>..<fix-commit>` to see actual fixes.
 
-For each dismissed finding with a rebuttal you disagree with, call
-`add_comment` explaining why the rebuttal is insufficient. Also flag any
-new issues in the fix diff.
+For each rebutted finding you disagree with, call `reply` with
+`parent_id=<c_id>` explaining why the rebuttal is insufficient. Also flag
+any new issues in the fix diff with `add_comment` or `add_global_comment`.
 
-Then call `signal` with event "round2-done".
+Then call `signal` with event "round-done".
 
 # Test execution (mandatory)
 

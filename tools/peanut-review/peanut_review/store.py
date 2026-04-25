@@ -64,15 +64,21 @@ def filter_comments(
     agent: str | None = None,
     file: str | None = None,
     severity: str | None = None,
-    round_num: int | None = None,
+    since: str | None = None,
     unresolved: bool = False,
     include_deleted: bool = False,
 ) -> list[Comment]:
     """Filter a list of comments by criteria.
 
+    `since` is a comment id; only comments whose timestamp is strictly after
+    that comment's timestamp are returned. Used by the orchestrator (or any
+    returning reviewer) to poll for new activity since they last looked. If
+    the id isn't found, no rows are filtered out — callers that want strict
+    behavior should validate the id first.
+
     Deleted comments are hidden by default — set `include_deleted=True` to
     see them (auditing, undelete). Agents reading back comments must NOT pass
-    this flag, so humans can hide bad comments before round 2.
+    this flag, so humans can hide bad comments between rounds.
     """
     result = comments
     if not include_deleted:
@@ -83,8 +89,16 @@ def filter_comments(
         result = [c for c in result if c.file == file]
     if severity:
         result = [c for c in result if c.severity == severity]
-    if round_num is not None:
-        result = [c for c in result if c.round == round_num]
+    if since:
+        # Use position in the original sorted list rather than a timestamp
+        # comparison so same-second ties are handled deterministically.
+        ids = [c.id for c in comments]
+        try:
+            cutoff_idx = ids.index(since)
+        except ValueError:
+            cutoff_idx = -1  # id not found → return everything
+        kept_ids = {c.id for c in comments[cutoff_idx + 1:]}
+        result = [c for c in result if c.id in kept_ids]
     if unresolved:
         result = [c for c in result if not c.resolved]
     return result

@@ -150,11 +150,6 @@ def update_agent_status(
     return session
 
 
-def current_round(state: str) -> int:
-    """Return the review round (1 or 2) based on session state."""
-    return 2 if state == SessionState.ROUND2.value else 1
-
-
 def refresh_agent_statuses(session_dir: str | Path, session: Session) -> bool:
     """Check PIDs of running agents, mark exited ones as done. Returns True if changed."""
     changed = False

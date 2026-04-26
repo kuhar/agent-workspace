@@ -860,6 +860,23 @@ def test_gh_push_verdict_approve_maps_to_event(gh_shim, tmp_path):
     assert v.external_review_url == "https://h/r/9001"
 
 
+def test_gh_push_verdict_comment_maps_to_event(gh_shim, tmp_path):
+    """`decision=comment` → GitHub COMMENT event. This is the only review
+    event GitHub allows on your own PR."""
+    sd = _make_gh_session(tmp_path)
+    _stage_verdict(sd, "comment", "non-blocking thoughts")
+
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"],
+        "stdout": json.dumps({"id": 9003, "html_url": ""}),
+    }])
+
+    rc = main(["--session", sd, "gh-push-verdict"])
+    assert rc == 0
+    [call] = gh_shim.calls()
+    assert json.loads(call["stdin"]) == {"event": "COMMENT", "body": "non-blocking thoughts"}
+
+
 def test_gh_push_verdict_request_changes_maps_to_event(gh_shim, tmp_path):
     sd = _make_gh_session(tmp_path)
     _stage_verdict(sd, "request-changes", "fix the test")

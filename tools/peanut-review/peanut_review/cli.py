@@ -699,11 +699,16 @@ def cmd_gh_push_verdict(args: argparse.Namespace) -> int:
               f"Use --force to re-submit.", file=sys.stderr)
         return 1
 
-    event_map = {"approve": "APPROVE", "request-changes": "REQUEST_CHANGES"}
+    event_map = {
+        "approve": "APPROVE",
+        "request-changes": "REQUEST_CHANGES",
+        "comment": "COMMENT",
+    }
     event = event_map.get(v.decision)
     if event is None:
         print(f"Error: unknown verdict decision {v.decision!r} "
-              f"(expected approve or request-changes)", file=sys.stderr)
+              f"(expected approve, request-changes, or comment)",
+              file=sys.stderr)
         return 1
 
     if args.dry_run:
@@ -900,7 +905,12 @@ def cmd_verdict(args: argparse.Namespace) -> int:
     session_dir = _get_session_dir(args)
     s = sess.load_session(session_dir)
 
-    decision = "approve" if args.approve else "request-changes"
+    if args.approve:
+        decision = "approve"
+    elif args.request_changes:
+        decision = "request-changes"
+    else:
+        decision = "comment"
     comments = [c for c in store.read_all_comments(session_dir) if not c.deleted]
 
     # Summary per agent
@@ -1271,7 +1281,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("verdict", help="Record final verdict")
     grp = sp.add_mutually_exclusive_group(required=True)
     grp.add_argument("--approve", action="store_true")
-    grp.add_argument("--request-changes", action="store_true")
+    grp.add_argument("--request-changes", dest="request_changes",
+                     action="store_true")
+    grp.add_argument("--comment", action="store_true",
+                     help="Submit review comments without approving or "
+                          "blocking — required for self-owned PRs since "
+                          "GitHub forbids approve/request-changes on your "
+                          "own PR")
     sp.add_argument("--body", help="Verdict body text")
     sp.add_argument("--update-bead", action="store_true", help="Update bead with verdict")
 

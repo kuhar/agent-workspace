@@ -153,6 +153,19 @@ def test_verdict_flow(mock_git):
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_verdict_comment_decision(mock_git):
+    """`--comment` records a non-blocking review verdict (mirrors GitHub's
+    COMMENT review event). Required for self-owned PRs since GitHub forbids
+    APPROVE/REQUEST_CHANGES from the PR author."""
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd)
+    rc = main(["--session", sd, "verdict", "--comment", "--body", "fyi"])
+    assert rc == 0
+    result = json.loads((Path(sd) / "result.json").read_text())
+    assert result["decision"] == "comment"
+
+
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
 def test_status(mock_git):
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     main(["--session", sd, "init", "--workspace", "/tmp/repo",

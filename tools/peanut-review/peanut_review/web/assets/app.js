@@ -1280,6 +1280,8 @@
   // or on Escape. Actions reuse existing DOM buttons via .click() so all the
   // API + confirm() flow stays in one place.
   const PREFIX_KEY = " ";
+  const PREFIX_LABEL = "␣";  // visual label for PREFIX_KEY in the indicator
+  const COMPOSER_PREFIX_LABEL = "⌃" + PREFIX_LABEL;  // Ctrl+space chord entry
   const PREFIX_TIMEOUT_MS = 2000;
 
   function focusedThreadEl() {
@@ -1346,7 +1348,7 @@
 
   let pendingMap = null;
   let pendingPath = [];
-  let pendingPrefixLabel = "␣";
+  let pendingPrefixLabel = PREFIX_LABEL;
   let pendingTimer = null;
 
   function getOrCreatePendingIndicator() {
@@ -1373,7 +1375,7 @@
   function resetPending() {
     pendingMap = null;
     pendingPath = [];
-    pendingPrefixLabel = "␣";
+    pendingPrefixLabel = PREFIX_LABEL;
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
     renderPendingIndicator();
   }
@@ -1386,7 +1388,7 @@
   function startPending() {
     pendingMap = KEYMAP;
     pendingPath = [];
-    pendingPrefixLabel = "␣";
+    pendingPrefixLabel = PREFIX_LABEL;
     bumpPendingTimer();
     renderPendingIndicator();
   }
@@ -1414,7 +1416,7 @@
     }
     pendingMap = map;
     pendingPath = [];
-    pendingPrefixLabel = "⌃␣";
+    pendingPrefixLabel = COMPOSER_PREFIX_LABEL;
     bumpPendingTimer();
     renderPendingIndicator();
     // Keep textarea focus so the user can keep typing after the chord.
@@ -1478,13 +1480,13 @@
       submit.click();
       return;
     }
-    // Ctrl+Space (primary) or Alt+s (fallback for IMEs that grab Ctrl+Space)
-    // open the composer-actions chord. Only opens if there's something
-    // chord-worthy in this composer (.sev select or .suggest button).
-    const isCtrlSpace = (ev.ctrlKey || ev.metaKey)
-      && !ev.altKey && !ev.shiftKey && ev.key === " ";
+    // Ctrl+PREFIX_KEY (primary) or Alt+s (fallback for IMEs that grab
+    // Ctrl+Space) open the composer-actions chord. Only opens if there's
+    // something chord-worthy in this composer (.sev select or .suggest button).
+    const isCtrlPrefix = (ev.ctrlKey || ev.metaKey)
+      && !ev.altKey && !ev.shiftKey && ev.key === PREFIX_KEY;
     const isAltS = ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.key === "s";
-    if (isCtrlSpace || isAltS) {
+    if (isCtrlPrefix || isAltS) {
       if (!composer.querySelector(".sev") && !composer.querySelector(".suggest")) return;
       ev.preventDefault();
       startPendingComposerActions(composer);

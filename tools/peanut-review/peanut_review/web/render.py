@@ -18,6 +18,12 @@ from .diff import FileDiff
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
+# Visual labels for the keyboard chord prefixes shown in the sidebar
+# shortcuts. Must match the corresponding constants in `assets/app.js`
+# (PREFIX_LABEL / COMPOSER_PREFIX_LABEL) — change both together.
+PREFIX_LABEL = "␣"
+COMPOSER_PREFIX_LABEL = f"⌃{PREFIX_LABEL}"
+
 # Peanut-emoji favicon, inlined as an SVG data URI so we ship no binary asset.
 _FAVICON_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
@@ -468,19 +474,19 @@ def _render_sidebar(
         '</ul>'
         '<h3>Actions</h3>'
         '<ul class="shortcuts">'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>r</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>r</kbd></span>'
         '<span class="desc">reply</span></li>'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>e</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>e</kbd></span>'
         '<span class="desc">edit</span></li>'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>R</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>R</kbd></span>'
         '<span class="desc">toggle resolved</span></li>'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>D</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>D</kbd></span>'
         '<span class="desc">delete</span></li>'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>a</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>a</kbd></span>'
         '<span class="desc">add global comment</span></li>'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>g</kbd><kbd>f</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>f</kbd></span>'
         '<span class="desc">fetch from GitHub</span></li>'
-        '<li><span class="keys"><kbd class="prefix">␣</kbd><kbd>g</kbd><kbd>p</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>p</kbd></span>'
         '<span class="desc">push to GitHub</span></li>'
         '</ul>'
         '<h3>Composer</h3>'
@@ -489,10 +495,10 @@ def _render_sidebar(
         '<span class="desc">post / save</span></li>'
         '<li><span class="keys"><kbd>Esc</kbd></span>'
         '<span class="desc">cancel</span></li>'
-        '<li><span class="keys"><kbd class="prefix">⌃␣</kbd>'
+        f'<li><span class="keys"><kbd class="prefix">{COMPOSER_PREFIX_LABEL}</kbd>'
         '<kbd>c</kbd><kbd>w</kbd><kbd>s</kbd><kbd>n</kbd><kbd>f</kbd></span>'
         '<span class="desc">set severity</span></li>'
-        '<li><span class="keys"><kbd class="prefix">⌃␣</kbd><kbd>i</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{COMPOSER_PREFIX_LABEL}</kbd><kbd>i</kbd></span>'
         '<span class="desc">insert suggestion (inline only)</span></li>'
         '</ul>'
         '</aside>'

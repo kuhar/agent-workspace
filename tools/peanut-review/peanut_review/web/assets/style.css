@@ -15,10 +15,11 @@
   --suggestion: #69db7c;
   --nit: #868e96;
   --stale: #555a63;
+  --focus: #ffd866;
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html { scroll-behavior: auto; }
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -74,6 +75,17 @@ main {
   padding: 20px;
   max-width: 1400px;
   margin: 0 auto;
+}
+/* Sidebar is fixed at right: 20px with width 320px, occupying ~340px on the
+ * right. When the viewport isn't wide enough that a centered 1400px main
+ * still clears the sidebar (1400 + 2 * 340 = 2080), centering would push
+ * code under the sidebar. Switch to left-aligned with a right gutter so the
+ * content stays readable. */
+@media (max-width: 2079px) {
+  main {
+    margin-left: 20px;
+    margin-right: 360px;
+  }
 }
 
 .inbox-section {
@@ -247,8 +259,15 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   background: #141a22;
   padding: 10px 14px;
 }
+.thread { scroll-margin-top: 70px; }
 .thread + .thread { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
 .thread.resolved .comment.top-level { opacity: 0.85; }
+.thread.focused {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+  border-radius: 4px;
+  box-shadow: 0 0 14px rgba(255, 216, 102, 0.25);
+}
 .thread-actions {
   display: flex;
   gap: 8px;
@@ -387,8 +406,8 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
 }
 #sidebar h3 { margin: 0 0 8px 0; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 #sidebar ul { list-style: none; padding: 0; margin: 0 0 12px 0; }
-#sidebar ul:not(.files) li { padding: 3px 0; color: var(--muted); display: flex; justify-content: space-between; }
-#sidebar ul:not(.files) li .v { color: var(--fg); }
+#sidebar ul:not(.files) li { padding: 3px 0; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+#sidebar ul:not(.files) li .v { color: var(--fg); min-width: 0; text-align: right; overflow-wrap: anywhere; }
 
 #sidebar ul.files li.file-row {
   padding: 4px 6px;
@@ -469,6 +488,71 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
 #sidebar ul.files .count.open { color: var(--warning); font-weight: 600; }
 #sidebar ul.files .count.muted, #sidebar ul.files .muted { color: var(--muted); }
 #sidebar ul.files .count.empty { color: var(--border); }
+
+#sidebar ul.shortcuts li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  color: var(--muted);
+}
+#sidebar ul.shortcuts .keys {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+#sidebar ul.shortcuts .desc { font-size: 11px; text-align: right; }
+#sidebar ul.shortcuts kbd {
+  font-family: "Source Code Pro", "JetBrains Mono", "Menlo", monospace;
+  font-size: 11px;
+  background: #0a0e12;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+#sidebar ul.shortcuts kbd.prefix {
+  background: #131a22;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.kbd-pending {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  background: var(--accent);
+  color: #0f1419;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-family: "Source Code Pro", "JetBrains Mono", "Menlo", monospace;
+  font-size: 13px;
+  letter-spacing: 1px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  pointer-events: none;
+  display: none;
+}
+.kbd-pending.active { display: block; }
+
+.toast {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  background: #2d5a3d;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  z-index: 60;
+  pointer-events: none;
+  max-width: 360px;
+  word-break: break-word;
+}
 
 /* ---- Session index ---- */
 body.index main.index-main { max-width: 1600px; }

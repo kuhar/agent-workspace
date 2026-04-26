@@ -398,161 +398,22 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
 def cmd_gh_pull(args: argparse.Namespace) -> int:
     """Fetch GitHub PR comments into the local session.
 
-    Three things happen, all keyed on `external_id`:
-      1. New comments (no local match) are appended as `gh:<login>` authors.
-         Replies land threaded — `in_reply_to_id` is resolved to the
-         corresponding local comment and stored as `reply_to`, normalized
-         to a top-level via `store.normalize_reply_to`.
-      2. Existing comments whose GitHub body diverges from our last
-         `external_synced_body` get an `edit_comment` applied locally so
-         the change shows up in version history.
-      3. Already-synced comments (matching id, matching body) are skipped.
-
-    Idempotent: re-running with no upstream changes is a no-op.
+    Thin wrapper over `gh_pull.pull_comments`; the same path is used by the
+    web UI's `/api/gh/pull` endpoint so both surfaces stay in lockstep.
     """
-    from . import gh
+    from . import gh, gh_pull
     session_dir = _get_session_dir(args)
     pair = _require_github(session_dir)
     if pair is None:
         return 1
-    s, ghpr = pair
-
+    s, _ = pair
     try:
-        review_comments = gh.fetch_review_comments(ghpr.repo, ghpr.number)
-        issue_comments = gh.fetch_issue_comments(ghpr.repo, ghpr.number)
+        result = gh_pull.pull_comments(session_dir, s, dry_run=args.dry_run)
     except gh.GhError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-
-    # Build a map from GitHub id → local Comment for both lookup paths
-    # (dedupe + reply threading).
-    local_by_ext: dict[str, models.Comment] = {
-        c.external_id: c for c in store.read_all_comments(session_dir)
-        if c.external_source == "github" and c.external_id
-    }
-
-    new_anchored = 0
-    new_global = 0
-    edited = 0
-    skipped = 0
-
-    def _resolve_reply_to(raw: dict) -> str | None:
-        """Map GitHub's in_reply_to_id to a *local* comment id, normalized
-        to the thread root (matches our flat-thread invariant)."""
-        parent_ext = raw.get("in_reply_to_id")
-        if not parent_ext:
-            return None
-        parent_local = local_by_ext.get(str(parent_ext))
-        if parent_local is None:
-            # Parent isn't local yet — earlier in this same pull pass it'll
-            # arrive (GitHub returns chronologically), but if we somehow
-            # miss it, leave reply_to None and only stash external_in_reply_to.
-            return None
-        all_local = store.read_all_comments(session_dir)
-        return store.normalize_reply_to(all_local, parent_local.id)
-
-    for raw in review_comments:
-        ext_id = str(raw["id"])
-        body = raw.get("body", "")
-        existing = local_by_ext.get(ext_id)
-
-        if existing is not None:
-            if body != (existing.external_synced_body or ""):
-                if args.dry_run:
-                    edited += 1
-                    continue
-                login = raw.get("user", {}).get("login", "unknown")
-                store.edit_comment(
-                    session_dir, existing.id, body=body,
-                    edited_by=f"gh:{login}",
-                )
-                store.update_comment_external(
-                    session_dir, existing.id, external_synced_body=body,
-                )
-                edited += 1
-            else:
-                skipped += 1
-            continue
-
-        if args.dry_run:
-            new_anchored += 1
-            continue
-
-        login = raw.get("user", {}).get("login", "unknown")
-        c = models.Comment(
-            author=f"gh:{login}",
-            file=raw.get("path", ""),
-            line=raw.get("line") or raw.get("original_line") or 0,
-            end_line=(raw.get("start_line")
-                      if raw.get("start_line") and raw["start_line"] != raw.get("line")
-                      else None),
-            body=body,
-            severity=models.Severity.SUGGESTION.value,
-            head_sha=raw.get("commit_id"),
-            external_source="github",
-            external_id=ext_id,
-            external_url=raw.get("html_url", ""),
-            external_in_reply_to=(str(raw["in_reply_to_id"])
-                                  if raw.get("in_reply_to_id") else None),
-            external_synced_body=body,
-            reply_to=_resolve_reply_to(raw),
-        )
-        store.append_comment(session_dir, c)
-        local_by_ext[ext_id] = c
-        new_anchored += 1
-
-    for raw in issue_comments:
-        ext_id = str(raw["id"])
-        body = raw.get("body", "")
-        existing = local_by_ext.get(ext_id)
-
-        if existing is not None:
-            if body != (existing.external_synced_body or ""):
-                if args.dry_run:
-                    edited += 1
-                    continue
-                login = raw.get("user", {}).get("login", "unknown")
-                store.edit_comment(
-                    session_dir, existing.id, body=body,
-                    edited_by=f"gh:{login}",
-                )
-                store.update_comment_external(
-                    session_dir, existing.id, external_synced_body=body,
-                )
-                edited += 1
-            else:
-                skipped += 1
-            continue
-
-        if args.dry_run:
-            new_global += 1
-            continue
-
-        login = raw.get("user", {}).get("login", "unknown")
-        c = models.Comment(
-            author=f"gh:{login}",
-            file=sess.GLOBAL_FILE,
-            line=0,
-            body=body,
-            severity=models.Severity.SUGGESTION.value,
-            head_sha=s.current_head,
-            external_source="github",
-            external_id=ext_id,
-            external_url=raw.get("html_url", ""),
-            external_synced_body=body,
-        )
-        store.append_comment(session_dir, c)
-        local_by_ext[ext_id] = c
-        new_global += 1
-
     prefix = "[dry-run] " if args.dry_run else ""
-    bits = [
-        f"{new_anchored} anchored",
-        f"{new_global} global",
-    ]
-    if edited:
-        bits.append(f"{edited} edited")
-    print(f"{prefix}Pulled {' + '.join(bits)} ({skipped} already local).")
+    print(f"{prefix}{result.summary()}")
     return 0
 
 

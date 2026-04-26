@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import gh_push, polling, store
+from .. import gh, gh_pull, gh_push, polling, store
 from ..models import Comment, Severity
 from ..session import (
     GLOBAL_FILE,
@@ -362,6 +362,9 @@ class _Handler(BaseHTTPRequestHandler):
         if tail == "/api/gh/push":
             self._post_gh_push(session_dir)
             return
+        if tail == "/api/gh/pull":
+            self._post_gh_pull(session_dir)
+            return
         self._error(404, f"no route for {tail}")
 
     # -------- endpoints --------
@@ -570,6 +573,24 @@ class _Handler(BaseHTTPRequestHandler):
                 for i in result.items
             ],
             "summary": result.summary(),
+        })
+
+    def _post_gh_pull(self, session_dir: Path) -> None:
+        """Fetch new comments + remote edits from the PR. 502 on transport
+        failure so the JS surfaces a useful error rather than a generic 500."""
+        s = load_session(session_dir)
+        if s.github is None:
+            return self._error(400, "session is not GitHub-backed")
+        try:
+            r = gh_pull.pull_comments(session_dir, s)
+        except gh.GhError as e:
+            return self._error(502, str(e))
+        self._json(200, {
+            "new_anchored": r.new_anchored,
+            "new_global": r.new_global,
+            "edited": r.edited,
+            "skipped": r.skipped,
+            "summary": r.summary(),
         })
 
 

@@ -1122,4 +1122,345 @@
       if (!ghModal.hidden && ev.key === "Escape") closeGhModal();
     });
   }
+
+  // --- Keyboard navigation ---
+  // n / p: next / prev thread (DOM order — globals first, then per-file).
+  // N / P: jump to first thread in next file / last thread in previous file.
+  // u / d: scroll up / down one viewport (vim-style), minus the sticky header
+  //        so context near the seam isn't lost.
+  // Threads are re-queried on every press so comments arriving via the 3s
+  // poll loop participate in navigation immediately.
+  let focusedThreadId = null;
+
+  function getOrderedThreads() {
+    const out = [];
+    for (const el of document.querySelectorAll(".thread[data-thread-id]")) {
+      out.push({ el, id: el.dataset.threadId });
+    }
+    return out;
+  }
+
+  function threadFileKey(el) {
+    if (el.closest(".global-section")) return "__global__";
+    const f = el.closest(".file");
+    return f ? f.dataset.file : "__unknown__";
+  }
+
+  function groupThreadsByFile(threads) {
+    const map = new Map();
+    const order = [];
+    for (const t of threads) {
+      const k = threadFileKey(t.el);
+      if (!map.has(k)) { map.set(k, []); order.push(k); }
+      map.get(k).push(t);
+    }
+    return order.map((k) => map.get(k));
+  }
+
+  function focusThread(t) {
+    for (const el of document.querySelectorAll(".thread.focused")) {
+      el.classList.remove("focused");
+    }
+    if (!t) { focusedThreadId = null; return; }
+    t.el.classList.add("focused");
+    focusedThreadId = t.id;
+    scrollIfOffscreen(t.el);
+  }
+
+  function scrollIfOffscreen(el) {
+    // Only re-center when the thread isn't already fully visible. The sticky
+    // header occludes the top of the viewport, so we treat anything under it
+    // as offscreen.
+    const r = el.getBoundingClientRect();
+    const header = document.querySelector("header");
+    const headerH = header ? header.getBoundingClientRect().height : 0;
+    if (r.top >= headerH && r.bottom <= window.innerHeight) return;
+    el.scrollIntoView({ behavior: "instant", block: "center" });
+  }
+
+  function indexOfFocused(threads) {
+    if (!focusedThreadId) return -1;
+    for (let i = 0; i < threads.length; i++) {
+      if (threads[i].id === focusedThreadId) return i;
+    }
+    return -1;
+  }
+
+  function indexNearViewport(threads, direction) {
+    // Used when there's no focused thread (first press, or focus was deleted).
+    // "next" → first thread starting at or below the viewport top so a
+    // mid-page user moves to the comment they're already looking at.
+    // "prev" → last thread ending at or above the viewport bottom.
+    const vh = window.innerHeight;
+    if (direction === "next") {
+      for (let i = 0; i < threads.length; i++) {
+        if (threads[i].el.getBoundingClientRect().top >= 0) return i;
+      }
+      return threads.length - 1;
+    }
+    for (let i = threads.length - 1; i >= 0; i--) {
+      if (threads[i].el.getBoundingClientRect().bottom <= vh) return i;
+    }
+    return 0;
+  }
+
+  function navigateThread(direction) {
+    const threads = getOrderedThreads();
+    if (!threads.length) return;
+    const cur = indexOfFocused(threads);
+    let next;
+    if (cur < 0) {
+      next = indexNearViewport(threads, direction);
+    } else if (direction === "next") {
+      if (cur >= threads.length - 1) return;
+      next = cur + 1;
+    } else {
+      if (cur <= 0) return;
+      next = cur - 1;
+    }
+    focusThread(threads[next]);
+  }
+
+  function navigateFile(direction) {
+    const threads = getOrderedThreads();
+    if (!threads.length) return;
+    const groups = groupThreadsByFile(threads);
+    let curGroup = -1;
+    if (focusedThreadId) {
+      for (let g = 0; g < groups.length; g++) {
+        if (groups[g].some((t) => t.id === focusedThreadId)) { curGroup = g; break; }
+      }
+    }
+    let target;
+    if (curGroup < 0) {
+      target = direction === "next"
+        ? groups[0][0]
+        : groups[groups.length - 1].slice(-1)[0];
+    } else if (direction === "next") {
+      if (curGroup >= groups.length - 1) return;
+      target = groups[curGroup + 1][0];
+    } else {
+      if (curGroup <= 0) return;
+      target = groups[curGroup - 1].slice(-1)[0];
+    }
+    focusThread(target);
+  }
+
+  function centerFocused() {
+    if (!focusedThreadId) return;
+    const el = document.querySelector(
+      `.thread[data-thread-id="${cssEsc(focusedThreadId)}"]`
+    );
+    if (el) el.scrollIntoView({ behavior: "instant", block: "center" });
+  }
+
+  function pageScroll(direction) {
+    // Subtract the sticky-header height so a couple of lines from the
+    // previous viewport remain visible after the jump.
+    const header = document.querySelector("header");
+    const headerH = header ? header.getBoundingClientRect().height : 0;
+    const delta = Math.max(window.innerHeight - headerH, 100);
+    window.scrollBy({
+      top: direction === "down" ? delta : -delta,
+      behavior: "instant",
+    });
+  }
+
+  function isTyping() {
+    const a = document.activeElement;
+    if (!a) return false;
+    return a.matches('textarea, input, select, [contenteditable="true"]');
+  }
+
+  // --- Prefix-key bindings for transformative actions ---
+  // Press PREFIX_KEY (default: space), then a sequence. Pending state is shown
+  // in a floating indicator and resets after PREFIX_TIMEOUT_MS of inactivity
+  // or on Escape. Actions reuse existing DOM buttons via .click() so all the
+  // API + confirm() flow stays in one place.
+  const PREFIX_KEY = " ";
+  const PREFIX_TIMEOUT_MS = 2000;
+
+  function focusedThreadEl() {
+    if (!focusedThreadId) return null;
+    return document.querySelector(
+      `.thread[data-thread-id="${cssEsc(focusedThreadId)}"]`
+    );
+  }
+
+  function clickInFocused(selector) {
+    const t = focusedThreadEl();
+    if (!t) return false;
+    const btn = t.querySelector(selector);
+    if (!btn || btn.disabled) return false;
+    btn.click();
+    return true;
+  }
+
+  function clickById(id) {
+    const btn = document.getElementById(id);
+    if (!btn || btn.disabled) return false;
+    btn.click();
+    return true;
+  }
+
+  function flashToast(msg, ms = 2500) {
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), ms);
+  }
+
+  async function ghFetch() {
+    let r;
+    try {
+      r = await api("POST", "/api/gh/pull");
+    } catch (e) {
+      alert("Fetch from GitHub failed: " + e.message);
+      return;
+    }
+    flashToast(r.summary || "Pulled.");
+    refreshComments();
+  }
+
+  const KEYMAP = {
+    r: { label: "reply",
+         run: () => clickInFocused('.thread-actions [data-reply-to]') },
+    e: { label: "edit",
+         run: () => clickInFocused(':scope > .comment:not(.reply) [data-edit]') },
+    R: { label: "toggle resolved",
+         run: () => clickInFocused(
+           '.thread-actions [data-resolve], .thread-actions [data-unresolve]'
+         ) },
+    D: { label: "delete",
+         run: () => clickInFocused(':scope > .comment:not(.reply) [data-delete]') },
+    a: { label: "add global comment",
+         run: () => clickById("add-global-btn") },
+    g: { label: "github…", submap: {
+           f: { label: "fetch from GitHub", run: ghFetch },
+           p: { label: "push", run: () => clickById("gh-push-btn") },
+         } },
+  };
+
+  let pendingMap = null;
+  let pendingPath = [];
+  let pendingTimer = null;
+
+  function getOrCreatePendingIndicator() {
+    let el = document.getElementById("kbd-pending");
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = "kbd-pending";
+    el.className = "kbd-pending";
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function renderPendingIndicator() {
+    const el = getOrCreatePendingIndicator();
+    if (!pendingMap) {
+      el.classList.remove("active");
+      return;
+    }
+    const seq = ["␣", ...pendingPath].join(" ");
+    el.textContent = seq + " …";
+    el.classList.add("active");
+  }
+
+  function resetPending() {
+    pendingMap = null;
+    pendingPath = [];
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    renderPendingIndicator();
+  }
+
+  function bumpPendingTimer() {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(resetPending, PREFIX_TIMEOUT_MS);
+  }
+
+  function startPending() {
+    pendingMap = KEYMAP;
+    pendingPath = [];
+    bumpPendingTimer();
+    renderPendingIndicator();
+  }
+
+  function handlePending(key) {
+    const entry = pendingMap[key];
+    if (!entry) { resetPending(); return; }
+    if (entry.submap) {
+      pendingMap = entry.submap;
+      pendingPath.push(key);
+      bumpPendingTimer();
+      renderPendingIndicator();
+      return;
+    }
+    try { entry.run(); }
+    finally { resetPending(); }
+  }
+
+  // Esc / Ctrl+Enter / Cmd+Enter inside an open composer (new comment /
+  // reply / edit) cancel and submit, respectively. Plain Enter still inserts
+  // a newline so it never blocks typing. Same convention as GitHub, Slack,
+  // JIRA, etc. Runs as its own listener so the navigation handler's isTyping
+  // skip doesn't swallow them — the user is in a textarea precisely because
+  // the form is open.
+  function findComposer(target) {
+    return target && target.closest && target.closest(".new-comment, .edit-form");
+  }
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      const composer = findComposer(document.activeElement);
+      if (!composer) return;
+      const cancel = composer.querySelector(".cancel");
+      if (!cancel) return;
+      ev.preventDefault();
+      cancel.click();
+      return;
+    }
+    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+      const composer = findComposer(document.activeElement);
+      if (!composer) return;
+      const submit = composer.querySelector(".submit, button[type='submit']");
+      if (!submit || submit.disabled) return;
+      ev.preventDefault();
+      submit.click();
+      return;
+    }
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    if (isTyping()) return;
+    if (ghModal && !ghModal.hidden) return;
+
+    if (pendingMap) {
+      if (ev.key === "Escape") { ev.preventDefault(); resetPending(); return; }
+      // Modifier keys (Shift/Ctrl/Alt/Meta/CapsLock) fire their own keydown
+      // before the chorded key. Ignore them so e.g. pressing Shift+D doesn't
+      // reset on the Shift event and miss the D event entirely.
+      if (ev.key === "Shift" || ev.key === "Control" || ev.key === "Alt"
+          || ev.key === "Meta" || ev.key === "CapsLock") return;
+      ev.preventDefault();
+      handlePending(ev.key);
+      return;
+    }
+
+    if (ev.key === PREFIX_KEY) {
+      ev.preventDefault();
+      startPending();
+      return;
+    }
+
+    switch (ev.key) {
+      case "n": ev.preventDefault(); navigateThread("next"); break;
+      case "p": ev.preventDefault(); navigateThread("prev"); break;
+      case "N": ev.preventDefault(); navigateFile("next"); break;
+      case "P": ev.preventDefault(); navigateFile("prev"); break;
+      case "d": ev.preventDefault(); pageScroll("down"); break;
+      case "u": ev.preventDefault(); pageScroll("up"); break;
+      case "z": ev.preventDefault(); centerFocused(); break;
+    }
+  });
 })();

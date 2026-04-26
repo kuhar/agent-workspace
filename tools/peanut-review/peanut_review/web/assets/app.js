@@ -1346,6 +1346,7 @@
 
   let pendingMap = null;
   let pendingPath = [];
+  let pendingPrefixLabel = "␣";
   let pendingTimer = null;
 
   function getOrCreatePendingIndicator() {
@@ -1364,7 +1365,7 @@
       el.classList.remove("active");
       return;
     }
-    const seq = ["␣", ...pendingPath].join(" ");
+    const seq = [pendingPrefixLabel, ...pendingPath].join(" ");
     el.textContent = seq + " …";
     el.classList.add("active");
   }
@@ -1372,6 +1373,7 @@
   function resetPending() {
     pendingMap = null;
     pendingPath = [];
+    pendingPrefixLabel = "␣";
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
     renderPendingIndicator();
   }
@@ -1384,8 +1386,40 @@
   function startPending() {
     pendingMap = KEYMAP;
     pendingPath = [];
+    pendingPrefixLabel = "␣";
     bumpPendingTimer();
     renderPendingIndicator();
+  }
+
+  // Composer-scoped chord (severity + insert-suggestion). Captures the
+  // composer in closure so a mid-chord focus change doesn't retarget.
+  function startPendingComposerActions(composer) {
+    const sev = composer.querySelector(".sev");
+    const suggest = composer.querySelector(".suggest");
+    const setSeverity = (value, label) => {
+      if (!sev) return;
+      sev.value = value;
+      flashToast(`severity → ${label}`, 1200);
+    };
+    const map = {};
+    if (sev) {
+      map.c = { label: "critical", run: () => setSeverity("critical", "critical") };
+      map.w = { label: "warning",  run: () => setSeverity("warning", "warning") };
+      map.s = { label: "suggestion", run: () => setSeverity("suggestion", "suggestion") };
+      map.n = { label: "nit",      run: () => setSeverity("nit", "nit") };
+      map.f = { label: "feedback", run: () => setSeverity("feedback", "feedback") };
+    }
+    if (suggest) {
+      map.i = { label: "insert suggestion", run: () => suggest.click() };
+    }
+    pendingMap = map;
+    pendingPath = [];
+    pendingPrefixLabel = "⌃␣";
+    bumpPendingTimer();
+    renderPendingIndicator();
+    // Keep textarea focus so the user can keep typing after the chord.
+    const ta = composer.querySelector("textarea");
+    if (ta) ta.focus();
   }
 
   function handlePending(key) {
@@ -1402,19 +1436,35 @@
     finally { resetPending(); }
   }
 
-  // Esc / Ctrl+Enter / Cmd+Enter inside an open composer (new comment /
-  // reply / edit) cancel and submit, respectively. Plain Enter still inserts
-  // a newline so it never blocks typing. Same convention as GitHub, Slack,
-  // JIRA, etc. Runs as its own listener so the navigation handler's isTyping
-  // skip doesn't swallow them — the user is in a textarea precisely because
-  // the form is open.
   function findComposer(target) {
     return target && target.closest && target.closest(".new-comment, .edit-form");
   }
+
+  // Pending-chord interception runs FIRST so it works even while typing in
+  // a textarea (the composer chord is opened from inside one).
   document.addEventListener("keydown", (ev) => {
+    if (!pendingMap) return;
+    if (ev.key === "Escape") { ev.preventDefault(); resetPending(); return; }
+    // Modifier keys (Shift/Ctrl/Alt/Meta/CapsLock) fire their own keydown
+    // before the chorded key. Ignore them so e.g. pressing Shift+D doesn't
+    // reset on the Shift event and miss the D event entirely.
+    if (ev.key === "Shift" || ev.key === "Control" || ev.key === "Alt"
+        || ev.key === "Meta" || ev.key === "CapsLock") return;
+    ev.preventDefault();
+    handlePending(ev.key);
+  });
+
+  // Esc / Ctrl+Enter / Cmd+Enter inside an open composer (new comment /
+  // reply / edit) cancel and submit, respectively. Plain Enter still inserts
+  // a newline so it never blocks typing. Same convention as GitHub, Slack,
+  // JIRA, etc. Also handles Ctrl+Space / Alt+s as a composer-scoped chord
+  // entry (severity + insert-suggestion).
+  document.addEventListener("keydown", (ev) => {
+    if (pendingMap) return;  // hoisted handler took it
+    const composer = findComposer(document.activeElement);
+    if (!composer) return;
+
     if (ev.key === "Escape") {
-      const composer = findComposer(document.activeElement);
-      if (!composer) return;
       const cancel = composer.querySelector(".cancel");
       if (!cancel) return;
       ev.preventDefault();
@@ -1422,32 +1472,30 @@
       return;
     }
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-      const composer = findComposer(document.activeElement);
-      if (!composer) return;
       const submit = composer.querySelector(".submit, button[type='submit']");
       if (!submit || submit.disabled) return;
       ev.preventDefault();
       submit.click();
       return;
     }
+    // Ctrl+Space (primary) or Alt+s (fallback for IMEs that grab Ctrl+Space)
+    // open the composer-actions chord. Only opens if there's something
+    // chord-worthy in this composer (.sev select or .suggest button).
+    const isCtrlSpace = (ev.ctrlKey || ev.metaKey)
+      && !ev.altKey && !ev.shiftKey && ev.key === " ";
+    const isAltS = ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.key === "s";
+    if (isCtrlSpace || isAltS) {
+      if (!composer.querySelector(".sev") && !composer.querySelector(".suggest")) return;
+      ev.preventDefault();
+      startPendingComposerActions(composer);
+    }
   });
 
   document.addEventListener("keydown", (ev) => {
+    if (pendingMap) return;  // hoisted handler took it
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (isTyping()) return;
     if (ghModal && !ghModal.hidden) return;
-
-    if (pendingMap) {
-      if (ev.key === "Escape") { ev.preventDefault(); resetPending(); return; }
-      // Modifier keys (Shift/Ctrl/Alt/Meta/CapsLock) fire their own keydown
-      // before the chorded key. Ignore them so e.g. pressing Shift+D doesn't
-      // reset on the Shift event and miss the D event entirely.
-      if (ev.key === "Shift" || ev.key === "Control" || ev.key === "Alt"
-          || ev.key === "Meta" || ev.key === "CapsLock") return;
-      ev.preventDefault();
-      handlePending(ev.key);
-      return;
-    }
 
     if (ev.key === PREFIX_KEY) {
       ev.preventDefault();

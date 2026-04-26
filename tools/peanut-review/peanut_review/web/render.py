@@ -489,6 +489,11 @@ def _render_sidebar(
         '<span class="desc">post / save</span></li>'
         '<li><span class="keys"><kbd>Esc</kbd></span>'
         '<span class="desc">cancel</span></li>'
+        '<li><span class="keys"><kbd class="prefix">⌃␣</kbd>'
+        '<kbd>c</kbd><kbd>w</kbd><kbd>s</kbd><kbd>n</kbd><kbd>f</kbd></span>'
+        '<span class="desc">set severity</span></li>'
+        '<li><span class="keys"><kbd class="prefix">⌃␣</kbd><kbd>i</kbd></span>'
+        '<span class="desc">insert suggestion (inline only)</span></li>'
         '</ul>'
         '</aside>'
     )

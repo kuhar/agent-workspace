@@ -1327,6 +1327,22 @@
     refreshComments();
   }
 
+  // Soft line-wrap toggle. Persisted in localStorage so the choice
+  // survives reloads. CSS does the actual wrapping (`body.wrap-lines`).
+  const WRAP_KEY = "pr.wrap-lines";
+  function applyWrapPreference() {
+    document.body.classList.toggle(
+      "wrap-lines", localStorage.getItem(WRAP_KEY) === "1"
+    );
+  }
+  function toggleWrap() {
+    const next = !document.body.classList.contains("wrap-lines");
+    document.body.classList.toggle("wrap-lines", next);
+    localStorage.setItem(WRAP_KEY, next ? "1" : "0");
+    flashToast(`line wrap: ${next ? "on" : "off"}`, 1200);
+  }
+  applyWrapPreference();
+
   const KEYMAP = {
     r: { label: "reply",
          run: () => clickInFocused('.thread-actions [data-reply-to]') },
@@ -1513,6 +1529,7 @@
       case "d": ev.preventDefault(); pageScroll("down"); break;
       case "u": ev.preventDefault(); pageScroll("up"); break;
       case "z": ev.preventDefault(); centerFocused(); break;
+      case "w": ev.preventDefault(); toggleWrap(); break;
     }
   });
 })();

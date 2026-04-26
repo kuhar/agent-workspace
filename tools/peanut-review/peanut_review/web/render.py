@@ -471,6 +471,8 @@ def _render_sidebar(
         '<span class="desc">page down / up</span></li>'
         '<li><span class="keys"><kbd>z</kbd></span>'
         '<span class="desc">center focused</span></li>'
+        '<li><span class="keys"><kbd>w</kbd></span>'
+        '<span class="desc">toggle line wrap</span></li>'
         '</ul>'
         '<h3>Actions</h3>'
         '<ul class="shortcuts">'

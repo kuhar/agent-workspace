@@ -217,6 +217,10 @@ main {
   display: grid;
   grid-template-columns: 50px 50px 1fr;
   font-size: 12.5px;
+  /* Single horizontal scrollbar at the file level — long lines stretch
+   * the third column, and the parent here scrolls, instead of every
+   * `.line .content` getting its own scrollbar. */
+  overflow-x: auto;
 }
 .line {
   display: contents;
@@ -235,7 +239,14 @@ main {
 .line .content {
   padding: 0 12px;
   white-space: pre;
-  overflow-x: auto;
+}
+/* Soft wrap toggle (`␣ w`). When on, long lines wrap inside the content
+ * column instead of forcing horizontal scroll. `overflow-wrap: anywhere`
+ * handles unbroken tokens (URLs, base64) that `word-break` alone would
+ * keep one piece. */
+body.wrap-lines .line .content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .line.added .content { background: var(--added-bg); }
 .line.deleted .content { background: var(--deleted-bg); }

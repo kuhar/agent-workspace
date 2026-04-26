@@ -365,6 +365,12 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   color: var(--muted);
   border: 1px solid var(--border);
 }
+.new-comment button.suggest {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
 
 #sidebar {
   position: fixed;

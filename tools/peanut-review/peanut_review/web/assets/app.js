@@ -135,6 +135,7 @@
       <textarea placeholder="Review comment for ${esc(label)}..."></textarea>
       <div class="controls">
         <button class="cancel">Cancel</button>
+        <button class="suggest" title="Insert a code suggestion block for the selected lines">Suggest change</button>
         <select class="sev">
           <option value="suggestion">suggestion</option>
           <option value="warning">warning</option>
@@ -145,7 +146,13 @@
       </div>
     `;
     thread.appendChild(form);
-    form.querySelector("textarea").focus();
+    const ta = form.querySelector("textarea");
+    ta.focus();
+
+    form.querySelector(".suggest").onclick = () => {
+      insertSuggestionBlock(ta, file, lo, hi);
+      form.querySelector(".sev").value = "suggestion";
+    };
 
     const cleanup = () => clearRangeHighlight(highlighted);
     const removeFormAndEmptyThread = () => {
@@ -242,6 +249,32 @@
   function clearRangeHighlight(els) {
     if (!els) return;
     for (const el of els) el.classList.remove("range-selected");
+  }
+
+  // Build a GitHub-compatible ```suggestion block from the new-side text of
+  // [lo, hi] in `file`. Deleted lines must be excluded — a suggestion
+  // replaces the *current* state of the file, and on GitHub that's the new
+  // (right) side of the diff. lineElsBetween can pick up deleted rows by
+  // coincidental old_lineno overlap (render.py sets data-line=old_lineno on
+  // the new-gutter cell of deleted rows), so filter them here.
+  function insertSuggestionBlock(ta, file, lo, hi) {
+    const els = lineElsBetween(file, lo, hi).filter(
+      (el) => !el.classList.contains("deleted")
+    );
+    const lines = els.map((el) => {
+      const c = el.querySelector(".content");
+      return c ? c.textContent : "";
+    });
+    const block = "```suggestion\n" + lines.join("\n") + "\n```";
+    const cur = ta.value;
+    const sep = cur ? (cur.endsWith("\n") ? "\n" : "\n\n") : "";
+    const insertAt = cur.length + sep.length;
+    ta.value = cur + sep + block;
+    // Select the suggested lines so the user can immediately edit/replace them.
+    const contentStart = insertAt + "```suggestion\n".length;
+    const contentEnd = contentStart + lines.join("\n").length;
+    ta.focus();
+    ta.setSelectionRange(contentStart, contentEnd);
   }
 
   function lnInfo(target) {

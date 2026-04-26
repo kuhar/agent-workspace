@@ -17,9 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import polling, store
+from .. import gh_push, polling, store
 from ..models import Comment, Severity
 from ..session import (
+    GLOBAL_FILE,
     load_session,
     refresh_agent_statuses,
     save_session,
@@ -288,6 +289,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "critical_count": sum(1 for c in live if c.severity == "critical"),
                 "deleted_count": len(comments) - len(live),
                 "head_shifted": shifted,
+                # Only meaningful for gh-backed sessions; null otherwise so
+                # the client can decide whether to show the pending row.
+                "pending_push": (
+                    gh_push.plan_push(comments).total
+                    if session.github is not None else None
+                ),
             }
             self._json(200, payload)
             return
@@ -309,6 +316,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         if tail == "/api/inbox":
             self._json(200, polling.list_transcript(session_dir))
+            return
+
+        if tail == "/api/gh/preview":
+            self._get_gh_preview(session_dir)
             return
 
         self._error(404, f"no route for {tail}")
@@ -347,6 +358,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if tail == "/api/undelete":
             self._post_undelete(session_dir, data)
+            return
+        if tail == "/api/gh/push":
+            self._post_gh_push(session_dir)
             return
         self._error(404, f"no route for {tail}")
 
@@ -476,6 +490,87 @@ class _Handler(BaseHTTPRequestHandler):
         if not store.undelete_comment(session_dir, cid):
             return self._error(404, f"comment not found: {cid}")
         self._json(200, {"undeleted": cid})
+
+    def _get_gh_preview(self, session_dir: Path) -> None:
+        """What `gh-push` would do, in JSON form, for the modal preview."""
+        s = load_session(session_dir)
+        if s.github is None:
+            return self._error(400, "session is not GitHub-backed")
+        comments = store.read_all_comments(session_dir)
+        plan = gh_push.plan_push(comments)
+        by_id = {c.id: c for c in comments}
+
+        def _ref(c: Comment) -> str:
+            if c.file == GLOBAL_FILE:
+                return "global"
+            return f"{c.file}:{c.line}"
+
+        new_top = [{
+            "id": c.id, "author": c.author, "severity": c.severity,
+            "ref": _ref(c), "body": c.body,
+        } for c in plan.new_top]
+        new_replies = []
+        for c in plan.new_replies:
+            parent = by_id.get(c.reply_to or "")
+            parent_ext = plan.ext_map.get(c.reply_to or "")
+            new_replies.append({
+                "id": c.id, "author": c.author,
+                "ref": _ref(parent) if parent else "?",
+                "parent_id": c.reply_to,
+                "parent_external_id": parent_ext,
+                "orphaned": parent_ext is None,
+                "body": c.body,
+            })
+        edits = [{
+            "id": c.id, "author": c.author, "severity": c.severity,
+            "ref": _ref(c),
+            "external_id": c.external_id,
+            "external_url": c.external_url,
+            "old_body": c.external_synced_body or "",
+            "new_body": c.body,
+        } for c in plan.edits]
+
+        self._json(200, {
+            "repo": s.github.repo,
+            "number": s.github.number,
+            "url": s.github.url,
+            "new_top": new_top,
+            "new_replies": new_replies,
+            "edits": edits,
+            "skipped_meta": plan.skipped_meta,
+            "total": plan.total,
+        })
+
+    def _post_gh_push(self, session_dir: Path) -> None:
+        """Execute the push. Re-plans server-side from current store so the
+        result reflects the actual state at confirmation time, not the
+        snapshot the modal showed."""
+        s = load_session(session_dir)
+        if s.github is None:
+            return self._error(400, "session is not GitHub-backed")
+        comments = store.read_all_comments(session_dir)
+        plan = gh_push.plan_push(comments)
+        if plan.total == 0:
+            return self._json(200, {
+                "pushed": 0, "failed": 0, "orphaned": 0,
+                "skipped_meta": plan.skipped_meta, "items": [],
+                "summary": "Nothing to push.",
+            })
+        result = gh_push.execute_push(session_dir, s, s.github, plan)
+        self._json(200, {
+            "pushed": result.pushed,
+            "failed": result.failed,
+            "orphaned": result.orphaned,
+            "skipped_meta": result.skipped_meta,
+            "items": [
+                {"id": i.id, "action": i.action,
+                 "external_id": i.external_id,
+                 "external_url": i.external_url,
+                 "error": i.error}
+                for i in result.items
+            ],
+            "summary": result.summary(),
+        })
 
 
 def _comment_to_dict(c: Comment) -> dict:

@@ -673,6 +673,9 @@
       if (!c.resolved) open.set(c.file, (open.get(c.file) || 0) + 1);
     }
     for (const li of document.querySelectorAll('#sidebar ul.files li.file-row')) {
+      // The inbox-row also lives in this list but its counts are owned by
+      // refreshInbox — don't clobber them with comment-count data.
+      if (li.dataset.inbox) continue;
       const cell = li.querySelector('[data-counts]');
       if (!cell) continue;
       if (li.dataset.global) {
@@ -805,6 +808,23 @@
     return entry.reply ? 1 : 0;
   }
 
+  function updateInboxCounts(fetched) {
+    const el = document.getElementById("inbox-counts");
+    if (!el) return;
+    const total = fetched.length;
+    const pending = fetched.reduce((n, e) => n + (e.reply ? 0 : 1), 0);
+    let html;
+    if (pending > 0) {
+      html = `<span class="count open">${pending}</span>`
+           + `<span class="count muted">/${total}</span>`;
+    } else if (total > 0) {
+      html = `<span class="count muted">${total}</span>`;
+    } else {
+      html = '<span class="count empty">—</span>';
+    }
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
   async function refreshInbox() {
     const list = document.getElementById("inbox-list");
     if (!list) return;
@@ -814,6 +834,7 @@
       if (!r.ok) return;
       fetched = await r.json();
     } catch { return; }
+    updateInboxCounts(fetched);
 
     // Snapshot current DOM state keyed by qid + reply-flag so we can detect:
     //   - new entries (insert)
@@ -871,11 +892,201 @@
       set("state", s.state);
       set("head", (s.current_head || "").slice(0, 12));
       set("stale_comments", s.stale_count);
+      updatePushButton(s.pending_push);
       if (s.head_shifted) {
         const h = document.querySelector("header .badge.head");
         if (h) { h.textContent = "HEAD shifted"; h.style.background = "#5d4a2a"; }
       }
     } catch { /* ignore */ }
   }
-  setInterval(refreshSidebar, 15000);
+  // Faster than the original 15s so the push button reflects local edits
+  // soon after they happen — `pending_push` is the main reason to poll.
+  setInterval(refreshSidebar, 5000);
+
+  function updatePushButton(pending) {
+    if (!ghPushBtn) return;
+    if (pending == null) return;  // non-gh session: leave hidden
+    const n = Number(pending) || 0;
+    ghPushBtn.dataset.pending = String(n);
+    ghPushBtn.textContent = `Push to GitHub (${n} pending)`;
+    ghPushBtn.disabled = n === 0;
+    ghPushBtn.classList.toggle("has-pending", n > 0);
+  }
+
+  // --- GitHub push modal ---
+  const ghModal = document.getElementById("gh-push-modal");
+  const ghBody = document.getElementById("gh-push-body");
+  const ghConfirm = document.getElementById("gh-push-confirm");
+  const ghPushBtn = document.getElementById("gh-push-btn");
+
+  function openGhModal() {
+    if (!ghModal) return;
+    ghModal.hidden = false;
+    ghBody.textContent = "Loading…";
+    ghConfirm.disabled = true;
+    ghConfirm.textContent = "Confirm push";
+    ghConfirm.classList.remove("danger");
+    ghConfirm.dataset.mode = "confirm";
+    document.body.classList.add("modal-open");
+    fetchGhPreview();
+  }
+
+  function closeGhModal() {
+    if (!ghModal) return;
+    ghModal.hidden = true;
+    document.body.classList.remove("modal-open");
+  }
+
+  function bodyPreview(text) {
+    const t = (text || "").trim();
+    if (t.length <= 240) return esc(t);
+    return esc(t.slice(0, 240)) + "<span class=\"muted\">…</span>";
+  }
+
+  function renderPlanList(title, items, renderItem) {
+    if (!items.length) return "";
+    return `<section class="push-group">`
+      + `<h3>${esc(title)} <span class="count">${items.length}</span></h3>`
+      + `<ul class="push-list">${items.map(renderItem).join("")}</ul>`
+      + `</section>`;
+  }
+
+  function renderNewItem(it) {
+    return `<li class="push-item" data-id="${esc(it.id)}">`
+      + `<div class="push-meta">`
+      +   `<span class="mono">${esc(it.id)}</span>`
+      +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
+      +   `<span class="ref mono">${esc(it.ref)}</span>`
+      +   `<span class="muted">by ${esc(it.author || "unknown")}</span>`
+      + `</div>`
+      + `<pre class="push-body">${bodyPreview(it.body)}</pre>`
+      + `</li>`;
+  }
+  function renderReplyItem(it) {
+    const tag = it.orphaned
+      ? `<span class="warn">orphaned (parent not pushed)</span>`
+      : `<span class="muted">→ gh#${esc(it.parent_external_id)}</span>`;
+    const cls = it.orphaned ? "push-item orphaned" : "push-item";
+    return `<li class="${cls}" data-id="${esc(it.id)}">`
+      + `<div class="push-meta">`
+      +   `<span class="mono">${esc(it.id)}</span>`
+      +   `<span class="ref mono">${esc(it.ref)}</span>`
+      +   tag
+      +   `<span class="muted">by ${esc(it.author || "unknown")}</span>`
+      + `</div>`
+      + `<pre class="push-body">${bodyPreview(it.body)}</pre>`
+      + `</li>`;
+  }
+  function renderEditItem(it) {
+    return `<li class="push-item" data-id="${esc(it.id)}">`
+      + `<div class="push-meta">`
+      +   `<span class="mono">${esc(it.id)}</span>`
+      +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
+      +   `<span class="ref mono">${esc(it.ref)}</span>`
+      +   `<span class="muted">→ gh#${esc(it.external_id)}</span>`
+      + `</div>`
+      + `<div class="push-edit-cmp">`
+      +   `<pre class="push-body old"><span class="muted">old:</span> ${bodyPreview(it.old_body)}</pre>`
+      +   `<pre class="push-body new"><span class="muted">new:</span> ${bodyPreview(it.new_body)}</pre>`
+      + `</div>`
+      + `</li>`;
+  }
+
+  async function fetchGhPreview() {
+    let plan;
+    try {
+      plan = await api("GET", "/api/gh/preview");
+    } catch (e) {
+      ghBody.innerHTML = `<p class="error">Failed to load plan: ${esc(String(e))}</p>`;
+      return;
+    }
+    const total = plan.total || 0;
+    const orphans = (plan.new_replies || []).filter((r) => r.orphaned).length;
+    const pushable = total - orphans;
+    let html = `<p class="push-summary">`
+      + `Repo <span class="mono">${esc(plan.repo)}</span> · `
+      + `PR <a href="${esc(plan.url)}" target="_blank" rel="noopener" class="mono">#${plan.number}</a></p>`;
+    if (total === 0) {
+      html += `<p class="muted">Nothing to push.`
+        + (plan.skipped_meta ? ` (${plan.skipped_meta} __meta__ comment${plan.skipped_meta === 1 ? "" : "s"} skipped)` : "")
+        + `</p>`;
+    } else {
+      html += renderPlanList("New comments", plan.new_top, renderNewItem);
+      html += renderPlanList("New replies", plan.new_replies, renderReplyItem);
+      html += renderPlanList("Edits (PATCH)", plan.edits, renderEditItem);
+      if (plan.skipped_meta) {
+        html += `<p class="muted">Skipping ${plan.skipped_meta} __meta__ comment${plan.skipped_meta === 1 ? "" : "s"} (no GitHub equivalent).</p>`;
+      }
+      if (orphans) {
+        html += `<p class="warn">${orphans} repl${orphans === 1 ? "y is" : "ies are"} orphaned and will be skipped.</p>`;
+      }
+    }
+    ghBody.innerHTML = html;
+    if (pushable > 0) {
+      ghConfirm.disabled = false;
+      ghConfirm.textContent = `Confirm: push ${pushable} comment${pushable === 1 ? "" : "s"}`;
+    } else {
+      ghConfirm.disabled = true;
+      ghConfirm.textContent = "Nothing to push";
+    }
+  }
+
+  function renderResultItem(it) {
+    if (it.error) {
+      return `<li class="push-result failed">`
+        + `<span class="mono">${esc(it.id)}</span> `
+        + `<span class="action">${esc(it.action)}</span> `
+        + `<span class="error">FAILED: ${esc(it.error)}</span></li>`;
+    }
+    const ext = it.external_url
+      ? `<a href="${esc(it.external_url)}" target="_blank" rel="noopener" class="mono">gh#${esc(it.external_id)}</a>`
+      : `<span class="mono">gh#${esc(it.external_id || "?")}</span>`;
+    return `<li class="push-result ok">`
+      + `<span class="mono">${esc(it.id)}</span> `
+      + `<span class="action">${esc(it.action)}</span> → ${ext}</li>`;
+  }
+
+  async function confirmGhPush() {
+    ghConfirm.disabled = true;
+    ghConfirm.textContent = "Pushing…";
+    let res;
+    try {
+      res = await api("POST", "/api/gh/push");
+    } catch (e) {
+      ghBody.innerHTML = `<p class="error">Push failed: ${esc(String(e))}</p>`;
+      ghConfirm.disabled = false;
+      ghConfirm.textContent = "Retry push";
+      return;
+    }
+    let html = `<p class="push-summary">${esc(res.summary || "")}</p>`;
+    if ((res.items || []).length) {
+      html += `<ul class="push-results">${res.items.map(renderResultItem).join("")}</ul>`;
+    }
+    ghBody.innerHTML = html;
+    ghConfirm.textContent = "Done";
+    ghConfirm.disabled = false;
+    ghConfirm.dataset.mode = "done";
+  }
+
+  if (ghPushBtn) {
+    ghPushBtn.addEventListener("click", openGhModal);
+  }
+  if (ghModal) {
+    ghModal.addEventListener("click", (ev) => {
+      if (ev.target.matches("[data-modal-close]")) closeGhModal();
+    });
+    ghConfirm.addEventListener("click", () => {
+      if (ghConfirm.dataset.mode === "done") {
+        closeGhModal();
+        // After a push, comment external_id/url may have changed. Easiest
+        // way to reflect that without partial-update wrangling is a reload.
+        location.reload();
+      } else {
+        confirmGhPush();
+      }
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (!ghModal.hidden && ev.key === "Escape") closeGhModal();
+    });
+  }
 })();

@@ -344,7 +344,10 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
 
 
 def _render_sidebar(
-    session: Session, comments: list[Comment], files: list[FileDiff]
+    session: Session,
+    comments: list[Comment],
+    files: list[FileDiff],
+    inbox_transcript: list[dict] | None = None,
 ) -> str:
     # Sidebar counters reflect what's visible (deleted hidden), with a
     # separate "deleted" row so the audit count is still discoverable.
@@ -407,10 +410,38 @@ def _render_sidebar(
                          per_file_total.get(fd.path, 0))
         for fd in files
     ) or '<li class="muted">(no files)</li>'
+
+    # Inbox jump row: same shape as global-row so it shares the file-row
+    # layout/CSS. Pending = unanswered agent questions; total = all entries.
+    transcript = inbox_transcript or []
+    inbox_total = len(transcript)
+    inbox_pending = sum(1 for e in transcript if not e.get("reply"))
+    if inbox_pending > 0:
+        inbox_counts_html = (
+            f'<span class="count open">{inbox_pending}</span>'
+            f'<span class="count muted">/{inbox_total}</span>'
+        )
+    elif inbox_total > 0:
+        inbox_counts_html = f'<span class="count muted">{inbox_total}</span>'
+    else:
+        inbox_counts_html = '<span class="count empty">—</span>'
+    inbox_row = (
+        '<li class="file-row inbox-row" data-inbox="1" '
+        'title="Jump to agent help inbox">'
+        '<a href="#inbox" class="path-link">'
+        '<div class="top-row">'
+        '<span class="status s-I">I</span>'
+        '<span class="name">Agent inbox</span>'
+        f'<span class="counts" id="inbox-counts" data-counts>{inbox_counts_html}</span>'
+        '</div>'
+        '</a>'
+        '</li>'
+    )
+
     return (
         '<aside id="sidebar">'
         f'<h3>Files ({len(files)})</h3>'
-        f'<ul class="files">{global_row}{file_rows}</ul>'
+        f'<ul class="files">{global_row}{file_rows}{inbox_row}</ul>'
         '<h3>Session</h3>'
         '<ul>'
         f'<li data-k="state"><span>state</span><span class="v">{html.escape(session.state)}</span></li>'
@@ -590,16 +621,50 @@ def render_page(
     have to pass it.
     """
     threads_at = _group_threads_by_anchor(comments)
+    transcript = inbox_transcript or []
     file_html = "".join(_render_file(fd, threads_at) for fd in files)
     global_html = _render_global_section(comments)
-    inbox_html = render_inbox_section(inbox_transcript or [])
-    sidebar = _render_sidebar(session, comments, files)
+    inbox_html = render_inbox_section(transcript)
+    sidebar = _render_sidebar(session, comments, files, inbox_transcript=transcript)
 
     head_badge = (
         '<span class="badge head head-shifted">HEAD shifted</span>'
         if head_shifted else '<span class="badge head"></span>'
     )
     state_class = f"state-{session.state}"
+
+    # Full PR URL + push button in the header for gh-backed sessions. URL is
+    # rendered verbatim (no truncation) so triple-click → copy works. The
+    # button label carries the pending-push count so unfinalized local
+    # comments are obvious; disabled when zero.
+    if session.github and session.github.url:
+        from .. import gh_push as _gh_push
+        pending = _gh_push.plan_push(comments).total
+        gh_url = html.escape(session.github.url)
+        gh_link_html = (
+            f'<a class="gh-pr-link mono" href="{gh_url}" '
+            f'target="_blank" rel="noopener" '
+            f'title="Open PR on GitHub (right-click → Copy link address)">'
+            f'{gh_url}</a>'
+        )
+        if pending > 0:
+            label = f'Push to GitHub ({pending} pending)'
+            disabled_attr = ""
+            cls = "gh-push has-pending"
+        else:
+            label = 'Push to GitHub (0 pending)'
+            disabled_attr = "disabled"
+            cls = "gh-push"
+        gh_push_button = (
+            f'<button id="gh-push-btn" class="{cls}" type="button" '
+            f'data-pending="{pending}" {disabled_attr} '
+            f'title="Preview and push local comments to GitHub">'
+            f'{html.escape(label)}'
+            f'</button>'
+        )
+    else:
+        gh_link_html = ""
+        gh_push_button = ""
 
     session_url = f"{base_url}/{session_id}"
     # Escape single quotes for safe JSON in JS
@@ -624,7 +689,9 @@ def render_page(
     <h1><a href="{index_href}">🥜 peanut-review</a></h1>
     <span class="meta mono">{html.escape(session_id)}</span>
     <span class="meta">{html.escape(session.base_ref)} … {html.escape(session.topic_ref)}</span>
+    {gh_link_html}
     <span class="spacer"></span>
+    {gh_push_button}
     {head_badge}
     <span class="badge {state_class}">{html.escape(session.state)}</span>
   </header>
@@ -634,6 +701,23 @@ def render_page(
     {file_html}
     {inbox_html}
   </main>
+  <div id="gh-push-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-modal-close></div>
+    <div class="modal-card" role="dialog" aria-labelledby="gh-push-title">
+      <div class="modal-header">
+        <h2 id="gh-push-title">Push to GitHub</h2>
+        <button class="modal-close" type="button" data-modal-close
+                title="Close">×</button>
+      </div>
+      <div class="modal-body" id="gh-push-body">Loading…</div>
+      <div class="modal-footer">
+        <button id="gh-push-cancel" type="button" data-modal-close>Cancel</button>
+        <button id="gh-push-confirm" type="button" class="primary" disabled>
+          Confirm push
+        </button>
+      </div>
+    </div>
+  </div>
   <script>
     window.PR_BASE_URL = {base_url_js};
     window.PR_SESSION_URL = {session_url_js};

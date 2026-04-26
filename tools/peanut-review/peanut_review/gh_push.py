@@ -104,13 +104,21 @@ def execute_push(
             if c.file == sess.GLOBAL_FILE:
                 resp = gh.post_issue_comment(ghpr.repo, ghpr.number, body=c.body)
             else:
+                # GitHub anchors a multi-line comment at its END line and
+                # uses `start_line` for the (strictly smaller) start. Our
+                # local model stores `line=lo, end_line=hi` (web composer
+                # normalizes that way), so swap the roles here. For a
+                # single-line comment end_line is None and we send only
+                # `line`, with `start_line=None` suppressing the field.
+                end = c.end_line if c.end_line is not None else c.line
+                lo, hi = (c.line, end) if c.line <= end else (end, c.line)
                 resp = gh.post_review_comment(
                     ghpr.repo, ghpr.number,
                     body=c.body,
                     commit_id=session.current_head,
                     path=c.file,
-                    line=c.line,
-                    start_line=c.end_line,
+                    line=hi,
+                    start_line=lo if lo != hi else None,
                 )
         except gh.GhError as e:
             result.items.append(PushItemResult(id=c.id, action="new", error=str(e)))

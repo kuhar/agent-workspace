@@ -46,10 +46,12 @@ with open(fixtures_path) as f:
 # substrings that must all appear as argv elements).
 for fx in fixtures:
     if all(m in argv for m in fx["match"]):
+        # Real `gh api` writes the response body to stdout on failures too —
+        # mirror that so tests can exercise body-carrying GhErrors.
+        sys.stdout.write(fx.get("stdout", ""))
         if fx.get("rc"):
             sys.stderr.write(fx.get("stderr", ""))
             sys.exit(fx["rc"])
-        sys.stdout.write(fx.get("stdout", ""))
         sys.exit(0)
 
 sys.stderr.write(f"shim: no fixture matched argv={argv}\\n")
@@ -406,6 +408,73 @@ def test_gh_push_skips_already_pushed_comments(gh_shim, tmp_path):
     posts = [c for c in gh_shim.calls() if "-X" in c["argv"]]
     assert len(posts) == 1
     assert json.loads(posts[0]["stdin"])["body"] == "local-only"
+
+
+def test_gh_push_multiline_sends_end_as_line_and_start_as_start_line(gh_shim, tmp_path):
+    """Web composer stores ranges as line=lo, end_line=hi. GitHub anchors
+    multi-line comments at the end (line=hi) with start_line=lo strictly
+    below it. Sending the values verbatim swapped this and 422'd."""
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="vera", file="src/x.py", line=10, end_line=14,
+        body="range comment", severity="warning",
+    ))
+
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/comments", "-X", "POST"],
+        "stdout": json.dumps({"id": 1, "html_url": ""}),
+    }])
+
+    main(["--session", sd, "gh-push"])
+
+    [call] = gh_shim.calls()
+    payload = json.loads(call["stdin"])
+    assert payload["line"] == 14, "line must be the higher (end) bound"
+    assert payload["start_line"] == 10, "start_line must be the lower bound"
+    assert payload["start_side"] == "RIGHT"
+
+
+def test_gh_push_single_line_omits_start_line(gh_shim, tmp_path):
+    """A single-line comment (end_line is None) must not include start_line —
+    GitHub treats start_line == line as a validation error."""
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="vera", file="src/x.py", line=7, body="single",
+    ))
+
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/comments", "-X", "POST"],
+        "stdout": json.dumps({"id": 1, "html_url": ""}),
+    }])
+
+    main(["--session", sd, "gh-push"])
+
+    [call] = gh_shim.calls()
+    payload = json.loads(call["stdin"])
+    assert payload["line"] == 7
+    assert "start_line" not in payload
+
+
+def test_gh_error_surfaces_response_body(gh_shim):
+    """`gh api` writes the GitHub error JSON to stdout — the body carries
+    the actionable `errors[]` detail, so it must reach the caller."""
+    gh_shim.set_fixtures([{
+        "match": ["api"],
+        "rc": 1,
+        "stderr": "gh: Validation Failed (HTTP 422)",
+        "stdout": json.dumps({
+            "message": "Validation Failed",
+            "errors": [{"resource": "PullRequestReviewComment",
+                        "code": "invalid", "field": "line"}],
+        }),
+    }])
+    with pytest.raises(gh.GhError) as ei:
+        gh._api("repos/acme/foo/pulls/42/comments", method="POST", payload={"x": 1})
+    msg = str(ei.value)
+    assert "HTTP 422" in msg
+    assert "Validation Failed" in msg
+    assert "field" in msg and "line" in msg
+    assert ei.value.stdout  # raw body retained on the exception too
 
 
 def test_gh_push_uses_current_head_as_commit_id(gh_shim, tmp_path):

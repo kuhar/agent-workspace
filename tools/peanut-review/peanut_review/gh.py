@@ -31,15 +31,39 @@ def _gh_bin() -> str:
 
 
 class GhError(RuntimeError):
-    """Raised when a `gh` invocation fails. Carries stderr for diagnosis."""
+    """Raised when a `gh` invocation fails. Carries stderr + stdout for
+    diagnosis — `gh api` writes the structured GitHub error body to stdout
+    (e.g. the `errors[]` array on a 422), so dropping it would hide the
+    most actionable signal.
+    """
 
-    def __init__(self, cmd: list[str], rc: int, stderr: str) -> None:
+    def __init__(self, cmd: list[str], rc: int,
+                 stderr: str, stdout: str = "") -> None:
+        detail = stderr.strip()
+        body = stdout.strip()
+        if body:
+            # Parse and pretty-print the GitHub error body when it's JSON,
+            # otherwise include it raw. The errors[] array is what tells the
+            # caller which field / code triggered the validation failure.
+            try:
+                parsed = json.loads(body)
+                msg = parsed.get("message") if isinstance(parsed, dict) else None
+                errors = parsed.get("errors") if isinstance(parsed, dict) else None
+                if msg or errors:
+                    extras = [msg] if msg else []
+                    if errors:
+                        extras.append(json.dumps(errors, separators=(",", ":")))
+                    body = " ".join(extras)
+            except (ValueError, TypeError):
+                pass
+            detail = f"{detail} | body: {body}" if detail else body
         super().__init__(
-            f"{' '.join(cmd[:3])}... failed (rc={rc}): {stderr.strip()}"
+            f"{' '.join(cmd[:3])}... failed (rc={rc}): {detail}"
         )
         self.cmd = cmd
         self.rc = rc
         self.stderr = stderr
+        self.stdout = stdout
 
 
 def parse_pr_spec(spec: str) -> tuple[str, int]:
@@ -61,7 +85,7 @@ def _run(args: list[str], *, input: str | None = None,
         cmd, input=input, capture_output=True, text=True, timeout=timeout,
     )
     if res.returncode != 0:
-        raise GhError(cmd, res.returncode, res.stderr)
+        raise GhError(cmd, res.returncode, res.stderr, res.stdout)
     return res.stdout
 
 

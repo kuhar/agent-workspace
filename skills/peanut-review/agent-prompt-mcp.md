@@ -47,8 +47,14 @@ The tool will echo the code at that line — verify it matches your finding.
 For each finding, call the `add_comment` tool with:
 - `file`: relative path to the file
 - `line`: line number in the source file
-- `severity`: critical (bugs/security), warning (likely problems),
-  suggestion (improvements), or nit (style/naming)
+- `severity`: one of
+  - critical (bugs/security)
+  - warning (likely problems)
+  - suggestion (improvements)
+  - nit (style/naming — low priority but still actionable)
+  - feedback (NOT a finding — a question, FYI note, or praise; do not
+    use as a "I'm unsure how serious" fallback — pick a real severity
+    or skip the comment)
 - `body`: description of the finding
 
 ## High-level (global) feedback

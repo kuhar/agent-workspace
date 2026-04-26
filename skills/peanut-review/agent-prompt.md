@@ -65,11 +65,17 @@ The CLI will print the code at that line — verify it matches your finding.
 
 For each finding, run:
 ```
-${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --severity <critical|warning|suggestion|nit> --body "<description>"
+${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --severity <critical|warning|suggestion|nit|feedback> --body "<description>"
 ```
 
-Severity guide: critical = bugs/security, warning = likely problems,
-suggestion = improvements, nit = style/naming.
+Severity guide:
+- critical = bugs/security
+- warning = likely problems
+- suggestion = improvements
+- nit = style/naming (low priority but still actionable)
+- feedback = NOT a finding — questions, FYI notes, praise, anything you
+  don't want the author to act on. Do not use this as a fallback when
+  you're unsure how serious something is — pick a real severity, or skip.
 
 ## High-level (global) feedback
 

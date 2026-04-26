@@ -14,6 +14,7 @@
   --warning: #ffa94d;
   --suggestion: #69db7c;
   --nit: #868e96;
+  --feedback: #5c7cfa;
   --stale: #555a63;
   --focus: #ffd866;
 }
@@ -322,6 +323,7 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
 .comment-meta .sev.warning { background: var(--warning); }
 .comment-meta .sev.suggestion { background: var(--suggestion); }
 .comment-meta .sev.nit { background: var(--nit); }
+.comment-meta .sev.feedback { background: var(--feedback); }
 .comment-meta .round { background: var(--border); padding: 1px 6px; border-radius: 3px; font-size: 10px; }
 .comment-meta button {
   margin-left: auto;

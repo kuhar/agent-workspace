@@ -44,6 +44,16 @@ def _get_author() -> str:
     return os.environ.get("GIT_AUTHOR_NAME", "unknown").lower()
 
 
+_SEVERITIES = tuple(s.value for s in models.Severity)
+_SEVERITIES_HELP = ", ".join(_SEVERITIES)
+
+
+def _validate_severity(severity: str) -> str | None:
+    if severity in _SEVERITIES:
+        return None
+    return f"Error: severity must be one of: {_SEVERITIES_HELP} (got '{severity}')"
+
+
 # ── Tools ─────────────────────────────────────────────────────────────
 
 
@@ -96,7 +106,11 @@ def add_comment(
         file: Relative file path (use "__meta__" for test execution reports)
         line: Line number in the SOURCE FILE (not the diff output). Must be >= 1 for real files.
         body: Comment text describing the finding
-        severity: One of: critical, warning, suggestion, nit
+        severity: One of: critical, warning, suggestion, nit, feedback.
+            Use `feedback` ONLY for non-actionable observations (a question
+            for the author, an FYI note, praise). If you're asking for a
+            change, pick a real severity — `feedback` is not a fallback for
+            "I'm not sure how serious this is".
         end_line: Optional end line for multi-line findings
 
     Returns the source line at that location so you can verify it matches your finding.
@@ -106,8 +120,8 @@ def add_comment(
     s = sess.load_session(sd)
     author = _get_author()
 
-    if severity not in ("critical", "warning", "suggestion", "nit"):
-        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+    if err := _validate_severity(severity):
+        return err
 
     file_lines, err = sess.validate_comment_location(s.workspace, file, line)
     if err:
@@ -143,14 +157,16 @@ def add_global_comment(
 
     Args:
         body: Comment text.
-        severity: One of: critical, warning, suggestion, nit.
+        severity: One of: critical, warning, suggestion, nit, feedback.
+            Use `feedback` only for non-actionable observations (questions,
+            FYI, praise) — not as a fallback for unsure findings.
     """
     sd = _session_dir()
     s = sess.load_session(sd)
     author = _get_author()
 
-    if severity not in ("critical", "warning", "suggestion", "nit"):
-        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+    if err := _validate_severity(severity):
+        return err
 
     comment = models.Comment(
         author=author,
@@ -179,14 +195,15 @@ def reply(
     Args:
         parent_id: The Round 1 comment ID you're replying to (c_xxxxxxxx).
         body: Reply text.
-        severity: One of: critical, warning, suggestion, nit.
+        severity: One of: critical, warning, suggestion, nit, feedback.
+            For replies that are questions or FYI, prefer `feedback`.
     """
     sd = _session_dir()
     s = sess.load_session(sd)
     author = _get_author()
 
-    if severity not in ("critical", "warning", "suggestion", "nit"):
-        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+    if err := _validate_severity(severity):
+        return err
 
     all_comments = store.read_all_comments(sd)
     rooted = store.normalize_reply_to(all_comments, parent_id)
@@ -223,18 +240,16 @@ def edit(
     Args:
         comment_id: The comment to edit (c_xxxxxxxx).
         body: New comment text. Omit to keep the current body.
-        severity: New severity (critical, warning, suggestion, nit). Omit
-            to keep the current severity.
+        severity: New severity (critical, warning, suggestion, nit,
+            feedback). Omit to keep the current severity.
     """
     sd = _session_dir()
     edited_by = _get_author()
 
     if body is None and severity is None:
         return "Error: at least one of body or severity is required"
-    if severity is not None and severity not in (
-        "critical", "warning", "suggestion", "nit"
-    ):
-        return f"Error: severity must be one of: critical, warning, suggestion, nit (got '{severity}')"
+    if severity is not None and (err := _validate_severity(severity)):
+        return err
 
     if not store.edit_comment(sd, comment_id,
                               body=body, severity=severity, edited_by=edited_by):
@@ -254,7 +269,8 @@ def list_comments(
         since: Comment ID — return only comments posted after this one. Use
             this to poll for new activity since you last looked. Pass the id
             of the most recent comment you've seen.
-        severity: Filter by severity (critical, warning, suggestion, nit)
+        severity: Filter by severity (critical, warning, suggestion, nit,
+            feedback)
         file: Filter by file path
     """
     sd = _session_dir()

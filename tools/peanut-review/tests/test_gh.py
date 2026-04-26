@@ -655,6 +655,51 @@ def test_gh_pull_appends_anchored_and_global_comments(gh_shim, tmp_path):
     assert by_author["gh:octocat"].external_id == "100"
     assert by_author["gh:ghost"].file == ""
     assert by_author["gh:ghost"].external_id == "200"
+    # Imported comments without an explicit severity marker default to
+    # `feedback` — they're discussion, not actionable findings.
+    assert by_author["gh:octocat"].severity == models.Severity.FEEDBACK.value
+    assert by_author["gh:ghost"].severity == models.Severity.FEEDBACK.value
+
+
+def test_gh_pull_classifies_nit_prefix_as_nit(gh_shim, tmp_path):
+    """Bodies that start with a `nit:`/`nit -`/`(nit)` style prefix in the
+    first two lines are imported as severity=nit instead of feedback —
+    matches the convention humans use on GitHub."""
+    sd = _make_gh_session(tmp_path)
+
+    review = [
+        {"id": 1, "user": {"login": "a"}, "path": "x.py", "line": 1,
+         "body": "nit: rename this var", "commit_id": "abc"},
+        {"id": 2, "user": {"login": "b"}, "path": "x.py", "line": 2,
+         "body": "Nit - missing trailing newline", "commit_id": "abc"},
+        {"id": 3, "user": {"login": "c"}, "path": "x.py", "line": 3,
+         "body": "(nit) prefer `let` over `var`", "commit_id": "abc"},
+        {"id": 4, "user": {"login": "d"}, "path": "x.py", "line": 4,
+         "body": "Looks good!\nnit: also drop the blank line", "commit_id": "abc"},
+        # Negative cases: word "nit" embedded mid-sentence or past line 2
+        # must NOT trigger reclassification.
+        {"id": 5, "user": {"login": "e"}, "path": "x.py", "line": 5,
+         "body": "this is an infinite loop", "commit_id": "abc"},
+        {"id": 6, "user": {"login": "f"}, "path": "x.py", "line": 6,
+         "body": "line 1\nline 2\nnit: too late", "commit_id": "abc"},
+    ]
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"],
+         "stdout": json.dumps(review)},
+        {"match": ["api", "repos/acme/foo/issues/42/comments"],
+         "stdout": "[]"},
+    ])
+
+    rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+
+    cs = {c.external_id: c for c in store.read_all_comments(sd)}
+    assert cs["1"].severity == models.Severity.NIT.value
+    assert cs["2"].severity == models.Severity.NIT.value
+    assert cs["3"].severity == models.Severity.NIT.value
+    assert cs["4"].severity == models.Severity.NIT.value
+    assert cs["5"].severity == models.Severity.FEEDBACK.value
+    assert cs["6"].severity == models.Severity.FEEDBACK.value
 
 
 def test_gh_pull_dedupes_by_external_id(gh_shim, tmp_path):

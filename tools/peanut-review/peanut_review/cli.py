@@ -906,8 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--body", help="Comment text (watch for shell-eaten backticks — prefer --body-file)")
     sp.add_argument("--body-file", help="Read comment text from FILE (safer for bodies with backticks or $ chars)")
     sp.add_argument("--severity", default="suggestion",
-                    choices=["critical", "warning", "suggestion", "nit"],
-                    help="Severity (default: suggestion)")
+                    choices=["critical", "warning", "suggestion", "nit", "feedback"],
+                    help="Severity (default: suggestion). Use `feedback` "
+                         "for non-actionable observations (questions, FYI, "
+                         "praise) — not as a fallback for unsure findings.")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
 
     # add-global-comment (convenience wrapper around `add-comment --global`)
@@ -916,8 +918,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--body", help="Comment text (watch for shell-eaten backticks — prefer --body-file)")
     sp.add_argument("--body-file", help="Read comment text from FILE (safer for bodies with backticks or $ chars)")
     sp.add_argument("--severity", default="suggestion",
-                    choices=["critical", "warning", "suggestion", "nit"],
-                    help="Severity (default: suggestion)")
+                    choices=["critical", "warning", "suggestion", "nit", "feedback"],
+                    help="Severity (default: suggestion). Use `feedback` "
+                         "for non-actionable observations (questions, FYI, "
+                         "praise) — not as a fallback for unsure findings.")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
 
     # comments
@@ -965,7 +969,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--body", help="New comment text (watch for shell-eaten backticks — prefer --body-file)")
     sp.add_argument("--body-file", help="Read new comment text from FILE")
     sp.add_argument("--severity", default=None,
-                    choices=["critical", "warning", "suggestion", "nit"],
+                    choices=["critical", "warning", "suggestion", "nit", "feedback"],
                     help="New severity (omit to keep current)")
     sp.add_argument("--author", help="Editor name (default: git config user.name)")
 

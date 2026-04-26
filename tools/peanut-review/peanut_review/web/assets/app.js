@@ -141,6 +141,7 @@
           <option value="warning">warning</option>
           <option value="critical">critical</option>
           <option value="nit">nit</option>
+          <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
         </select>
         <button class="submit">Post</button>
       </div>
@@ -351,6 +352,7 @@
           <option value="warning">warning</option>
           <option value="critical">critical</option>
           <option value="nit">nit</option>
+          <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
         </select>
         <button class="submit">Post</button>
       </div>

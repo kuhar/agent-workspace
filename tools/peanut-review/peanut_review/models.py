@@ -25,6 +25,11 @@ class Severity(str, Enum):
     WARNING = "warning"
     SUGGESTION = "suggestion"
     NIT = "nit"
+    # Non-actionable observations: questions, praise, FYI notes, and
+    # imported comments from external systems (e.g. GitHub) that carry no
+    # severity of their own. NOT a fallback for "I'm not sure how serious"
+    # — pick a real severity if you're asking for a change.
+    FEEDBACK = "feedback"
 
 
 class SessionState(str, Enum):

@@ -9,8 +9,18 @@ description = "Structured multi-agent code review CLI"
 requires-python = ">=3.10"
 dependencies = ["Pygments>=2.10"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-xdist>=3"]
+
 [project.scripts]
 peanut-review = "peanut_review.__main__:main"
 
 [tool.setuptools.package-data]
 peanut_review = ["web/assets/*"]
+
+[tool.pytest.ini_options]
+# Parallelize by default. The web tests dominate runtime (each spins up an
+# HTTP server) and are isolated via tmp_path + port=0, so they fan out cleanly.
+# `-n auto` scales to physical cores; cap at 8 because past that we're bottle-
+# necked by a single 5s subprocess test, not CPU.
+addopts = "-n auto --maxprocesses=8"

@@ -118,15 +118,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("Warning: diff is empty — nothing to review. "
               "Check --base/--topic refs.", file=sys.stderr)
 
-    if args.bead:
-        try:
-            from . import beads
-            bead_id = beads.create_review_bead(session_dir)
-            session.bead_id = bead_id
-            sess.save_session(session_dir, session)
-        except Exception as e:
-            print(f"Warning: bead creation failed: {e}", file=sys.stderr)
-
     print(session_dir)
     return 0
 
@@ -680,13 +671,6 @@ def cmd_verdict(args: argparse.Namespace) -> int:
 
     sess.transition_state(session_dir, models.SessionState.COMPLETE.value)
 
-    if args.update_bead:
-        try:
-            from . import beads
-            beads.update_with_verdict(session_dir, decision, args.body or "")
-        except Exception as e:
-            print(f"Warning: bead update failed: {e}", file=sys.stderr)
-
     print(f"Verdict: {decision}")
     return 0
 
@@ -731,8 +715,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     if s.original_head != s.current_head:
         print(f"Original: {s.original_head[:12]}")
     print(f"Workspace: {s.workspace}")
-    if s.bead_id:
-        print(f"Bead:     {s.bead_id}")
     print()
 
     # Agents
@@ -872,7 +854,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agents", help="Agent config JSON array (inline or file path)")
     sp.add_argument("--personas-dir", help="Source dir for persona files")
     sp.add_argument("--timeout", type=int, default=1200, help="Agent timeout (default: 1200)")
-    sp.add_argument("--bead", action="store_true", help="Create a br bead")
     sp.add_argument("--id", default=None, metavar="SLUG",
                     help="Override the auto-generated session id "
                          "([A-Za-z0-9_-], must not be 'api'). Becomes the URL "
@@ -1038,7 +1019,6 @@ def build_parser() -> argparse.ArgumentParser:
                           "GitHub forbids approve/request-changes on your "
                           "own PR")
     sp.add_argument("--body", help="Verdict body text")
-    sp.add_argument("--update-bead", action="store_true", help="Update bead with verdict")
 
     # migrate
     sp = sub.add_parser("migrate", help="Update HEAD, mark comments stale")

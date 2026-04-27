@@ -160,7 +160,6 @@ class Session:
     current_head: str = ""
     diff_commands: list[str] = field(default_factory=list)
     diff_stat: str = ""
-    bead_id: str | None = None
     agents: list[AgentConfig] = field(default_factory=list)
     state: str = SessionState.INIT.value
     timeout: int = 1200

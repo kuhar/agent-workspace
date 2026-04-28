@@ -718,35 +718,43 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
 
 def test_serve_writes_pidfile_and_stop_removes_it(session_dir: Path, tmp_path: Path):
     """End-to-end: spawn serve() in a subprocess, verify pidfile, then stop."""
-    import socket
     import sys
     import time as _t
 
     # Root = session's parent (which holds this single session).
     root = session_dir.parent
 
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
     pidfile = web_app.pidfile_path(root)
     assert not pidfile.exists()
 
+    # Port 0 means OS-assigned. Don't pre-pick a port via bind/close — under
+    # parallel xdist runs another worker can grab it in the gap, and serve()
+    # then exits before writing the pidfile, leaving the test to time out
+    # without ever surfacing the bind error.
     proc = subprocess.Popen(
         [sys.executable, "-m", "peanut_review", "serve",
          "--root", str(root),
-         "--host", "127.0.0.1", "--port", str(port)],
+         "--host", "127.0.0.1", "--port", "0"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
-        deadline = _t.monotonic() + 5.0
+        deadline = _t.monotonic() + 10.0
         while _t.monotonic() < deadline and not pidfile.exists():
+            # Fail fast (with stderr) if the subprocess died before writing
+            # the pidfile, instead of waiting for the full deadline.
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate(timeout=1.0)
+                raise AssertionError(
+                    f"serve subprocess exited with rc={proc.returncode} "
+                    f"before writing pidfile.\n"
+                    f"stdout: {stdout.decode(errors='replace')}\n"
+                    f"stderr: {stderr.decode(errors='replace')}"
+                )
             _t.sleep(0.05)
-        assert pidfile.exists(), "serve didn't write pidfile"
+        assert pidfile.exists(), "serve didn't write pidfile within 10s"
         payload = json.loads(pidfile.read_text())
         assert payload["pid"] == proc.pid
-        assert payload["port"] == port
+        assert payload["port"] > 0
         assert payload["roots"] == [str(root)]
 
         returned = web_app.stop(root, timeout=5.0)

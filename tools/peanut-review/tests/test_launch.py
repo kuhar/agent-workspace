@@ -61,8 +61,6 @@ def test_find_launcher_script_rejects_unknown_runner():
 def test_agent_config_defaults_to_cursor():
     a = AgentConfig(name="vera", model="opus", persona="vera.md")
     assert a.runner == "cursor"
-    assert a.lcode_primary is None
-    assert a.lcode_subagent is None
 
 
 def test_launch_dry_run_cursor_agent_cmd():
@@ -72,15 +70,12 @@ def test_launch_dry_run_cursor_agent_cmd():
     cmd = results[0]["cmd"]
     assert cmd[0].endswith("cursor-agent-task.sh")
     assert "--model" in cmd and "opus-4.6-thinking" in cmd
-    # cursor path must NOT carry lcode args
-    assert "--lcode-primary" not in cmd
-    assert "--lcode-subagent" not in cmd
 
 
 def test_launch_dry_run_opencode_agent_cmd():
     sd = _make_session_dir([
         AgentConfig(
-            name="felix", model="llama-primary/qwen3.6-35b-a3b", persona="felix.md",
+            name="felix", model="openai/gpt-5.5", persona="felix.md",
             runner="opencode",
         ),
     ])
@@ -88,30 +83,14 @@ def test_launch_dry_run_opencode_agent_cmd():
     assert len(results) == 1
     cmd = results[0]["cmd"]
     assert cmd[0].endswith("opencode-agent-task.sh")
-    assert "--model" in cmd and "llama-primary/qwen3.6-35b-a3b" in cmd
-    # Defaults for lcode pair
-    assert cmd[cmd.index("--lcode-primary") + 1] == "qwen"
-    assert cmd[cmd.index("--lcode-subagent") + 1] == "null"
-
-
-def test_launch_dry_run_opencode_respects_custom_lcode_pair():
-    sd = _make_session_dir([
-        AgentConfig(
-            name="petra", model="llama-primary/gemma4-31b", persona="petra.md",
-            runner="opencode", lcode_primary="gemma", lcode_subagent="qwen",
-        ),
-    ])
-    results = launch.launch_agents(sd, dry_run=True)
-    cmd = results[0]["cmd"]
-    assert cmd[cmd.index("--lcode-primary") + 1] == "gemma"
-    assert cmd[cmd.index("--lcode-subagent") + 1] == "qwen"
+    assert "--model" in cmd and "openai/gpt-5.5" in cmd
 
 
 def test_launch_dry_run_mixed_runners():
     sd = _make_session_dir([
         AgentConfig(name="vera", model="opus-4.6-thinking", persona="vera.md"),
         AgentConfig(
-            name="felix", model="llama-primary/qwen3.6-35b-a3b", persona="felix.md",
+            name="felix", model="openai/gpt-5.5", persona="felix.md",
             runner="opencode",
         ),
     ])
@@ -133,16 +112,13 @@ def test_launch_dry_run_codex_agent_cmd():
     # Codex needs the session dir writable so the agent can post comments.
     assert "--add-dir" in cmd
     assert sd in cmd
-    # Codex must NOT carry lcode args.
-    assert "--lcode-primary" not in cmd
-    assert "--lcode-subagent" not in cmd
 
 
 def test_opencode_agent_uses_cli_prompt_template():
     """Opencode should always get the CLI prompt (MCP not wired up yet)."""
     sd = _make_session_dir([
         AgentConfig(
-            name="felix", model="llama-primary/qwen3.6-35b-a3b", persona="felix.md",
+            name="felix", model="openai/gpt-5.5", persona="felix.md",
             runner="opencode",
         ),
     ])
@@ -154,15 +130,14 @@ def test_opencode_agent_uses_cli_prompt_template():
     assert "mcp__peanut-review" not in rendered
 
 
-def test_session_roundtrip_preserves_runner_fields():
+def test_session_roundtrip_preserves_runner():
     from peanut_review import session as sess
     sd = _make_session_dir([
         AgentConfig(
-            name="felix", model="llama-primary/qwen3.6-35b-a3b", persona="felix.md",
-            runner="opencode", lcode_primary="qwen", lcode_subagent="gemma",
+            name="felix", model="openai/gpt-5.5", persona="felix.md",
+            runner="opencode",
         ),
     ])
     s = sess.load_session(sd)
     assert s.agents[0].runner == "opencode"
-    assert s.agents[0].lcode_primary == "qwen"
-    assert s.agents[0].lcode_subagent == "gemma"
+    assert s.agents[0].model == "openai/gpt-5.5"

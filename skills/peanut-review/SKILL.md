@@ -32,18 +32,23 @@ peanut-review init \
   --bead
 ```
 
-Each agent may specify `"runner": "cursor"` (default) or `"runner": "opencode"`.
-Opencode agents route through the `lcode` wrapper; they accept optional
-`"lcode_primary"` and `"lcode_subagent"` fields (default: `"qwen"`, `"null"`).
+Each agent may specify `"runner"`:
+- `"cursor"` (default): cursor-agent CLI; model ids look like `opus-4.6-thinking`.
+- `"opencode"`: opencode CLI; model ids look like `provider/model`. Discover
+  available models with `opencode models` (e.g. `openai/gpt-5.5`,
+  `llama.cpp/qwen3.5-27b`). For local llama.cpp models the user must boot
+  llama-server out of band (e.g. `lcode qwen`); the runner does not.
+- `"codex"`: codex CLI (`codex exec`); model ids are bare names like `gpt-5.5`.
+
 Example mixed-runner lineup:
 
 ```json
 [
-  {"name": "vera",  "model": "opus-4.6-thinking",           "persona": "vera.md"},
-  {"name": "felix", "model": "llama-primary/qwen3.6-35b-a3b",
+  {"name": "vera",  "model": "opus-4.6-thinking", "persona": "vera.md"},
+  {"name": "felix", "model": "openai/gpt-5.5",
    "persona": "felix.md", "runner": "opencode"},
-  {"name": "petra", "model": "llama-primary/qwen3.6-35b-a3b",
-   "persona": "petra.md", "runner": "opencode"}
+  {"name": "cleo",  "model": "gpt-5.5",
+   "persona": "vera.md",  "runner": "codex"}
 ]
 ```
 
@@ -220,22 +225,22 @@ peanut-review serve --port 16200
 - If the orchestrator crashes, run `peanut-review status` in a new session
   to discover the current state and resume from where you left off.
 
-## Runners: cursor vs opencode
+## Runners: cursor, opencode, codex
 
 - **cursor** (default): launches `cursor-agent --print` via `cursor-agent-task.sh`.
   Requires cursor-agent to be logged in. Prefers MCP transport when the
   `peanut-review-mcp` script is installed, falls back to CLI.
-- **opencode**: launches `opencode run` via `opencode-agent-task.sh`, which
-  forwards through the `lcode` wrapper so local `llama-server` instances boot
-  automatically. Currently CLI mode only (MCP integration via `opencode.json`
-  is not wired up yet). The first opencode agent spawns the llama-servers; the
-  rest reuse the already-running processes via lcode's idempotent health check.
-  Runs as the `reviewer` agent (defined by `lcode`'s generated `opencode.json`):
-  primary model, no `grep`/`glob`/`codesearch` denies, no subagent delegation.
-
-Only one `lcode` primary/subagent pair can be running at a time, so multiple
-opencode agents on the same session should share the same `lcode_primary` /
-`lcode_subagent` values (persona diversity still provides review breadth).
+- **opencode**: launches `opencode run` directly via `opencode-agent-task.sh`.
+  `opencode models` is the source of truth for what's available — cloud
+  providers like `openai/*`, the free `opencode/*` tier, or local
+  `llama.cpp/*` providers configured in `~/.config/opencode/opencode.json`.
+  For local llama.cpp models, ensure llama-server is running before invoking
+  (boot it out of band, e.g. `lcode qwen` — peanut-review does not wrap lcode).
+  Currently CLI mode only; MCP integration via `opencode.json` is not wired up.
+- **codex**: launches `codex exec` via `codex-agent-task.sh`. Requires
+  `codex login` (ChatGPT OAuth or API key). The launcher passes
+  `--add-dir <session_dir>` so the agent can write peanut-review session files
+  outside the workspace sandbox.
 
 ## Agent communication: MCP vs CLI
 

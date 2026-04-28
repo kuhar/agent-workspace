@@ -5,38 +5,29 @@ usage() {
     cat <<'EOF'
 Usage: opencode-task [OPTIONS] --workspace DIR [PROMPT...]
 
-Run an opencode agent non-interactively (via the lcode wrapper) to produce a
-markdown file. The agent's stdout is captured into output.md.
+Run an opencode agent non-interactively (`opencode run`) to produce a markdown
+file. The agent's stdout is captured into output.md.
 
-lcode boots the local llama-server(s) and generates a per-session opencode.json
-with provider definitions; we then forward to `opencode run` for a one-shot run.
+opencode is treated as the source of truth for available models and providers.
+Use `opencode models` to discover what's installed (cloud providers like
+`openai/*`, the free `opencode/*` tier, and any local providers like
+`llama.cpp/*` configured in ~/.config/opencode/opencode.json). For local
+llama.cpp models, ensure llama-server is running before invoking — boot it
+out of band (e.g. `lcode qwen`); peanut-review no longer wraps lcode itself.
 
 Options:
-  --model MODEL          Opencode model id, e.g. llama-primary/qwen3.6-35b-a3b
-                         (required)
+  --model MODEL          Opencode model id (provider/model), e.g.
+                         openai/gpt-5.5, llama.cpp/qwen3.5-27b. Required.
   --workspace DIR        Workspace directory (required)
   --output-dir DIR       Output directory (default: <workspace>/.opencode/tasks)
   --name NAME            Task name for the output subdirectory (default: timestamp)
   --timeout SECS         Timeout in seconds (default: 480)
   --prompt TEXT|FILE     Prompt text, or path to a prompt file
   --prompt-file FILE     Read prompt from FILE
-  --lcode-primary NAME   lcode primary model (default: qwen)
-  --lcode-subagent NAME  lcode subagent model (default: null)
-  --agent NAME           Opencode agent to run as (default: reviewer)
+  --agent NAME           Opencode agent role to run as (default: opencode's
+                         configured default — usually `build`).
   --dry-run              Print the command without executing
   -h, --help             Show this help
-
-The prompt can be provided as: --prompt, --prompt-file, or trailing positional
-arguments. If multiple sources are given, the first one wins (in that order).
-
-Examples:
-  opencode-task --workspace ~/iree/main \
-      --model llama-primary/qwen3.6-35b-a3b \
-      --prompt "Review the recent changes to the compiler pipeline"
-
-  opencode-task --workspace ~/iree/main --lcode-primary gemma --lcode-subagent qwen \
-      --model llama-primary/gemma4-31b \
-      --prompt-file /tmp/review/prompt.md
 EOF
     exit "${1:-0}"
 }
@@ -48,28 +39,24 @@ task_name=""
 timeout_secs=480
 opt_prompt=""
 opt_prompt_file=""
-lcode_primary="qwen"
-lcode_subagent="null"
-agent_name="reviewer"
+agent_name=""
 dry_run=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --model)          model="$2"; shift 2 ;;
-        --workspace)      workspace="$2"; shift 2 ;;
-        --output-dir)     output_dir="$2"; shift 2 ;;
-        --name)           task_name="$2"; shift 2 ;;
-        --timeout)        timeout_secs="$2"; shift 2 ;;
-        --prompt)         opt_prompt="$2"; shift 2 ;;
-        --prompt-file)    opt_prompt_file="$2"; shift 2 ;;
-        --lcode-primary)  lcode_primary="$2"; shift 2 ;;
-        --lcode-subagent) lcode_subagent="$2"; shift 2 ;;
-        --agent)          agent_name="$2"; shift 2 ;;
-        --dry-run)        dry_run=1; shift ;;
-        -h|--help)        usage 0 ;;
-        --)               shift; break ;;
-        -*)               echo "Error: Unknown option: $1" >&2; usage 1 ;;
-        *)                break ;;
+        --model)       model="$2"; shift 2 ;;
+        --workspace)   workspace="$2"; shift 2 ;;
+        --output-dir)  output_dir="$2"; shift 2 ;;
+        --name)        task_name="$2"; shift 2 ;;
+        --timeout)     timeout_secs="$2"; shift 2 ;;
+        --prompt)      opt_prompt="$2"; shift 2 ;;
+        --prompt-file) opt_prompt_file="$2"; shift 2 ;;
+        --agent)       agent_name="$2"; shift 2 ;;
+        --dry-run)     dry_run=1; shift ;;
+        -h|--help)     usage 0 ;;
+        --)            shift; break ;;
+        -*)            echo "Error: Unknown option: $1" >&2; usage 1 ;;
+        *)             break ;;
     esac
 done
 
@@ -109,9 +96,12 @@ if [[ ! -d "$workspace" ]]; then
     exit 1
 fi
 
-LCODE="${LCODE:-$(command -v lcode || true)}"
-if [[ -z "$LCODE" ]]; then
-    echo "Error: lcode wrapper not found on PATH (set LCODE env var to override)." >&2
+OPENCODE="${OPENCODE:-$(command -v opencode || true)}"
+if [[ -z "$OPENCODE" ]]; then
+    OPENCODE="$HOME/.opencode/bin/opencode"
+fi
+if [[ ! -x "$OPENCODE" ]]; then
+    echo "Error: opencode not found (set OPENCODE env var to override)." >&2
     exit 1
 fi
 
@@ -135,43 +125,42 @@ if command -v jq >/dev/null; then
         --arg prompt "$prompt" \
         --arg start "$start_time" \
         --arg timeout "$timeout_secs" \
-        --arg primary "$lcode_primary" \
-        --arg subagent "$lcode_subagent" \
         --arg agent "$agent_name" \
         '{runner: "opencode", model: $model, workspace: $workspace, prompt: $prompt,
           start: $start, timeout: ($timeout | tonumber),
-          lcode: {primary: $primary, subagent: $subagent}, agent: $agent}' \
+          agent: ($agent | select(. != ""))}' \
         > "$meta_file"
 fi
 
 echo "opencode-task" >&2
-echo "  Runner:    opencode (via lcode $lcode_primary $lcode_subagent)" >&2
+echo "  Runner:    opencode" >&2
 echo "  Model:     $model" >&2
-echo "  Agent:     $agent_name" >&2
+[[ -n "$agent_name" ]] && echo "  Agent:     $agent_name" >&2
 echo "  Workspace: $workspace" >&2
 echo "  Output:    $output_file" >&2
 echo "  Timeout:   ${timeout_secs}s" >&2
 echo "" >&2
 
-lcode_cmd=(
-    "$LCODE" "$lcode_primary" "$lcode_subagent"
-    run
+cmd=(
+    "$OPENCODE" run
     --model "$model"
-    --agent "$agent_name"
     --dir "$workspace"
     --dangerously-skip-permissions
     --format default
-    "$prompt"
 )
+if [[ -n "$agent_name" ]]; then
+    cmd+=(--agent "$agent_name")
+fi
+cmd+=("$prompt")
 
 if (( dry_run )); then
-    printf '%q ' "${lcode_cmd[@]}" >&2
+    printf '%q ' "${cmd[@]}" >&2
     echo >&2
     exit 0
 fi
 
 rc=0
-timeout "$timeout_secs" "${lcode_cmd[@]}" > "$output_file" || rc=$?
+timeout "$timeout_secs" "${cmd[@]}" > "$output_file" || rc=$?
 
 end_time="$(date -Iseconds)"
 if command -v jq >/dev/null && [[ -f "$meta_file" ]]; then

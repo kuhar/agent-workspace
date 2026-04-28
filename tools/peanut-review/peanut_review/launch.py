@@ -188,12 +188,7 @@ def _build_agent_cmd(
         "--timeout", str(session.timeout),
         "--prompt-file", str(prompt_path),
     ]
-    if agent.runner == "opencode":
-        cmd += [
-            "--lcode-primary", agent.lcode_primary or "qwen",
-            "--lcode-subagent", agent.lcode_subagent or "null",
-        ]
-    elif agent.runner == "codex":
+    if agent.runner == "codex":
         # Codex sandboxes the agent to the workspace by default; the session
         # dir lives outside it, so without --add-dir the agent can't write
         # comments/signals through `peanut-review add-comment`. /tmp is added

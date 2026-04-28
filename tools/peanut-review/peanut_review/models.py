@@ -110,11 +110,9 @@ class AgentConfig:
     persona: str = ""
     status: str = AgentStatus.PENDING.value
     pid: int | None = None
-    # Backend runner: "cursor" (cursor-agent) or "opencode" (opencode via lcode).
+    # Backend runner: "cursor" (cursor-agent), "opencode" (opencode run),
+    # or "codex" (codex exec).
     runner: str = "cursor"
-    # For runner="opencode": which lcode GPU pair to use. None → "qwen"/"null".
-    lcode_primary: str | None = None
-    lcode_subagent: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)

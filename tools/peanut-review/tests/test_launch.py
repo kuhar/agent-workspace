@@ -43,6 +43,12 @@ def test_find_launcher_script_opencode():
     assert Path(path).exists()
 
 
+def test_find_launcher_script_codex():
+    path = launch._find_launcher_script("codex")
+    assert path.endswith("codex-agent-task.sh")
+    assert Path(path).exists()
+
+
 def test_find_launcher_script_rejects_unknown_runner():
     try:
         launch._find_launcher_script("claude")
@@ -113,6 +119,23 @@ def test_launch_dry_run_mixed_runners():
     assert len(results) == 2
     assert results[0]["cmd"][0].endswith("cursor-agent-task.sh")
     assert results[1]["cmd"][0].endswith("opencode-agent-task.sh")
+
+
+def test_launch_dry_run_codex_agent_cmd():
+    sd = _make_session_dir([
+        AgentConfig(name="cleo", model="gpt-5.5", persona="vera.md", runner="codex"),
+    ])
+    results = launch.launch_agents(sd, dry_run=True)
+    assert len(results) == 1
+    cmd = results[0]["cmd"]
+    assert cmd[0].endswith("codex-agent-task.sh")
+    assert "--model" in cmd and "gpt-5.5" in cmd
+    # Codex needs the session dir writable so the agent can post comments.
+    assert "--add-dir" in cmd
+    assert sd in cmd
+    # Codex must NOT carry lcode args.
+    assert "--lcode-primary" not in cmd
+    assert "--lcode-subagent" not in cmd
 
 
 def test_opencode_agent_uses_cli_prompt_template():

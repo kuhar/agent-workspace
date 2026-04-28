@@ -16,6 +16,7 @@ from .session import load_session, save_session, update_agent_status
 _LAUNCHER_SCRIPTS = {
     "cursor": "cursor-agent-task.sh",
     "opencode": "opencode-agent-task.sh",
+    "codex": "codex-agent-task.sh",
 }
 
 
@@ -192,6 +193,13 @@ def _build_agent_cmd(
             "--lcode-primary", agent.lcode_primary or "qwen",
             "--lcode-subagent", agent.lcode_subagent or "null",
         ]
+    elif agent.runner == "codex":
+        # Codex sandboxes the agent to the workspace by default; the session
+        # dir lives outside it, so without --add-dir the agent can't write
+        # comments/signals through `peanut-review add-comment`. /tmp is added
+        # for ad-hoc body files (agent-prompt.md instructs agents to use
+        # `--body-file /tmp/...` to dodge backtick-quoting issues).
+        cmd += ["--add-dir", str(session_dir), "--add-dir", "/tmp"]
     return cmd
 
 

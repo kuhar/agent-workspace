@@ -25,26 +25,32 @@ peanut-review init \
   --workspace <REPO_PATH> \
   --base <BASE_REF> \
   --agents '[
-    {"name": "vera", "model": "opus-4.6-thinking", "persona": "vera.md"},
-    {"name": "felix", "model": "sonnet-4.6", "persona": "felix.md"},
-    {"name": "petra", "model": "sonnet-4.6", "persona": "petra.md"}
+    {"name": "vera", "model": "claude-opus-4-7-thinking-high", "persona": "vera.md"},
+    {"name": "felix", "model": "composer-2", "persona": "felix.md"},
+    {"name": "petra", "model": "composer-2", "persona": "petra.md"}
   ]' \
   --bead
 ```
 
+Model ids above are illustrative. Personas declare a `tier:` (expert or
+standard); the orchestrator picks concrete ids at session-init time from the
+live `cursor-agent --list-models` / `opencode models` output. See
+[Agent selection guidelines](#agent-selection-guidelines) for the resolution
+flow and tier guidance.
+
 Each agent may specify `"runner"`:
-- `"cursor"` (default): cursor-agent CLI; model ids look like `opus-4.6-thinking`.
-- `"opencode"`: opencode CLI; model ids look like `provider/model`. Discover
+- `"cursor"` (default): cursor-agent CLI; ids from `cursor-agent --list-models`.
+- `"opencode"`: opencode CLI; ids look like `provider/model`. Discover
   available models with `opencode models` (e.g. `openai/gpt-5.5`,
   `llama.cpp/qwen3.5-27b`). For local llama.cpp models the user must boot
   llama-server out of band (e.g. `lcode qwen`); the runner does not.
-- `"codex"`: codex CLI (`codex exec`); model ids are bare names like `gpt-5.5`.
+- `"codex"`: codex CLI (`codex exec`); ids are bare names like `gpt-5.5`.
 
 Example mixed-runner lineup:
 
 ```json
 [
-  {"name": "vera",  "model": "opus-4.6-thinking", "persona": "vera.md"},
+  {"name": "vera",  "model": "claude-opus-4-7-thinking-high", "persona": "vera.md"},
   {"name": "felix", "model": "openai/gpt-5.5",
    "persona": "felix.md", "runner": "opencode"},
   {"name": "cleo",  "model": "gpt-5.5",
@@ -209,12 +215,67 @@ peanut-review serve --port 16200
 
 ## Agent selection guidelines
 
+### Picking the lineup
+
 - **Always include Vera** — she is the most thorough and valuable reviewer
-- Pick 1 expert (Vera, Irene, or Merlin) based on the domain
-- Pick 2-3 generics (Felix, Petra, Soren) for breadth
+- Pick 1 expert persona (Vera, Irene, or Merlin) based on the domain
+- Pick 2-3 standard personas (Felix, Petra, Soren) for breadth
 - For compiler/MLIR code: include Irene or Merlin
-- Expert personas use stronger models (opus-4.6-thinking)
-- Generic personas use faster models (sonnet-4.6, gemini-3.1-pro)
+
+### Picking a model per agent (dynamic)
+
+Personas declare a `tier:` in their frontmatter (`expert` or `standard`)
+rather than naming specific models. The tier describes the persona's role,
+not a specific model class — a local-only review (no cloud models) is still
+valid; the orchestrator just maps tier to "best vs. lighter" within whatever
+is locally available.
+
+The orchestrator resolves tier → concrete model id at session-init time,
+based on what's installed locally. This avoids the persona files going stale
+every time a new model lands.
+
+Workflow when building the `--agents` JSON:
+
+1. Read each chosen persona's frontmatter → grab its `tier`.
+2. Discover what's available on each runner the user has set up:
+   - **cursor**: `cursor-agent --list-models`
+   - **opencode**: `opencode models`
+   - **codex**: no list command. Common ids: `gpt-5.5`, `gpt-5.4`,
+     `gpt-5.3-codex`. Check `~/.codex/config.toml` for the user's pinned
+     default if unsure.
+3. Pick a concrete id per agent following the tier guidance below. The
+   launcher scripts (`cursor-agent-task.sh`, `opencode-agent-task.sh`,
+   `codex-agent-task.sh`) all forward `--model` verbatim to the underlying
+   CLI, so whatever id the upstream tool accepts will work.
+
+### Tier guidance
+
+- **expert**: pick the strongest reasoning model available within whatever
+  the user has set up. With cloud access, prefer thinking/high-reasoning
+  variants (e.g. cursor's `claude-opus-*-thinking-high` or `gpt-5.5-high`,
+  opencode's `openai/gpt-5.5`, codex's `gpt-5.5`). For a local-only setup,
+  pick the largest local model available (e.g. `llama.cpp/qwen3.5-27b`) —
+  the persona's role (deep technical analysis) is still doable, just at
+  whatever ceiling the local hardware supports.
+- **standard**: pick a balanced/fast model. Cheap-and-cheerful is fine here —
+  these reviewers cover breadth (style, scope, naming, future-proofing) and
+  benefit from being able to scan a lot of code quickly. Examples: cursor's
+  `composer-2` or `claude-4.6-sonnet-medium`, opencode's `openai/gpt-5.4-mini`
+  or a smaller local `llama.cpp/*` model, codex's `gpt-5.4`.
+
+If the user has explicitly opted into a local model (e.g. their `opencode
+models` listing shows a `llama.cpp/*` entry), prefer it — they wouldn't
+have it set up if they didn't want it exercised. For an all-local lineup,
+use the same local model across all agents if only one is available; the
+diversity of personas alone still produces useful review breadth.
+
+### Model id formats per runner
+
+- **cursor**: bare cursor ids from `cursor-agent --list-models`, e.g.
+  `claude-opus-4-7-thinking-high`, `composer-2`, `gpt-5.5-high`.
+- **opencode**: `provider/model`, e.g. `openai/gpt-5.5`,
+  `llama.cpp/qwen3.5-27b`, `opencode/big-pickle`.
+- **codex**: bare names, e.g. `gpt-5.5`, `gpt-5.4`.
 
 ## Handling failures
 

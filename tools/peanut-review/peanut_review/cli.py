@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,78 @@ def _default_personas_dir() -> str:
     """Find the default personas directory."""
     p = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "peanut-gallery-review" / "personas"
     return str(p) if p.exists() else ""
+
+
+CONFIG_FILE_NAME = ".peanut-review.json"
+
+
+def _resolve_config_path(raw: str, *, base: Path) -> Path:
+    """Resolve a path from config, relative to the config directory."""
+    path = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if not path.is_absolute():
+        path = base / path
+    return path.resolve()
+
+
+def _find_project_config(start: Path | None = None) -> Path | None:
+    """Find `.peanut-review.json` by walking upward from start/cwd."""
+    cur = (start or Path.cwd()).resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for directory in [cur, *cur.parents]:
+        candidate = directory / CONFIG_FILE_NAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_project_config(config_arg: str | None) -> tuple[dict, Path]:
+    """Load and validate a per-worktree peanut-review config file."""
+    if config_arg:
+        config_path = Path(config_arg).expanduser().resolve()
+    else:
+        config_path = _find_project_config()
+        if config_path is None:
+            raise ValueError(
+                f"could not find {CONFIG_FILE_NAME}; pass --config or run from a configured worktree"
+            )
+
+    try:
+        raw = json.loads(config_path.read_text())
+    except OSError as e:
+        raise ValueError(f"could not read {config_path}: {e}") from e
+    except json.JSONDecodeError as e:
+        raise ValueError(f"could not parse {config_path}: {e}") from e
+    if not isinstance(raw, dict):
+        raise ValueError(f"{config_path} must contain a JSON object")
+
+    required = ["reviewRoot", "workspaceRoot", "repoRelative", "agents"]
+    missing = [k for k in required if k not in raw]
+    if missing:
+        raise ValueError(f"{config_path} missing required key(s): {', '.join(missing)}")
+    if not isinstance(raw["agents"], list) or not raw["agents"]:
+        raise ValueError(f"{config_path}: agents must be a non-empty array")
+
+    base = config_path.parent
+    review_root = _resolve_config_path(str(raw["reviewRoot"]), base=base)
+    workspace_root = _resolve_config_path(str(raw["workspaceRoot"]), base=base)
+    repo_relative = Path(str(raw["repoRelative"]))
+    if repo_relative.is_absolute():
+        raise ValueError(f"{config_path}: repoRelative must be relative")
+    workspace = (workspace_root / repo_relative).resolve()
+    if not workspace.is_dir():
+        raise ValueError(f"configured workspace does not exist: {workspace}")
+
+    cfg = dict(raw)
+    cfg["reviewRoot"] = str(review_root)
+    cfg["workspaceRoot"] = str(workspace_root)
+    cfg["workspace"] = str(workspace)
+    return cfg, config_path
+
+
+def _session_id_for_pr(repo: str, number: int) -> str:
+    owner, repo_name = repo.split("/", 1)
+    return f"{owner}-{repo_name}-pr-{number}"
 
 
 # ── Subcommand handlers ────────────────────────────────────────────
@@ -131,6 +204,100 @@ def cmd_launch(args: argparse.Namespace) -> int:
     results = launch.launch_agents(
         session_dir, args.template,
         dry_run=args.dry_run,
+        cli_json=getattr(args, "cli_json", None),
+    )
+    for r in results:
+        pid_str = f"pid={r['pid']}" if r["pid"] else "dry-run"
+        print(f"  {r['name']}: {pid_str}")
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """Initialize a PR review from `.peanut-review.json` and launch agents."""
+    try:
+        cfg, config_path = _load_project_config(args.config)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    from . import gh
+    try:
+        repo, number = gh.resolve_pr_spec(args.pr, workspace=cfg["workspace"])
+        pr_info = gh.fetch_pr_info(repo, number)
+    except (ValueError, gh.GhError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    session_id = args.id or _session_id_for_pr(pr_info.repo, pr_info.number)
+    session_dir = Path(args.session) if args.session else Path(cfg["reviewRoot"]) / session_id
+    session_dir = session_dir.expanduser().resolve()
+    timeout = args.timeout if args.timeout is not None else int(cfg.get("timeout", 1200))
+    personas_dir = args.personas_dir or cfg.get("personasDir") or _default_personas_dir()
+
+    agents = cfg["agents"]
+    if args.dry_run:
+        print(f"Config:   {config_path}")
+        print(f"Session:  {session_dir}")
+        print(f"Workspace: {cfg['workspace']}")
+        print(f"PR:       {pr_info.repo}#{pr_info.number}")
+        print(f"Agents:   {len(agents)}")
+        print()
+        print("Init command:")
+        print(
+            "  peanut-review --session "
+            f"{shlex.quote(str(session_dir))} init --workspace "
+            f"{shlex.quote(cfg['workspace'])} --gh-pr {pr_info.repo}#{pr_info.number} "
+            f"--timeout {timeout} --agents {shlex.quote(json.dumps(agents))}"
+        )
+        if not args.no_launch:
+            print("Launch command:")
+            print(f"  peanut-review --session {shlex.quote(str(session_dir))} launch")
+        return 0
+
+    session_json = session_dir / "session.json"
+    if session_json.exists() and not args.reuse:
+        print(
+            f"Error: session already exists: {session_dir} "
+            f"(use --reuse to launch it)",
+            file=sys.stderr,
+        )
+        return 1
+
+    if session_json.exists():
+        print(session_dir)
+    else:
+        github = models.GitHubPR(
+            repo=pr_info.repo,
+            number=pr_info.number,
+            url=pr_info.url,
+            head_sha=pr_info.head_sha,
+            base_sha=pr_info.base_sha,
+            title=pr_info.title,
+        )
+        try:
+            _, created_dir = sess.create_session(
+                workspace=cfg["workspace"],
+                base_ref=args.base if args.base is not None else pr_info.base_sha,
+                topic_ref=args.topic if args.topic is not None else pr_info.head_sha,
+                agents=agents,
+                personas_dir=personas_dir if personas_dir else None,
+                timeout=timeout,
+                session_dir=str(session_dir),
+                session_id=session_id,
+                github=github,
+            )
+        except (RuntimeError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        print(created_dir)
+
+    if args.no_launch:
+        return 0
+
+    from . import launch
+    results = launch.launch_agents(
+        str(session_dir), args.template,
+        dry_run=args.launch_dry_run,
         cli_json=getattr(args, "cli_json", None),
     )
     for r in results:
@@ -871,6 +1038,39 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--template", help="Agent prompt template path")
     sp.add_argument("--cli-json", help="Path to cli.json for agent permissions")
 
+    # start
+    sp = sub.add_parser(
+        "start",
+        help="Initialize from .peanut-review.json and launch agents",
+    )
+    sp.add_argument(
+        "pr",
+        help="PR number, owner/repo#N, owner/repo/pull/N, or GitHub PR URL",
+    )
+    sp.add_argument(
+        "--config",
+        help=f"Project review config (default: search upward for {CONFIG_FILE_NAME})",
+    )
+    sp.add_argument("--base", default=None,
+                    help="Base ref override (default: PR base SHA)")
+    sp.add_argument("--topic", default=None,
+                    help="Topic ref override (default: PR head SHA)")
+    sp.add_argument("--id", default=None, metavar="SLUG",
+                    help="Override session id/path slug")
+    sp.add_argument("--timeout", type=int, default=None,
+                    help="Agent timeout override (default: config timeout or 1200)")
+    sp.add_argument("--personas-dir", help="Source dir for persona files")
+    sp.add_argument("--no-launch", action="store_true",
+                    help="Only create the session; do not spawn agents")
+    sp.add_argument("--reuse", action="store_true",
+                    help="Reuse an existing session directory instead of refusing")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print resolved init/launch commands without writing")
+    sp.add_argument("--launch-dry-run", action="store_true",
+                    help="Create/reuse the session, but print agent launch commands")
+    sp.add_argument("--template", help="Agent prompt template path")
+    sp.add_argument("--cli-json", help="Path to cli.json for agent permissions")
+
     # add-comment
     sp = sub.add_parser("add-comment",
                         help="Add a structured comment (anchored or global)")
@@ -1065,6 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = {
         "init": cmd_init,
         "launch": cmd_launch,
+        "start": cmd_start,
         "add-comment": cmd_add_comment,
         "add-global-comment": cmd_add_global_comment,
         "comments": cmd_comments,

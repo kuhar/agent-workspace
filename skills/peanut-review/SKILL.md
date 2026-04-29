@@ -18,63 +18,83 @@ You drive the review lifecycle using the `peanut-review` CLI tool.
 
 ## Workflow
 
-### Step 1 — Initialize the session
+### Step 1 — Use the project config
 
-```bash
-peanut-review init \
-  --workspace <REPO_PATH> \
-  --base <BASE_REF> \
-  --agents '[
-    {"name": "vera", "model": "claude-opus-4-7-thinking-high", "persona": "vera.md"},
-    {"name": "felix", "model": "composer-2", "persona": "felix.md"},
-    {"name": "petra", "model": "composer-2", "persona": "petra.md"}
-  ]' \
-  --bead
-```
-
-Model ids above are illustrative. Personas declare a `tier:` (expert or
-standard); the orchestrator picks concrete ids at session-init time from the
-live `cursor-agent --list-models` / `opencode models` output. See
-[Agent selection guidelines](#agent-selection-guidelines) for the resolution
-flow and tier guidance.
-
-Each agent may specify `"runner"`:
-- `"cursor"` (default): cursor-agent CLI; ids from `cursor-agent --list-models`.
-- `"opencode"`: opencode CLI; ids look like `provider/model`. Discover
-  available models with `opencode models` (e.g. `openai/gpt-5.5`,
-  `llama.cpp/qwen3.5-27b`). For local llama.cpp models the user must boot
-  llama-server out of band (e.g. `lcode qwen`); the runner does not.
-- `"codex"`: codex CLI (`codex exec`); ids are bare names like `gpt-5.5`.
-
-Example mixed-runner lineup:
+The happy path is config-driven. Do not choose the review root, workspace path,
+or agent lineup by hand when a `.peanut-review.json` exists. Worktree setup
+scripts should copy or generate this file in the worktree parent, next to
+`.cursor` and `.claude`:
 
 ```json
-[
-  {"name": "vera",  "model": "claude-opus-4-7-thinking-high", "persona": "vera.md"},
-  {"name": "felix", "model": "openai/gpt-5.5",
-   "persona": "felix.md", "runner": "opencode"},
-  {"name": "cleo",  "model": "gpt-5.5",
-   "persona": "vera.md",  "runner": "codex"}
-]
+{
+  "reviewRoot": "/home/jakub/reviews",
+  "workspaceRoot": ".",
+  "repoRelative": "iree",
+  "timeout": 2400,
+  "agents": [
+    {"name": "vera", "model": "openai/gpt-5.5", "persona": "vera.md", "runner": "opencode"},
+    {"name": "irene", "model": "openai/gpt-5.5", "persona": "irene.md", "runner": "opencode"},
+    {"name": "petra", "model": "openai/gpt-5.4-mini", "persona": "petra.md", "runner": "opencode"},
+    {"name": "soren", "model": "openai/gpt-5.4-mini", "persona": "soren.md", "runner": "opencode"}
+  ]
+}
 ```
 
-This prints the session directory path. Set it for subsequent commands:
+Config semantics:
+
+- `reviewRoot`: persistent peanut-review session root. The web server should
+  scan this same root.
+- `workspaceRoot`: project worktree root. Relative paths are resolved relative
+  to the config file, so `"."` means the directory containing the config.
+- `repoRelative`: source repository path under `workspaceRoot`.
+- `agents`: exact reviewer lineup. Use it as-is; do not re-select agents.
+
+Start a PR review from the worktree parent:
+
 ```bash
-export PEANUT_SESSION=<printed-path>
+peanut-review start <pr-number-or-url>
 ```
 
-### Step 2 — Build the project
+`start` searches upward for `.peanut-review.json`, resolves a bare PR number
+with `gh` from the configured checkout, creates the session at
+`<reviewRoot>/<owner>-<repo>-pr-<number>`, initializes GitHub metadata, and
+launches the configured agents.
 
-Ensure the project compiles/builds before launching agents. Fix any build
-errors first — agents should review working code.
-
-### Step 3 — Launch agents
+If the project still needs a build before agents run, initialize without
+launching, build, then launch:
 
 ```bash
-peanut-review launch
+peanut-review start <pr-number-or-url> --no-launch
+# build/test project as needed
+peanut-review --session <printed-session-path> launch
 ```
 
-This spawns one cursor-agent per reviewer, each with their persona and a
+After launch, always verify that agents actually started:
+
+```bash
+peanut-review --session <printed-session-path> status
+```
+
+If status shows agents as done immediately or there are no comments, inspect
+`<session>/log/*.log` before assuming the review is running.
+
+### Step 2 — Build if needed
+
+Ensure the project compiles/builds before agents review it. If the checkout was
+prepared by a project `setup-review --build` or `--test` command, this is
+already handled. Otherwise use `peanut-review start --no-launch`, fix build
+errors, then launch.
+
+### Step 3 — Launch agents if deferred
+
+Skip this step if `peanut-review start` already launched agents. If you used
+`--no-launch`, run:
+
+```bash
+peanut-review --session <printed-session-path> launch
+```
+
+This spawns one agent per configured reviewer, each with their persona and a
 rendered prompt containing the session path and diff commands.
 
 ### Step 4 — Monitor Round 1
@@ -183,6 +203,13 @@ peanut-review stop
 peanut-review stop --root /tmp/peanut-review
 ```
 
+For config-driven project reviews, the server must scan the same `reviewRoot`
+as `.peanut-review.json`, for example:
+
+```bash
+peanut-review serve --root /home/jakub/reviews --port 27183 --base-url /pr
+```
+
 Root inference: if `--root` is omitted, `$PEANUT_SESSION`'s parent is used
 (so the existing single-session workflow keeps working); otherwise the
 default `/tmp/peanut-review/`. The pidfile lives at `<root>/web.pid`.
@@ -214,6 +241,10 @@ peanut-review serve --port 16200
 ```
 
 ## Agent selection guidelines
+
+Use this section only when authoring or updating a project
+`.peanut-review.json`. During an actual review launch, use the configured
+`agents` list as-is.
 
 ### Picking the lineup
 

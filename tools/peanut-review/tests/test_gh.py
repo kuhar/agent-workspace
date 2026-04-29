@@ -112,6 +112,45 @@ def test_parse_pr_spec_rejects_bad_input(bad):
         gh.parse_pr_spec(bad)
 
 
+def test_resolve_pr_spec_accepts_full_spec_without_gh(gh_shim):
+    assert gh.resolve_pr_spec("acme/foo#42") == ("acme/foo", 42)
+    assert gh_shim.calls() == []
+
+
+def test_resolve_pr_spec_uses_gh_for_bare_number(gh_shim, tmp_path):
+    gh_shim.set_fixtures([{
+        "match": ["pr", "view", "42", "url"],
+        "stdout": json.dumps({"url": "https://github.com/acme/foo/pull/42"}),
+    }])
+    assert gh.resolve_pr_spec("42", workspace=str(tmp_path)) == ("acme/foo", 42)
+    [call] = gh_shim.calls()
+    assert call["argv"] == ["pr", "view", "42", "--json", "url"]
+
+
+def test_resolve_pr_spec_falls_back_to_repo_view(gh_shim, tmp_path):
+    gh_shim.set_fixtures([
+        {
+            "match": ["pr", "view", "42", "--repo", "acme/foo"],
+            "stdout": json.dumps({"url": "https://github.com/acme/foo/pull/42"}),
+        },
+        {
+            "match": ["pr", "view", "42", "url"],
+            "rc": 1,
+            "stderr": "not on a PR branch",
+        },
+        {
+            "match": ["repo", "view", "nameWithOwner"],
+            "stdout": json.dumps({"nameWithOwner": "acme/foo"}),
+        },
+    ])
+    assert gh.resolve_pr_spec("42", workspace=str(tmp_path)) == ("acme/foo", 42)
+    calls = gh_shim.calls()
+    assert calls[1]["argv"] == ["repo", "view", "--json", "nameWithOwner"]
+    assert calls[2]["argv"] == [
+        "pr", "view", "42", "--repo", "acme/foo", "--json", "url",
+    ]
+
+
 # ---------------- fetch_pr_info ----------------
 
 
@@ -321,6 +360,58 @@ def test_init_id_rejects_reserved_route_and_bad_chars(tmp_path):
                    "--workspace", ws, "--id", "has/slash"])
     assert rc == 1
     assert "invalid session id" in err.getvalue()
+
+
+def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
+    ws = _stage_workspace(tmp_path)
+    import subprocess
+    head = subprocess.run(["git", "-C", ws, "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    base = subprocess.run(["git", "-C", ws, "rev-parse", "HEAD~"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+    config_path = tmp_path / ".peanut-review.json"
+    review_root = tmp_path / "reviews"
+    config_path.write_text(json.dumps({
+        "reviewRoot": str(review_root),
+        "workspaceRoot": str(tmp_path),
+        "repoRelative": "ws",
+        "timeout": 77,
+        "agents": [
+            {"name": "vera", "model": "opus", "persona": "vera.md"},
+            {"name": "irene", "model": "gpt", "persona": "irene.md", "runner": "opencode"},
+        ],
+    }))
+
+    gh_shim.set_fixtures([
+        {
+            "match": ["pr", "view", "42", "url"],
+            "stdout": json.dumps({"url": "https://github.com/acme/foo/pull/42"}),
+        },
+        {
+            "match": ["pr", "view", "42", "number,headRefOid,baseRefOid,url,title"],
+            "stdout": json.dumps({
+                "number": 42,
+                "headRefOid": head,
+                "baseRefOid": base,
+                "url": "https://github.com/acme/foo/pull/42",
+                "title": "Add a feature",
+            }),
+        },
+    ])
+
+    rc = main(["start", "42", "--config", str(config_path), "--no-launch"])
+    assert rc == 0
+
+    sd = review_root / "acme-foo-pr-42"
+    s = sess.load_session(sd)
+    assert s.workspace == ws
+    assert s.timeout == 77
+    assert s.github is not None
+    assert s.github.repo == "acme/foo"
+    assert s.github.number == 42
+    assert [a.name for a in s.agents] == ["vera", "irene"]
+    assert s.agents[1].runner == "opencode"
 
 
 # ---------------- gh-push ----------------

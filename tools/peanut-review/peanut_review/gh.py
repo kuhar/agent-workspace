@@ -78,15 +78,62 @@ def parse_pr_spec(spec: str) -> tuple[str, int]:
 
 
 def _run(args: list[str], *, input: str | None = None,
-         timeout: int = 60) -> str:
+         timeout: int = 60, cwd: str | None = None) -> str:
     """Invoke `gh` and return stdout. Raises GhError on non-zero exit."""
     cmd = [_gh_bin(), *args]
     res = subprocess.run(
         cmd, input=input, capture_output=True, text=True, timeout=timeout,
+        cwd=cwd,
     )
     if res.returncode != 0:
         raise GhError(cmd, res.returncode, res.stderr, res.stdout)
     return res.stdout
+
+
+def resolve_pr_spec(spec: str, *, workspace: str | None = None) -> tuple[str, int]:
+    """Resolve a user PR argument to (`owner/repo`, pr_number).
+
+    Full GitHub PR specs are parsed directly. A bare number is resolved with
+    `gh` from the workspace checkout so project configs do not need to repeat
+    `owner/repo`. If the current branch/repo context is insufficient, fall back
+    to `gh repo view` and retry with the detected repository.
+    """
+    stripped = spec.strip()
+    try:
+        return parse_pr_spec(stripped)
+    except ValueError:
+        if not stripped.isdigit():
+            raise
+
+    number = int(stripped)
+    try:
+        out = _run([
+            "pr", "view", stripped,
+            "--json", "url",
+        ], cwd=workspace)
+    except GhError:
+        repo_out = _run([
+            "repo", "view",
+            "--json", "nameWithOwner",
+        ], cwd=workspace)
+        repo = json.loads(repo_out).get("nameWithOwner")
+        if not repo:
+            raise ValueError("gh repo view did not return nameWithOwner")
+        out = _run([
+            "pr", "view", stripped,
+            "--repo", repo,
+            "--json", "url",
+        ], cwd=workspace)
+
+    url = json.loads(out).get("url")
+    if not url:
+        raise ValueError("gh pr view did not return a PR url")
+    repo, parsed_number = parse_pr_spec(url)
+    if parsed_number != number:
+        raise ValueError(
+            f"gh resolved PR {number} to unexpected PR {parsed_number}: {url}"
+        )
+    return repo, number
 
 
 def _api(endpoint: str, *, method: str = "GET",

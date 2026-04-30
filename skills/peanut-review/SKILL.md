@@ -1,6 +1,6 @@
 ---
 name: peanut-review
-description: Orchestrate a structured multi-agent code review using peanut-review CLI
+description: Orchestrate structured multi-agent code review for local changes or GitHub PRs using peanut-review CLI
 user_invocable: true
 ---
 
@@ -16,7 +16,25 @@ You drive the review lifecycle using the `peanut-review` CLI tool.
 - Personas live in `skills/peanut-gallery-review/personas/`
 - Agent prompt template: `skills/peanut-review/agent-prompt.md`
 
-## Workflow
+## Choose Review Mode
+
+Peanut Review supports two different lifecycles. Choose the mode first and do
+not mix the lifecycles unless the user explicitly asks for it.
+
+Use **GitHub PR review** when the input is a PR number, PR URL, or external
+author changes. The goal is to import existing GitHub context, run agent
+reviewers, curate the findings, and push review comments or an
+approve/request-changes decision back to GitHub. Do not default to applying
+fixes, resolving comments, or running the rebuttal loop for someone else's PR.
+
+Use **local agent-authored review** when reviewing code in the current
+workspace that you or another agent authored locally. The orchestrator owns the
+patch, so the round 1 → triage/fix/rebuttal → final verdict flow is appropriate.
+
+If the user's intent is unclear, ask one short question: "Is this a local
+author-owned review, or a GitHub PR review?"
+
+## GitHub PR Reviews
 
 ### Step 1 — Use the project config
 
@@ -70,7 +88,9 @@ peanut-review start <pr-number-or-url> --no-launch
 peanut-review --session <printed-session-path> launch
 ```
 
-After launch, always verify that agents actually started:
+After launch, set `PEANUT_SESSION=<printed-session-path>` or pass
+`--session <printed-session-path>` on subsequent commands. Always verify that
+agents actually started:
 
 ```bash
 peanut-review --session <printed-session-path> status
@@ -98,7 +118,7 @@ peanut-review --session <printed-session-path> launch
 This spawns one agent per configured reviewer, each with their persona and a
 rendered prompt containing the session path and diff commands.
 
-### Step 4 — Monitor Round 1
+### Step 4 — Monitor the agent review
 
 Periodically check for agent questions:
 ```bash
@@ -110,75 +130,173 @@ Reply to any questions:
 peanut-review reply --agent <name> --id <qid> "your answer"
 ```
 
-Wait for all agents to complete Round 1:
+Wait for all agents to complete the first review pass:
 ```bash
 peanut-review wait-all round-done --timeout 900
 ```
 
-### Step 5 — Triage findings
+Do not signal `next-round` just to force a rebuttal pass. For GitHub PRs, a
+second pass is for author updates, a substantial new push, or an explicit human
+request for another agent review.
 
-View all comments posted so far:
+### Step 5 — Curate findings
+
+Fetch any GitHub comments that arrived while agents were running, then view all
+comments posted so far:
 ```bash
+peanut-review gh-pull
 peanut-review comments
 ```
 
 Global comments can carry GitHub-style review categories. Use `comment` for
 ordinary high-level feedback, `approve` for approvals, and `request-changes`
 for blocking reviews. Approval/blocking categories are only valid on top-level
-global comments:
+global comments.
+
+For GitHub PRs, curate rather than fix by default:
+
+- Remove duplicate/noisy local comments before pushing if needed with
+  `peanut-review delete <c_id>`.
+- Add replies only when they clarify a finding for the PR author.
+- Do not resolve imported GitHub comments unless the GitHub discussion was
+  actually resolved or the user asks you to manage it.
+- Remember the id of the last comment you reviewed. Use `--since <id>` in later
+  passes to see only new activity.
+
+When the review has an overall conclusion, add one top-level global comment
+with the GitHub review category:
 
 ```bash
 peanut-review add-global-comment --category request-changes --body "Blocking issue: ..."
 peanut-review add-global-comment --category approve --body "LGTM"
 ```
 
-Remember the id of the last comment you reviewed — you'll use it as
-`--since <id>` in later passes to see only what's new.
+Use `--category comment` or omit `--category` for non-verdict high-level
+feedback.
+
+### Step 6 — Push to GitHub
+
+Preview before mutating GitHub:
+
+```bash
+peanut-review gh-push --dry-run
+```
+
+If the plan is correct, push local anchored comments, global comments, and any
+global approval/blocking category to GitHub:
+
+```bash
+peanut-review gh-push
+```
+
+For self-owned PRs, GitHub may reject approve/request-changes events. In that
+case use a normal global comment instead of an approval/blocking category.
+
+### Step 7 — Re-review after author updates
+
+When the PR author pushes new commits, update the local checkout using the
+project's normal PR-refresh flow, then refresh the peanut-review session:
+
+```bash
+peanut-review gh-pull
+peanut-review migrate
+```
+
+If another agent pass is useful, launch the configured agents again and review
+only the new comments:
+
+```bash
+peanut-review launch
+peanut-review wait-all round-done --timeout 900
+peanut-review comments --since <last-comment-id>
+```
+
+## Local Agent-Authored Reviews
+
+Use this mode when reviewing local changes that the orchestrator can modify
+directly. This is where the triage/rebuttal/final-verdict loop belongs.
+
+### Step 1 — Initialize and launch
+
+Create a local session against the workspace and diff under review. If a
+project `.peanut-review.json` exists, reuse its `agents` lineup rather than
+choosing reviewers by hand.
+
+```bash
+peanut-review --session <session-path> init \
+  --workspace <repo-path> \
+  --base <base-ref> \
+  --topic HEAD \
+  --agents '<agents-json-or-file>'
+peanut-review --session <session-path> launch
+```
+
+Then set `PEANUT_SESSION=<session-path>` or pass `--session <session-path>` on
+subsequent commands.
+
+### Step 2 — Monitor Round 1
+
+```bash
+peanut-review inbox
+peanut-review wait-all round-done --timeout 900
+peanut-review comments
+```
+
+Reply to any agent questions:
+
+```bash
+peanut-review reply --agent <name> --id <qid> "your answer"
+```
+
+### Step 3 — Triage and fix
 
 For each finding, evaluate it and either:
-- Resolve the comment (`peanut-review resolve <c_id>`) to mark it applied,
-  ideally after applying the fix in code
-- Reply to it (`peanut-review add-comment --reply-to <c_id> --body "..."`)
-  to record a rebuttal or note any partial fix
 
-Commit any fixes you applied. Then update the session HEAD so prior
-comments anchored to old line numbers get correctly marked stale:
+- Apply the fix in code, then resolve the comment with
+  `peanut-review resolve <c_id>`.
+- If the finding is intentionally not fixed, reply with the specific rebuttal:
+  `peanut-review add-comment --reply-to <c_id> --body "..."`.
+
+Commit any fixes you applied. Then update the session HEAD so prior comments
+anchored to old line numbers get correctly marked stale:
+
 ```bash
 peanut-review migrate
 ```
 
-### Step 6 — Wake agents for the next pass
+### Step 4 — Run the rebuttal pass
+
+Wake agents for the next pass:
 
 ```bash
 peanut-review signal-all next-round
 ```
 
-This unblocks any agents waiting on `next-round`. There is no round
-counter — each pass is just another batch of comments, and the orchestrator
-tracks "what's new since last time" via `--since <comment-id>`.
+This unblocks agents waiting on `next-round`. There is no round counter; each
+pass is another batch of comments, and the orchestrator tracks "what's new
+since last time" via `--since <comment-id>`.
 
-### Step 7 — Monitor the next pass
+Monitor the next pass:
 
-Same as Step 4:
 ```bash
 peanut-review inbox
 peanut-review wait-all round-done --timeout 600
 ```
 
-### Step 8 — Review the new comments
+Review new comments:
 
 ```bash
 peanut-review comments --since <last-comment-id>
 ```
 
 Apply any additional fixes if needed. For human-led reviews you may
-repeat Steps 5–7 with another `signal-all next-round` as many times as
+repeat this step with another `signal-all next-round` as many times as
 useful; there is no built-in limit on passes.
 
-### Step 9 — Record verdict
+### Step 5 — Record final verdict
 
 ```bash
-peanut-review verdict --approve --update-bead --body "All critical issues addressed"
+peanut-review verdict --approve --body "All critical issues addressed"
 ```
 
 Or if changes still needed:
@@ -186,7 +304,7 @@ Or if changes still needed:
 peanut-review verdict --request-changes --body "Outstanding critical issue in X"
 ```
 
-### Step 10 — (Optional) Archive to git notes
+### Step 6 — Optional archive to git notes
 
 ```bash
 peanut-review archive
@@ -233,7 +351,7 @@ The server:
 - Renders each session's unified diff with pygments syntax highlighting
   under `/sessions/<id>/`.
 - Shows existing comments (agent + human) anchored to source-file lines,
-  with author, severity, round, and stale/resolved badges.
+  with author, severity, category, round, and stale/resolved badges.
 - Lets humans post new comments by clicking a line number, or high-level
   comments via the "High-level feedback" section at the top of each session.
 - Auto-detects workspace HEAD shifts (e.g. `git commit --amend`) and runs

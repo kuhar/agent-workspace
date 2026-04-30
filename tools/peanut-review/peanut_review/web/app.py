@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import gh, gh_pull, gh_push, polling, store
-from ..models import Comment, Severity
+from ..models import Comment, CommentCategory, Severity, normalize_comment_category
 from ..session import (
     GLOBAL_FILE,
     load_session,
@@ -169,6 +169,7 @@ ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
 # current global routes. Guards against a session-id slug called "api".
 RESERVED_ROOTS = {"api"}
 VALID_SEVERITIES = {s.value for s in Severity}
+VALID_CATEGORIES = {c.value for c in CommentCategory}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -302,15 +303,19 @@ class _Handler(BaseHTTPRequestHandler):
         if tail == "/api/comments":
             q = parse_qs(url.query)
             comments = store.read_all_comments(session_dir)
-            filtered = store.filter_comments(
-                comments,
-                agent=(q.get("agent", [None])[0]),
-                file=(q.get("file", [None])[0]),
-                severity=(q.get("severity", [None])[0]),
-                since=(q.get("since", [None])[0]),
-                unresolved="unresolved" in q,
-                include_deleted="include_deleted" in q,
-            )
+            try:
+                filtered = store.filter_comments(
+                    comments,
+                    agent=(q.get("agent", [None])[0]),
+                    file=(q.get("file", [None])[0]),
+                    severity=(q.get("severity", [None])[0]),
+                    category=(q.get("category", [None])[0]),
+                    since=(q.get("since", [None])[0]),
+                    unresolved="unresolved" in q,
+                    include_deleted="include_deleted" in q,
+                )
+            except ValueError as e:
+                return self._error(400, str(e))
             self._json(200, [_comment_to_dict(c) for c in filtered])
             return
 
@@ -376,6 +381,10 @@ class _Handler(BaseHTTPRequestHandler):
         severity = str(data.get("severity") or "suggestion")
         if severity not in VALID_SEVERITIES:
             return self._error(400, f"invalid severity: {severity}")
+        try:
+            category = normalize_comment_category(str(data.get("category") or "comment"))
+        except ValueError as e:
+            return self._error(400, str(e))
         author = str(data.get("author") or _default_author())
 
         # Reply mode: reply_to in payload. Inherits parent's file/line so
@@ -387,6 +396,11 @@ class _Handler(BaseHTTPRequestHandler):
             reply_to = store.normalize_reply_to(all_comments, str(reply_to_raw))
             if reply_to is None:
                 return self._error(404, f"reply_to comment not found: {reply_to_raw}")
+            if category != CommentCategory.COMMENT.value:
+                return self._error(
+                    400,
+                    "approve/request-changes categories cannot be used on replies",
+                )
             parent = next(c for c in all_comments if c.id == reply_to)
             file = parent.file
             line = parent.line
@@ -405,6 +419,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if "file" not in data or "line" not in data:
                     return self._error(
                         400, "missing field: file/line (or pass scope='global')")
+                if category != CommentCategory.COMMENT.value:
+                    return self._error(
+                        400,
+                        "approve/request-changes categories are only valid on global comments",
+                    )
                 file = str(data["file"])
                 try:
                     line = int(data["line"])
@@ -424,10 +443,14 @@ class _Handler(BaseHTTPRequestHandler):
             end_line=end_line,
             body=body,
             severity=severity,
+            category=category,
             head_sha=session.current_head,
             reply_to=reply_to,
         )
-        store.append_comment(session_dir, comment)
+        try:
+            store.append_comment(session_dir, comment)
+        except ValueError as e:
+            return self._error(400, str(e))
         self._json(201, _comment_to_dict(comment))
 
     def _post_edit(self, session_dir: Path, data: dict) -> None:
@@ -436,18 +459,29 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(400, "missing comment_id")
         body = data.get("body")
         severity = data.get("severity")
-        if body is None and severity is None:
-            return self._error(400, "must supply body or severity")
+        category = data.get("category")
+        if body is None and severity is None and category is None:
+            return self._error(400, "must supply body or severity or category")
         if severity is not None and severity not in VALID_SEVERITIES:
             return self._error(400, f"invalid severity: {severity}")
+        if category is not None:
+            try:
+                category = normalize_comment_category(str(category))
+            except ValueError as e:
+                return self._error(400, str(e))
         edited_by = str(data.get("author") or _default_author())
 
-        if not store.edit_comment(
-            session_dir, cid,
-            body=str(body) if body is not None else None,
-            severity=str(severity) if severity is not None else None,
-            edited_by=edited_by,
-        ):
+        try:
+            edited = store.edit_comment(
+                session_dir, cid,
+                body=str(body) if body is not None else None,
+                severity=str(severity) if severity is not None else None,
+                category=category,
+                edited_by=edited_by,
+            )
+        except ValueError as e:
+            return self._error(400, str(e))
+        if not edited:
             return self._error(404, f"comment not found: {cid}")
 
         # Return the post-edit comment so the client can drop in the latest
@@ -510,6 +544,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         new_top = [{
             "id": c.id, "author": c.author, "severity": c.severity,
+            "category": c.category,
             "ref": _ref(c), "body": c.body,
         } for c in plan.new_top]
         new_replies = []
@@ -526,6 +561,7 @@ class _Handler(BaseHTTPRequestHandler):
             })
         edits = [{
             "id": c.id, "author": c.author, "severity": c.severity,
+            "category": c.category,
             "ref": _ref(c),
             "external_id": c.external_id,
             "external_url": c.external_url,
@@ -541,6 +577,7 @@ class _Handler(BaseHTTPRequestHandler):
             "new_replies": new_replies,
             "edits": edits,
             "skipped_meta": plan.skipped_meta,
+            "skipped_imported_reviews": plan.skipped_imported_reviews,
             "total": plan.total,
         })
 
@@ -556,7 +593,9 @@ class _Handler(BaseHTTPRequestHandler):
         if plan.total == 0:
             return self._json(200, {
                 "pushed": 0, "failed": 0, "orphaned": 0,
-                "skipped_meta": plan.skipped_meta, "items": [],
+                "skipped_meta": plan.skipped_meta,
+                "skipped_imported_reviews": plan.skipped_imported_reviews,
+                "items": [],
                 "summary": "Nothing to push.",
             })
         result = gh_push.execute_push(session_dir, s, s.github, plan)
@@ -565,6 +604,7 @@ class _Handler(BaseHTTPRequestHandler):
             "failed": result.failed,
             "orphaned": result.orphaned,
             "skipped_meta": result.skipped_meta,
+            "skipped_imported_reviews": result.skipped_imported_reviews,
             "items": [
                 {"id": i.id, "action": i.action,
                  "external_id": i.external_id,
@@ -588,7 +628,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, {
             "new_anchored": r.new_anchored,
             "new_global": r.new_global,
+            "new_reviews": r.new_reviews,
             "edited": r.edited,
+            "retimestamped": r.retimestamped,
+            "recategorized": r.recategorized,
             "skipped": r.skipped,
             "summary": r.summary(),
         })
@@ -604,6 +647,7 @@ def _comment_to_dict(c: Comment) -> dict:
         "end_line": c.end_line,
         "body": c.body,
         "severity": c.severity,
+        "category": c.category,
         "resolved": c.resolved,
         "resolved_by": c.resolved_by,
         "resolved_at": c.resolved_at,

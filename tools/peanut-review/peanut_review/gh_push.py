@@ -3,7 +3,7 @@ web UI's confirmation-modal endpoints.
 
 Two phases so the UI can preview before committing:
 - `plan_push(comments)` — pure: classify into new-top/reply/edit buckets,
-  build the local→external id map, count skipped-meta.
+  build the local→external id map, count skipped rows.
 - `execute_push(session_dir, session, ghpr, plan)` — side-effecting: hits
   `gh` for each bucket, persists external_* on each successful comment.
 """
@@ -21,6 +21,7 @@ class PushPlan:
     new_replies: list[models.Comment] = field(default_factory=list)
     edits: list[models.Comment] = field(default_factory=list)
     skipped_meta: int = 0
+    skipped_imported_reviews: int = 0
     # local_id → external_id, seeded from already-pushed comments.
     ext_map: dict[str, str] = field(default_factory=dict)
 
@@ -45,6 +46,7 @@ class PushResult:
     failed: int = 0
     orphaned: int = 0
     skipped_meta: int = 0
+    skipped_imported_reviews: int = 0
 
     def summary(self) -> str:
         parts = [f"Pushed {self.pushed}"]
@@ -54,6 +56,8 @@ class PushResult:
             parts.append(f"orphaned {self.orphaned}")
         if self.skipped_meta:
             parts.append(f"skipped {self.skipped_meta} __meta__")
+        if self.skipped_imported_reviews:
+            parts.append(f"skipped {self.skipped_imported_reviews} imported reviews")
         return ", ".join(parts) + "."
 
 
@@ -64,12 +68,21 @@ def plan_push(comments: list[models.Comment]) -> PushPlan:
     - external_id set + body diverges from synced body → edit
     - matches synced → no-op (not in any bucket)
     - file == META_FILE → skipped (__meta__ has no GH equivalent)
+    - imported/pushed PR review summaries are skipped after their backing
+      GitHub review object exists
     """
     plan = PushPlan()
     for c in comments:
+        c.category = models.normalize_comment_category(c.category)
         if c.deleted:
             continue
         if c.file == sess.META_FILE:
+            plan.skipped_meta += 1
+            continue
+        if c.external_source and c.external_source != "github":
+            plan.skipped_imported_reviews += 1
+            continue
+        if models.category_is_review_decision(c.category) and c.file != sess.GLOBAL_FILE:
             plan.skipped_meta += 1
             continue
         if c.external_id is None:
@@ -96,13 +109,26 @@ def execute_push(
     `external_url`, and `external_synced_body` on the local comment so a
     re-run is a no-op.
     """
-    result = PushResult(skipped_meta=plan.skipped_meta)
+    result = PushResult(
+        skipped_meta=plan.skipped_meta,
+        skipped_imported_reviews=plan.skipped_imported_reviews,
+    )
     ext_map = dict(plan.ext_map)  # local copy — don't mutate caller's
 
     for c in plan.new_top:
         try:
             if c.file == sess.GLOBAL_FILE:
-                resp = gh.post_issue_comment(ghpr.repo, ghpr.number, body=c.body)
+                if c.category == models.CommentCategory.APPROVE.value:
+                    resp = gh.post_pr_review(
+                        ghpr.repo, ghpr.number, event="APPROVE", body=c.body,
+                    )
+                elif c.category == models.CommentCategory.REQUEST_CHANGES.value:
+                    resp = gh.post_pr_review(
+                        ghpr.repo, ghpr.number,
+                        event="REQUEST_CHANGES", body=c.body,
+                    )
+                else:
+                    resp = gh.post_issue_comment(ghpr.repo, ghpr.number, body=c.body)
             else:
                 # GitHub anchors a multi-line comment at its END line and
                 # uses `start_line` for the (strictly smaller) start. Our
@@ -126,9 +152,17 @@ def execute_push(
             continue
         ext_id = str(resp["id"])
         url = resp.get("html_url", "")
+        external_source = (
+            "github-review"
+            if c.category in {
+                models.CommentCategory.APPROVE.value,
+                models.CommentCategory.REQUEST_CHANGES.value,
+            }
+            else "github"
+        )
         store.update_comment_external(
             session_dir, c.id,
-            external_source="github", external_id=ext_id,
+            external_source=external_source, external_id=ext_id,
             external_url=url, external_synced_body=c.body,
         )
         ext_map[c.id] = ext_id

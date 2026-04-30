@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from peanut_review import gh, models
+from peanut_review import gh, gh_push, models
 from peanut_review import session as sess
 from peanut_review import store
 from peanut_review.cli import main
@@ -77,7 +77,17 @@ def gh_shim(tmp_path: Path, monkeypatch):
 
     class Shim:
         def set_fixtures(self, fxs: list[dict]) -> None:
-            fixtures_path.write_text(json.dumps(fxs))
+            fixtures = list(fxs)
+            has_reviews = any(
+                "repos/acme/foo/pulls/42/reviews" in fx.get("match", [])
+                for fx in fixtures
+            )
+            if not has_reviews:
+                fixtures.append({
+                    "match": ["api", "repos/acme/foo/pulls/42/reviews"],
+                    "stdout": "[]",
+                })
+            fixtures_path.write_text(json.dumps(fixtures))
 
         def calls(self) -> list[dict]:
             if not calls_path.exists():
@@ -259,6 +269,17 @@ def test_fetch_review_comments_handles_empty(gh_shim):
     assert gh.fetch_review_comments("acme/foo", 42) == []
 
 
+def test_fetch_pr_reviews_concatenates_paginated_arrays(gh_shim):
+    p1 = json.dumps([{"id": 10, "body": "summary"}])
+    p2 = json.dumps([{"id": 11, "body": "lgtm"}])
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/reviews", "--paginate"],
+        "stdout": p1 + p2,
+    }])
+    out = gh.fetch_pr_reviews("acme/foo", 42)
+    assert [c["id"] for c in out] == [10, 11]
+
+
 # ---------------- init --gh-pr ----------------
 
 
@@ -398,6 +419,27 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
                 "title": "Add a feature",
             }),
         },
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/comments"],
+            "stdout": json.dumps([{
+                "id": 100,
+                "user": {"login": "octocat"},
+                "path": "foo.py",
+                "line": 2,
+                "body": "anchored from github",
+                "html_url": "https://h/c/100",
+                "commit_id": head,
+            }]),
+        },
+        {
+            "match": ["api", "repos/acme/foo/issues/42/comments"],
+            "stdout": json.dumps([{
+                "id": 200,
+                "user": {"login": "ghost"},
+                "body": "global from github",
+                "html_url": "https://h/i/200",
+            }]),
+        },
     ])
 
     rc = main(["start", "42", "--config", str(config_path), "--no-launch"])
@@ -412,6 +454,14 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
     assert s.github.number == 42
     assert [a.name for a in s.agents] == ["vera", "irene"]
     assert s.agents[1].runner == "opencode"
+
+    comments = {c.external_id: c for c in store.read_all_comments(sd)}
+    assert set(comments) == {"100", "200"}
+    assert comments["100"].author == "gh:octocat"
+    assert comments["100"].file == "foo.py"
+    assert comments["100"].line == 2
+    assert comments["200"].author == "gh:ghost"
+    assert comments["200"].file == ""
 
 
 # ---------------- gh-push ----------------
@@ -471,6 +521,53 @@ def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     assert cs["anchored"].external_synced_body == "anchored"
     assert cs["global"].external_id == "200"
     assert cs["global"].external_url == "https://h/i/200"
+
+
+def test_gh_push_global_approval_posts_pr_review(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="felix", file="", line=0, body="lgtm",
+        category=models.CommentCategory.APPROVE.value,
+    ))
+
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"],
+        "stdout": json.dumps({
+            "id": 300,
+            "html_url": "https://h/r/300",
+        }),
+    }])
+
+    rc = main(["--session", sd, "gh-push"])
+    assert rc == 0
+    [call] = gh_shim.calls()
+    assert call["argv"][:4] == ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"]
+    assert json.loads(call["stdin"]) == {"event": "APPROVE", "body": "lgtm"}
+
+    [stored] = store.read_all_comments(sd)
+    assert stored.external_source == "github-review"
+    assert stored.external_id == "300"
+
+
+def test_gh_push_global_request_changes_posts_blocking_review(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="felix", file="", line=0, body="fix the tests",
+        category=models.CommentCategory.REQUEST_CHANGES.value,
+    ))
+
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"],
+        "stdout": json.dumps({"id": 301, "html_url": "https://h/r/301"}),
+    }])
+
+    rc = main(["--session", sd, "gh-push"])
+    assert rc == 0
+    [call] = gh_shim.calls()
+    assert json.loads(call["stdin"]) == {
+        "event": "REQUEST_CHANGES",
+        "body": "fix the tests",
+    }
 
 
 def test_gh_push_skips_already_pushed_comments(gh_shim, tmp_path):
@@ -709,6 +806,16 @@ def test_gh_push_skips_unchanged_comments(gh_shim, tmp_path):
     assert gh_shim.calls() == []
 
 
+def test_gh_push_ignores_imported_pr_review_summaries():
+    plan = gh_push.plan_push([models.Comment(
+        author="gh:qedawkins", file="", line=0, body="locally edited",
+        external_source="github-review", external_id="4100433093",
+        external_synced_body="original summary",
+    )])
+    assert plan.total == 0
+    assert plan.skipped_imported_reviews == 1
+
+
 def test_gh_push_skips_meta_comments(gh_shim, tmp_path):
     """`__meta__` is an agent-only sentinel (test exec reports). The path
     doesn't exist in the repo, so pushing it would fail at GitHub. Skip
@@ -819,6 +926,183 @@ def test_gh_pull_appends_anchored_and_global_comments(gh_shim, tmp_path):
     # `feedback` — they're discussion, not actionable findings.
     assert by_author["gh:octocat"].severity == models.Severity.FEEDBACK.value
     assert by_author["gh:ghost"].severity == models.Severity.FEEDBACK.value
+
+
+def test_gh_pull_uses_github_timestamps_for_global_order(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "repos/acme/foo/issues/42/comments"],
+            "stdout": json.dumps([
+                {
+                    "id": 2,
+                    "user": {"login": "octocat"},
+                    "body": "newer global",
+                    "html_url": "https://h/i/2",
+                    "created_at": "2026-04-22T19:15:08Z",
+                },
+                {
+                    "id": 1,
+                    "user": {"login": "octocat"},
+                    "body": "older global",
+                    "html_url": "https://h/i/1",
+                    "created_at": "2026-04-17T07:29:45Z",
+                },
+            ]),
+        },
+    ])
+
+    rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+
+    comments = store.read_all_comments(sd)
+    assert [c.body for c in comments] == ["older global", "newer global"]
+    assert comments[0].timestamp == "2026-04-17T07:29:45.000000+00:00"
+    assert comments[1].timestamp == "2026-04-22T19:15:08.000000+00:00"
+
+
+def test_gh_pull_appends_pr_review_summaries(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    review_summary = {
+        "id": 4100433093,
+        "user": {"login": "qedawkins"},
+        "body": "I don't see any testing of the new constraint generation.",
+        "state": "CHANGES_REQUESTED",
+        "html_url": "https://github.com/acme/foo/pull/42#pullrequestreview-4100433093",
+        "commit_id": "abc",
+        "submitted_at": "2026-04-13T16:57:01Z",
+    }
+    empty_summary = {
+        "id": 4100433094,
+        "user": {"login": "octocat"},
+        "body": "",
+        "state": "COMMENTED",
+        "html_url": "https://github.com/acme/foo/pull/42#pullrequestreview-4100433094",
+        "commit_id": "abc",
+    }
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"], "stdout": "[]"},
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/reviews"],
+            "stdout": json.dumps([review_summary, empty_summary]),
+        },
+    ])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+    assert "1 review summaries" in out.getvalue()
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.author == "gh:qedawkins"
+    assert comment.file == ""
+    assert comment.severity == models.Severity.WARNING.value
+    assert comment.category == models.CommentCategory.REQUEST_CHANGES.value
+    assert comment.external_source == "github-review"
+    assert comment.external_id == "4100433093"
+    assert comment.external_url.endswith("pullrequestreview-4100433093")
+    assert comment.head_sha == "abc"
+    assert comment.timestamp == "2026-04-13T16:57:01.000000+00:00"
+
+
+def test_gh_pull_repairs_existing_import_timestamps(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="gh:qedawkins", file="", line=0, body="summary",
+        timestamp="2026-04-29T21:31:31.945240+00:00",
+        external_source="github-review", external_id="4100433093",
+        external_synced_body="summary",
+    ))
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"], "stdout": "[]"},
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/reviews"],
+            "stdout": json.dumps([{
+                "id": 4100433093,
+                "user": {"login": "qedawkins"},
+                "body": "summary",
+                "state": "COMMENTED",
+                "html_url": "https://github.com/acme/foo/pull/42#pullrequestreview-4100433093",
+                "submitted_at": "2026-04-13T16:57:01Z",
+            }]),
+        },
+    ])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+    assert "1 timestamps" in out.getvalue()
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.timestamp == "2026-04-13T16:57:01.000000+00:00"
+    assert comment.versions == []
+
+
+def test_gh_pull_maps_approved_review_to_global_approval(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"], "stdout": "[]"},
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/reviews"],
+            "stdout": json.dumps([{
+                "id": 10,
+                "user": {"login": "octocat"},
+                "body": "",
+                "state": "APPROVED",
+                "html_url": "https://github.com/acme/foo/pull/42#pullrequestreview-10",
+                "submitted_at": "2026-04-13T16:57:01Z",
+            }]),
+        },
+    ])
+
+    rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.file == ""
+    assert comment.body == ""
+    assert comment.category == models.CommentCategory.APPROVE.value
+
+
+def test_gh_pull_repairs_existing_review_categories(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="gh:qedawkins", file="", line=0, body="summary",
+        timestamp="2026-04-13T16:57:01.000000+00:00",
+        external_source="github-review", external_id="4100433093",
+        external_synced_body="summary",
+    ))
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"], "stdout": "[]"},
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/reviews"],
+            "stdout": json.dumps([{
+                "id": 4100433093,
+                "user": {"login": "qedawkins"},
+                "body": "summary",
+                "state": "CHANGES_REQUESTED",
+                "html_url": "https://github.com/acme/foo/pull/42#pullrequestreview-4100433093",
+                "submitted_at": "2026-04-13T16:57:01Z",
+            }]),
+        },
+    ])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+    assert "1 categories" in out.getvalue()
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.category == models.CommentCategory.REQUEST_CHANGES.value
+    assert comment.versions == []
 
 
 def test_gh_pull_classifies_nit_prefix_as_nit(gh_shim, tmp_path):

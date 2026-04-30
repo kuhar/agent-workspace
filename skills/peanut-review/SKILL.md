@@ -57,8 +57,9 @@ peanut-review start <pr-number-or-url>
 
 `start` searches upward for `.peanut-review.json`, resolves a bare PR number
 with `gh` from the configured checkout, creates the session at
-`<reviewRoot>/<owner>-<repo>-pr-<number>`, initializes GitHub metadata, and
-launches the configured agents.
+`<reviewRoot>/<owner>-<repo>-pr-<number>`, initializes GitHub metadata, pulls
+existing GitHub PR comments and review summaries into the session, and launches
+the configured agents.
 
 If the project still needs a build before agents run, initialize without
 launching, build, then launch:
@@ -119,6 +120,16 @@ peanut-review wait-all round-done --timeout 900
 View all comments posted so far:
 ```bash
 peanut-review comments
+```
+
+Global comments can carry GitHub-style review categories. Use `comment` for
+ordinary high-level feedback, `approve` for approvals, and `request-changes`
+for blocking reviews. Approval/blocking categories are only valid on top-level
+global comments:
+
+```bash
+peanut-review add-global-comment --category request-changes --body "Blocking issue: ..."
+peanut-review add-global-comment --category approve --body "LGTM"
 ```
 
 Remember the id of the last comment you reviewed — you'll use it as

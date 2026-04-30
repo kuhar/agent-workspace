@@ -222,6 +222,13 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         if is_reply
         else f'<span class="sev {html.escape(c.severity)}">{html.escape(c.severity)}</span>'
     )
+    category_html = ""
+    if not is_reply and c.category != "comment":
+        label = "approved" if c.category == "approve" else "blocking"
+        category_html = (
+            f'<span class="category {html.escape(c.category)}">'
+            f'{html.escape(label)}</span>'
+        )
     edited_html = ""
     if c.edited_at:
         n = len(c.versions)
@@ -247,6 +254,7 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         f'<div class="comment-meta">'
         f'<span class="author">{html.escape(c.author or "unknown")}</span>'
         f'{sev_html}'
+        f'{category_html}'
         f'{"".join(badges)}'
         f'{edited_html}'
         f'{external_html}'

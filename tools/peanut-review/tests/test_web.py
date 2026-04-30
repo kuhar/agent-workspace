@@ -183,6 +183,19 @@ def test_render_global_section_appears_above_files(session_dir: Path, repo: Path
     assert "High-level feedback" in html
 
 
+def test_render_global_review_category_badge(session_dir: Path, repo: Path):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    c = Comment(author="vera", file="", line=0, body="must fix",
+                category="request-changes")
+    store.append_comment(session_dir, c)
+
+    html = render.render_page(s, s.id, files, store.read_all_comments(session_dir),
+                              head_shifted=False)
+    assert 'class="category request-changes"' in html
+    assert "blocking" in html
+
+
 def test_render_global_section_excludes_globals_from_per_file_counts(
     session_dir: Path, repo: Path
 ):
@@ -220,6 +233,35 @@ def test_server_post_global_comment(session_dir: Path):
         cs = store.read_all_comments(session_dir)
         assert len(cs) == 1
         assert cs[0].file == "" and cs[0].line == 0
+    finally:
+        srv.shutdown()
+
+
+def test_server_post_global_review_category(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"scope": "global", "body": "lgtm", "category": "approve"},
+        )
+        assert code == 201
+        assert data["category"] == "approve"
+
+        [comment] = store.read_all_comments(session_dir)
+        assert comment.category == "approve"
+    finally:
+        srv.shutdown()
+
+
+def test_server_rejects_anchored_review_category(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"file": "foo.py", "line": 1, "body": "lgtm", "category": "approve"},
+        )
+        assert code == 400
+        assert "only valid on global comments" in data["error"]
     finally:
         srv.shutdown()
 

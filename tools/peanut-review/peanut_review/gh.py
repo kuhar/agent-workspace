@@ -189,6 +189,12 @@ def fetch_issue_comments(repo: str, number: int) -> list[dict]:
     return _parse_paginated(raw)
 
 
+def fetch_pr_reviews(repo: str, number: int) -> list[dict]:
+    """Submitted PR reviews. Non-empty bodies are review summaries."""
+    raw = _api(f"repos/{repo}/pulls/{number}/reviews", paginate=True)
+    return _parse_paginated(raw)
+
+
 def _parse_paginated(raw: str) -> list[dict]:
     """`gh api --paginate` concatenates JSON arrays back-to-back as
     `][`. Split and merge. Empty result returns []."""

@@ -388,6 +388,38 @@ def test_external_id_round_trip_via_jsonl():
     assert c2.external_synced_body == "from github"
 
 
+def test_comment_category_round_trip_via_jsonl():
+    c = Comment(
+        author="gh:octocat", file="", line=0, body="lgtm",
+        category="approve",
+    )
+    c2 = Comment.from_json(c.to_json())
+    assert c2.category == "approve"
+
+
+def test_review_decision_categories_must_be_global():
+    sd = _make_session()
+    import pytest
+    with pytest.raises(ValueError):
+        append_comment(sd, Comment(
+            author="vera", file="a.py", line=1, body="lgtm",
+            category="approve",
+        ))
+
+
+def test_review_decision_categories_must_be_top_level():
+    sd = _make_session()
+    parent = append_comment(sd, Comment(
+        author="vera", file="", line=0, body="top-level",
+    ))
+    import pytest
+    with pytest.raises(ValueError):
+        append_comment(sd, Comment(
+            author="vera", file="", line=0, body="reply",
+            reply_to=parent.id, category="request-changes",
+        ))
+
+
 def test_update_comment_external_stamps_metadata():
     sd = _make_session()
     c = Comment(author="vera", file="a.py", line=1, body="x")

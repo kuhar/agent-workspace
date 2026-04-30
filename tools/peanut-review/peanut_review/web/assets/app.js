@@ -41,6 +41,12 @@
     return `<a class="external-link" href="${esc(c.external_url)}" target="_blank" rel="noopener" title="View on GitHub">↗ gh</a>`;
   }
 
+  function categoryBadge(c) {
+    if (!c.category || c.category === "comment") return "";
+    const label = c.category === "approve" ? "approved" : "blocking";
+    return `<span class="category ${esc(c.category)}">${esc(label)}</span>`;
+  }
+
   function renderComment(c, { isReply = false } = {}) {
     const cls = ["comment"];
     if (isReply) cls.push("reply");
@@ -58,6 +64,7 @@
         <div class="comment-meta">
           <span class="author">${esc(c.author || "unknown")}</span>
           ${sevHtml}
+          ${isReply ? "" : categoryBadge(c)}
           ${rangeBadge(c)}
           ${c.stale ? '<span class="round">stale</span>' : ""}
           ${resolvedBadge}
@@ -142,6 +149,11 @@
           <option value="critical">critical</option>
           <option value="nit">nit</option>
           <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
+        </select>
+        <select class="category" title="GitHub review category (global comments only)">
+          <option value="comment">comment</option>
+          <option value="approve">approve</option>
+          <option value="request-changes">blocking</option>
         </select>
         <button class="submit">Post</button>
       </div>
@@ -365,9 +377,10 @@
       const body = form.querySelector("textarea").value.trim();
       if (!body) return;
       const severity = form.querySelector(".sev").value;
+      const category = form.querySelector(".category").value;
       try {
         const c = await api("POST", "/api/comments",
-                            { scope: "global", body, severity });
+                            { scope: "global", body, severity, category });
         const rendered = document.createElement("div");
         rendered.innerHTML = renderThread(c);
         container.insertBefore(rendered.firstElementChild, form);
@@ -991,6 +1004,7 @@
       + `<div class="push-meta">`
       +   `<span class="mono">${esc(it.id)}</span>`
       +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
+      +   categoryBadge(it)
       +   `<span class="ref mono">${esc(it.ref)}</span>`
       +   `<span class="muted">by ${esc(it.author || "unknown")}</span>`
       + `</div>`
@@ -1017,6 +1031,7 @@
       + `<div class="push-meta">`
       +   `<span class="mono">${esc(it.id)}</span>`
       +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
+      +   categoryBadge(it)
       +   `<span class="ref mono">${esc(it.ref)}</span>`
       +   `<span class="muted">→ gh#${esc(it.external_id)}</span>`
       + `</div>`
@@ -1044,6 +1059,7 @@
     if (total === 0) {
       html += `<p class="muted">Nothing to push.`
         + (plan.skipped_meta ? ` (${plan.skipped_meta} __meta__ comment${plan.skipped_meta === 1 ? "" : "s"} skipped)` : "")
+        + (plan.skipped_imported_reviews ? ` (${plan.skipped_imported_reviews} imported review${plan.skipped_imported_reviews === 1 ? "" : "s"} skipped)` : "")
         + `</p>`;
     } else {
       html += renderPlanList("New comments", plan.new_top, renderNewItem);
@@ -1051,6 +1067,9 @@
       html += renderPlanList("Edits (PATCH)", plan.edits, renderEditItem);
       if (plan.skipped_meta) {
         html += `<p class="muted">Skipping ${plan.skipped_meta} __meta__ comment${plan.skipped_meta === 1 ? "" : "s"} (no GitHub equivalent).</p>`;
+      }
+      if (plan.skipped_imported_reviews) {
+        html += `<p class="muted">Skipping ${plan.skipped_imported_reviews} imported review${plan.skipped_imported_reviews === 1 ? "" : "s"} (already backed by GitHub review objects).</p>`;
       }
       if (orphans) {
         html += `<p class="warn">${orphans} repl${orphans === 1 ? "y is" : "ies are"} orphaned and will be skipped.</p>`;
@@ -1324,6 +1343,11 @@
       return;
     }
     flashToast(r.summary || "Pulled.");
+    if ((r.new_global || 0) || (r.new_reviews || 0) || (r.edited || 0) ||
+        (r.retimestamped || 0) || (r.recategorized || 0)) {
+      location.reload();
+      return;
+    }
     refreshComments();
   }
 

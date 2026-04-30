@@ -15,6 +15,8 @@
   --suggestion: #69db7c;
   --nit: #868e96;
   --feedback: #5c7cfa;
+  --approve: #40c057;
+  --blocking: #ff922b;
   --stale: #555a63;
   --focus: #ffd866;
 }
@@ -335,6 +337,17 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
 .comment-meta .sev.suggestion { background: var(--suggestion); }
 .comment-meta .sev.nit { background: var(--nit); }
 .comment-meta .sev.feedback { background: var(--feedback); }
+.comment-meta .category, .push-meta .category {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #0f1419;
+  font-weight: 700;
+}
+.comment-meta .category.approve, .push-meta .category.approve { background: var(--approve); }
+.comment-meta .category.request-changes, .push-meta .category.request-changes { background: var(--blocking); }
 .comment-meta .round { background: var(--border); padding: 1px 6px; border-radius: 3px; font-size: 10px; }
 .comment-meta button {
   margin-left: auto;

@@ -249,6 +249,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             f"{shlex.quote(cfg['workspace'])} --gh-pr {pr_info.repo}#{pr_info.number} "
             f"--timeout {timeout} --agents {shlex.quote(json.dumps(agents))}"
         )
+        print("Fetch comments command:")
+        print(f"  peanut-review --session {shlex.quote(str(session_dir))} gh-pull")
         if not args.no_launch:
             print("Launch command:")
             print(f"  peanut-review --session {shlex.quote(str(session_dir))} launch")
@@ -264,6 +266,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 1
 
     if session_json.exists():
+        session_obj = sess.load_session(session_dir)
         print(session_dir)
     else:
         github = models.GitHubPR(
@@ -275,7 +278,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             title=pr_info.title,
         )
         try:
-            _, created_dir = sess.create_session(
+            session_obj, created_dir = sess.create_session(
                 workspace=cfg["workspace"],
                 base_ref=args.base if args.base is not None else pr_info.base_sha,
                 topic_ref=args.topic if args.topic is not None else pr_info.head_sha,
@@ -290,6 +293,14 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
         print(created_dir)
+
+    from . import gh_pull
+    try:
+        pull_result = gh_pull.pull_comments(session_dir, session_obj)
+    except (ValueError, gh.GhError) as e:
+        print(f"Error: could not fetch GitHub comments: {e}", file=sys.stderr)
+        return 1
+    print(pull_result.summary())
 
     if args.no_launch:
         return 0
@@ -331,6 +342,11 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
     # Reply mode: --reply-to <id>. Inherits the parent's file/line so the
     # reply renders in the same thread.
     reply_to_arg = getattr(args, "reply_to", None)
+    try:
+        category = models.normalize_comment_category(getattr(args, "category", None))
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     reply_to: str | None = None
     if reply_to_arg:
         all_comments = store.read_all_comments(session_dir)
@@ -344,6 +360,10 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
             print("Error: --reply-to cannot be combined with "
                   "--file/--line/--end-line/--global "
                   "(replies inherit the parent's location)", file=sys.stderr)
+            return 1
+        if models.category_is_review_decision(category):
+            print("Error: approve/request-changes categories cannot be used on replies",
+                  file=sys.stderr)
             return 1
         parent = next(c for c in all_comments if c.id == reply_to)
         file = parent.file
@@ -368,6 +388,10 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
                 print("Error: --file and --line are required for anchored comments; "
                       "use --global for high-level feedback", file=sys.stderr)
                 return 1
+            if models.category_is_review_decision(category):
+                print("Error: approve/request-changes categories are only valid "
+                      "on global comments", file=sys.stderr)
+                return 1
             file = args.file
             line = args.line
             end_line = args.end_line
@@ -383,11 +407,16 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
         end_line=end_line,
         body=body,
         severity=args.severity,
+        category=category,
         head_sha=s.current_head,
         reply_to=reply_to,
     )
 
-    store.append_comment(session_dir, comment)
+    try:
+        store.append_comment(session_dir, comment)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     if reply_to:
         print(f"{comment.id} (reply to {reply_to})")
@@ -418,6 +447,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
         agent=args.agent,
         file=args.file,
         severity=args.severity,
+        category=args.category,
         since=args.since,
         unresolved=args.unresolved,
         include_deleted=args.include_deleted,
@@ -430,7 +460,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
         if not comments:
             print("No comments found.")
             return 0
-        hdr = f"{'ID':<14} {'Agent':<10} {'Sev':<10} {'File':<30} {'Line':>5}    {'Body'}"
+        hdr = f"{'ID':<14} {'Agent':<10} {'Sev':<10} {'Cat':<15} {'File':<30} {'Line':>5}    {'Body'}"
         print(hdr)
         print("-" * len(hdr))
         for c in comments:
@@ -447,7 +477,7 @@ def cmd_comments(args: argparse.Namespace) -> int:
             body = c.body[:60].replace("\n", " ")
             file_col = "[global]" if c.file == sess.GLOBAL_FILE else c.file
             line_col = "" if c.file == sess.GLOBAL_FILE else str(c.line)
-            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {file_col:<30} {line_col:>5} {flag}  {body}")
+            print(f"{c.id:<14} {c.author:<10} {c.severity:<10} {c.category:<15} {file_col:<30} {line_col:>5} {flag}  {body}")
             if args.show_edits and c.versions:
                 for i, v in enumerate(c.versions, 1):
                     vbody = (v.get("body") or "")[:60].replace("\n", " ")
@@ -475,14 +505,28 @@ def cmd_edit(args: argparse.Namespace) -> int:
         body = None
 
     severity: str | None = args.severity
+    category: str | None = None
+    if args.category is not None:
+        try:
+            category = models.normalize_comment_category(args.category)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
-    if body is None and severity is None:
-        print("Error: at least one of --body, --body-file, --severity required",
+    if body is None and severity is None and category is None:
+        print("Error: at least one of --body, --body-file, --severity, --category required",
               file=sys.stderr)
         return 1
 
-    if not store.edit_comment(session_dir, args.comment_id,
-                              body=body, severity=severity, edited_by=edited_by):
+    try:
+        edited = store.edit_comment(
+            session_dir, args.comment_id,
+            body=body, severity=severity, category=category, edited_by=edited_by,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    if not edited:
         print(f"Error: comment {args.comment_id} not found", file=sys.stderr)
         return 1
     print(f"Edited {args.comment_id}")
@@ -521,14 +565,19 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
     plan = _gh_push.plan_push(comments)
 
     if plan.total == 0:
-        suffix = f" (skipped {plan.skipped_meta} __meta__)" if plan.skipped_meta else ""
+        suffixes = []
+        if plan.skipped_meta:
+            suffixes.append(f"skipped {plan.skipped_meta} __meta__")
+        if plan.skipped_imported_reviews:
+            suffixes.append(f"skipped {plan.skipped_imported_reviews} imported reviews")
+        suffix = f" ({', '.join(suffixes)})" if suffixes else ""
         print(f"Nothing to push{suffix}.")
         return 0
 
     if args.dry_run:
         for c in plan.new_top:
             kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
-            print(f"[dry-run] {c.id} ({c.severity}) → {kind}")
+            print(f"[dry-run] {c.id} ({c.severity}, {c.category}) → {kind}")
         for c in plan.new_replies:
             parent_ext = plan.ext_map.get(c.reply_to)
             tag = f"reply→gh#{parent_ext}" if parent_ext else "reply→<parent not pushed>"
@@ -537,6 +586,8 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
             print(f"[dry-run] {c.id} EDIT → gh#{c.external_id}")
         if plan.skipped_meta:
             print(f"[dry-run] skipped {plan.skipped_meta} __meta__")
+        if plan.skipped_imported_reviews:
+            print(f"[dry-run] skipped {plan.skipped_imported_reviews} imported reviews")
         return 0
 
     result = _gh_push.execute_push(session_dir, s, ghpr, plan)
@@ -900,6 +951,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         parts = [
             f"{len(live)} total",
             f"{sum(1 for c in live if c.severity == 'critical')} critical",
+            f"{sum(1 for c in live if c.category == 'approve')} approvals",
+            f"{sum(1 for c in live if c.category == 'request-changes')} blocking",
             f"{sum(1 for c in live if c.resolved)} resolved",
             f"{sum(1 for c in live if c.stale)} stale",
         ]
@@ -1091,6 +1144,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Severity (default: suggestion). Use `feedback` "
                          "for non-actionable observations (questions, FYI, "
                          "praise) — not as a fallback for unsure findings.")
+    sp.add_argument("--category", default="comment",
+                    choices=["comment", "approve", "request-changes", "block", "blocking"],
+                    help="Review category. approve/request-changes are only valid on global comments")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
 
     # add-global-comment (convenience wrapper around `add-comment --global`)
@@ -1103,6 +1159,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Severity (default: suggestion). Use `feedback` "
                          "for non-actionable observations (questions, FYI, "
                          "praise) — not as a fallback for unsure findings.")
+    sp.add_argument("--category", default="comment",
+                    choices=["comment", "approve", "request-changes", "block", "blocking"],
+                    help="Review category (comment, approve, request-changes)")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
 
     # comments
@@ -1110,6 +1169,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent", help="Filter by agent")
     sp.add_argument("--file", help="Filter by file")
     sp.add_argument("--severity", help="Filter by severity")
+    sp.add_argument("--category", choices=["comment", "approve", "request-changes", "block", "blocking"],
+                    help="Filter by category (comment, approve, request-changes)")
     sp.add_argument("--since", metavar="ID",
                     help="Return only comments posted after the comment with "
                          "this id (use to poll for new activity since the "
@@ -1131,7 +1192,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # gh-pull
     sp = sub.add_parser("gh-pull",
-                        help="Fetch new comments + edits from the GitHub PR into the local session")
+                        help="Fetch new comments, review summaries, and edits from the GitHub PR")
     sp.add_argument("--dry-run", action="store_true",
                     help="Print what would be pulled without writing locally")
 
@@ -1152,6 +1213,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--severity", default=None,
                     choices=["critical", "warning", "suggestion", "nit", "feedback"],
                     help="New severity (omit to keep current)")
+    sp.add_argument("--category", default=None,
+                    choices=["comment", "approve", "request-changes", "block", "blocking"],
+                    help="New category (approve/request-changes require a top-level global comment)")
     sp.add_argument("--author", help="Editor name (default: git config user.name)")
 
     # resolve

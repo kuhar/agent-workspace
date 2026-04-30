@@ -6,7 +6,12 @@ import logging
 import os
 from pathlib import Path
 
-from .models import Comment, _now_iso
+from .models import (
+    Comment,
+    category_is_review_decision,
+    normalize_comment_category,
+    _now_iso,
+)
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +29,20 @@ def _agent_file(session_dir: str | Path, agent: str) -> Path:
     return _comments_dir(session_dir) / f"{agent}.jsonl"
 
 
+def _validate_comment_category(comment: Comment) -> None:
+    comment.category = normalize_comment_category(comment.category)
+    if category_is_review_decision(comment.category) and (
+        comment.file != "" or comment.line != 0 or comment.reply_to
+    ):
+        raise ValueError(
+            "approve/request-changes categories are only valid on top-level "
+            "global comments"
+        )
+
+
 def append_comment(session_dir: str | Path, comment: Comment) -> Comment:
     """Append a comment to the agent's JSONL file. Returns the comment."""
+    _validate_comment_category(comment)
     path = _agent_file(session_dir, comment.author)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = comment.to_json() + "\n"
@@ -64,6 +81,7 @@ def filter_comments(
     agent: str | None = None,
     file: str | None = None,
     severity: str | None = None,
+    category: str | None = None,
     since: str | None = None,
     unresolved: bool = False,
     include_deleted: bool = False,
@@ -89,6 +107,9 @@ def filter_comments(
         result = [c for c in result if c.file == file]
     if severity:
         result = [c for c in result if c.severity == severity]
+    if category:
+        category = normalize_comment_category(category)
+        result = [c for c in result if c.category == category]
     if since:
         # Use position in the original sorted list rather than a timestamp
         # comparison so same-second ties are handled deterministically.
@@ -169,21 +190,26 @@ def edit_comment(
     session_dir: str | Path, comment_id: str, *,
     body: str | None = None,
     severity: str | None = None,
+    category: str | None = None,
     edited_by: str,
 ) -> bool:
-    """Rewrite a comment's body and/or severity, snapshotting prior state.
+    """Rewrite a comment's body/severity/category, snapshotting prior state.
 
     `versions[0]` is always the original creator's state (edited_at/by null).
-    Each subsequent call appends the *prior* state, then bumps body/severity
-    /edited_at/edited_by to the new values. Caller must pass at least one of
-    body or severity. Returns True if the comment was found.
+    Each subsequent call appends the *prior* state, then bumps body/severity/
+    category/edited_at/edited_by to the new values. Caller must pass at least
+    one of body, severity, or category. Returns True if the comment was found.
     """
-    if body is None and severity is None:
-        raise ValueError("edit_comment requires body or severity")
+    if body is None and severity is None and category is None:
+        raise ValueError("edit_comment requires body, severity, or category")
+    normalized_category = (
+        normalize_comment_category(category) if category is not None else None
+    )
     def _apply(c: Comment) -> None:
         c.versions.append({
             "body": c.body,
             "severity": c.severity,
+            "category": c.category,
             "edited_at": c.edited_at,
             "edited_by": c.edited_by,
         })
@@ -191,6 +217,9 @@ def edit_comment(
             c.body = body
         if severity is not None:
             c.severity = severity
+        if normalized_category is not None:
+            c.category = normalized_category
+        _validate_comment_category(c)
         c.edited_at = _now_iso()
         c.edited_by = edited_by
     return _mutate_comment(session_dir, comment_id, _apply)
@@ -271,6 +300,8 @@ def update_comment_external(
     session_dir: str | Path,
     comment_id: str,
     *,
+    timestamp: str | None = None,
+    category: str | None = None,
     external_source: str | None = None,
     external_id: str | None = None,
     external_url: str | None = None,
@@ -281,6 +312,11 @@ def update_comment_external(
     if the comment was found. Only non-None args are applied.
     """
     def _apply(c: Comment) -> None:
+        if timestamp is not None:
+            c.timestamp = timestamp
+        if category is not None:
+            c.category = normalize_comment_category(category)
+            _validate_comment_category(c)
         if external_source is not None:
             c.external_source = external_source
         if external_id is not None:

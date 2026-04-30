@@ -32,6 +32,43 @@ class Severity(str, Enum):
     FEEDBACK = "feedback"
 
 
+class CommentCategory(str, Enum):
+    COMMENT = "comment"
+    APPROVE = "approve"
+    REQUEST_CHANGES = "request-changes"
+
+
+_CATEGORY_ALIASES = {
+    "": CommentCategory.COMMENT.value,
+    "comment": CommentCategory.COMMENT.value,
+    "approve": CommentCategory.APPROVE.value,
+    "approved": CommentCategory.APPROVE.value,
+    "approval": CommentCategory.APPROVE.value,
+    "request-changes": CommentCategory.REQUEST_CHANGES.value,
+    "request_changes": CommentCategory.REQUEST_CHANGES.value,
+    "changes-requested": CommentCategory.REQUEST_CHANGES.value,
+    "changes_requested": CommentCategory.REQUEST_CHANGES.value,
+    "block": CommentCategory.REQUEST_CHANGES.value,
+    "blocking": CommentCategory.REQUEST_CHANGES.value,
+}
+
+
+def normalize_comment_category(value: str | None) -> str:
+    raw = (value or CommentCategory.COMMENT.value).strip().lower()
+    try:
+        return _CATEGORY_ALIASES[raw]
+    except KeyError as e:
+        allowed = ", ".join(c.value for c in CommentCategory)
+        raise ValueError(f"invalid comment category: {value!r} (expected {allowed})") from e
+
+
+def category_is_review_decision(category: str | None) -> bool:
+    return normalize_comment_category(category) in {
+        CommentCategory.APPROVE.value,
+        CommentCategory.REQUEST_CHANGES.value,
+    }
+
+
 class SessionState(str, Enum):
     INIT = "init"
     ROUND = "round"
@@ -57,6 +94,10 @@ class Comment:
     side: str = "right"
     body: str = ""
     severity: str = Severity.SUGGESTION.value
+    # GitHub review-level semantics. `approve` and `request-changes` are only
+    # valid on top-level global comments; anchored comments and replies remain
+    # ordinary review comments.
+    category: str = CommentCategory.COMMENT.value
     resolved: bool = False
     resolved_by: str | None = None
     resolved_at: str | None = None
@@ -100,6 +141,8 @@ class Comment:
     @classmethod
     def from_json(cls, line: str) -> Comment:
         d = json.loads(line)
+        if "category" in d:
+            d["category"] = normalize_comment_category(d["category"])
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 

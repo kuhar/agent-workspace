@@ -91,6 +91,36 @@ def test_add_comment_and_list(mock_git):
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_add_global_comment_accepts_review_category(mock_git):
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    main(["--session", sd, "init", "--workspace", "/tmp/repo"])
+
+    rc = main(["--session", sd, "add-global-comment",
+               "--body", "lgtm", "--category", "approve",
+               "--author", "vera"])
+    assert rc == 0
+
+    from peanut_review.store import read_all_comments
+    [comment] = read_all_comments(sd)
+    assert comment.category == "approve"
+
+
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_add_anchored_comment_rejects_review_category(mock_git):
+    ws = _make_workspace({"a.py": "line1\nline2\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    main(["--session", sd, "init", "--workspace", ws])
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "add-comment",
+                   "--file", "a.py", "--line", "1", "--body", "lgtm",
+                   "--category", "approve", "--author", "vera"])
+    assert rc == 1
+    assert "only valid on global comments" in err.getvalue()
+
+
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
 def test_resolve_comment(mock_git):
     ws = _make_workspace({"a.py": "line1\nline2\nline3\n"})
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")

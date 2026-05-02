@@ -1049,6 +1049,16 @@ def test_session_page_emits_prefixed_session_url(session_dir: Path):
         srv.shutdown()
 
 
+def test_client_global_composer_includes_category_selector():
+    text = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
+    start = text.index("function openGlobalForm()")
+    end = text.index("function setThreadResolved", start)
+    block = text[start:end]
+
+    assert 'select class="category"' in block
+    assert 'form.querySelector(".category")?.value || "comment"' in block
+
+
 def test_server_edit_endpoint_updates_body_and_history(session_dir: Path):
     c = Comment(author="vera", file="foo.py", line=1, body="v1", severity="nit")
     store.append_comment(session_dir, c)

@@ -77,7 +77,8 @@ peanut-review start <pr-number-or-url>
 with `gh` from the configured checkout, creates the session at
 `<reviewRoot>/<owner>-<repo>-pr-<number>`, initializes GitHub metadata, pulls
 existing GitHub PR comments and review summaries into the session, and launches
-the configured agents.
+the configured agents. Imported GitHub review threads carry their resolved
+status into the local session.
 
 If the project still needs a build before agents run, initialize without
 launching, build, then launch:

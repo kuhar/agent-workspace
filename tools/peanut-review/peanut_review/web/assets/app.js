@@ -150,11 +150,6 @@
           <option value="nit">nit</option>
           <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
         </select>
-        <select class="category" title="GitHub review category (global comments only)">
-          <option value="comment">comment</option>
-          <option value="approve">approve</option>
-          <option value="request-changes">blocking</option>
-        </select>
         <button class="submit">Post</button>
       </div>
     `;
@@ -366,6 +361,11 @@
           <option value="nit">nit</option>
           <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
         </select>
+        <select class="category" title="GitHub review category">
+          <option value="comment">comment</option>
+          <option value="approve">approve</option>
+          <option value="request-changes">blocking</option>
+        </select>
         <button class="submit">Post</button>
       </div>
     `;
@@ -377,7 +377,7 @@
       const body = form.querySelector("textarea").value.trim();
       if (!body) return;
       const severity = form.querySelector(".sev").value;
-      const category = form.querySelector(".category").value;
+      const category = form.querySelector(".category")?.value || "comment";
       try {
         const c = await api("POST", "/api/comments",
                             { scope: "global", body, severity, category });
@@ -1344,7 +1344,8 @@
     }
     flashToast(r.summary || "Pulled.");
     if ((r.new_global || 0) || (r.new_reviews || 0) || (r.edited || 0) ||
-        (r.retimestamped || 0) || (r.recategorized || 0)) {
+        (r.retimestamped || 0) || (r.recategorized || 0) ||
+        (r.resolution_changed || 0)) {
       location.reload();
       return;
     }

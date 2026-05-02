@@ -165,6 +165,41 @@ def unresolve_comment(session_dir: str | Path, comment_id: str) -> bool:
     return _mutate_comment(session_dir, comment_id, _apply)
 
 
+def sync_comment_resolution(
+    session_dir: str | Path,
+    comment_id: str,
+    *,
+    resolved: bool,
+    resolved_by: str | None = None,
+    resolved_at: str | None = None,
+) -> bool:
+    """Sync external thread resolution state. Returns True if it changed."""
+    changed = False
+
+    def _apply(c: Comment) -> None:
+        nonlocal changed
+        if resolved:
+            if not c.resolved:
+                changed = True
+                c.resolved = True
+            if resolved_by is not None and c.resolved_by != resolved_by:
+                changed = True
+                c.resolved_by = resolved_by
+            if resolved_at is not None and c.resolved_at != resolved_at:
+                changed = True
+                c.resolved_at = resolved_at
+            return
+
+        if c.resolved or c.resolved_by is not None or c.resolved_at is not None:
+            changed = True
+            c.resolved = False
+            c.resolved_by = None
+            c.resolved_at = None
+
+    found = _mutate_comment(session_dir, comment_id, _apply)
+    return found and changed
+
+
 def delete_comment(
     session_dir: str | Path, comment_id: str, deleted_by: str | None = None,
 ) -> bool:

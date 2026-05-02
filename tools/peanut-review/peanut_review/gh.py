@@ -150,6 +150,17 @@ def _api(endpoint: str, *, method: str = "GET",
     return _run(args)
 
 
+def _graphql(query: str, variables: dict) -> dict:
+    out = _run(
+        ["api", "graphql", "-X", "POST", "--input", "-"],
+        input=json.dumps({"query": query, "variables": variables}),
+    )
+    parsed = json.loads(out)
+    if isinstance(parsed, dict) and parsed.get("errors"):
+        raise GhError([_gh_bin(), "api", "graphql"], 1, "", json.dumps(parsed))
+    return parsed
+
+
 @dataclass
 class PRInfo:
     repo: str
@@ -193,6 +204,70 @@ def fetch_pr_reviews(repo: str, number: int) -> list[dict]:
     """Submitted PR reviews. Non-empty bodies are review summaries."""
     raw = _api(f"repos/{repo}/pulls/{number}/reviews", paginate=True)
     return _parse_paginated(raw)
+
+
+_REVIEW_THREAD_RESOLUTIONS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          isResolved
+          resolvedBy { login }
+          comments(first: 100) {
+            nodes { databaseId }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_review_thread_resolutions(repo: str, number: int) -> list[dict]:
+    """Review-thread resolution state from GraphQL.
+
+    GitHub REST review comments do not include thread resolution state. The
+    GraphQL thread connection does, keyed back to REST comments by
+    PullRequestReviewComment.databaseId, which matches the REST `id`.
+    """
+    owner, name = repo.split("/", 1)
+    cursor = None
+    threads: list[dict] = []
+
+    while True:
+        payload = _graphql(_REVIEW_THREAD_RESOLUTIONS_QUERY, {
+            "owner": owner,
+            "name": name,
+            "number": int(number),
+            "cursor": cursor,
+        })
+        connection = (
+            payload.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+        )
+        for node in connection.get("nodes", []) or []:
+            comment_ids = [
+                str(c["databaseId"])
+                for c in (node.get("comments", {}).get("nodes", []) or [])
+                if c.get("databaseId") is not None
+            ]
+            resolved_by = node.get("resolvedBy") or {}
+            threads.append({
+                "comment_ids": comment_ids,
+                "resolved": bool(node.get("isResolved")),
+                "resolved_by": resolved_by.get("login"),
+            })
+
+        page_info = connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+    return threads
 
 
 def _parse_paginated(raw: str) -> list[dict]:

@@ -87,6 +87,29 @@ def gh_shim(tmp_path: Path, monkeypatch):
                     "match": ["api", "repos/acme/foo/pulls/42/reviews"],
                     "stdout": "[]",
                 })
+            has_review_threads = any(
+                "graphql" in fx.get("match", [])
+                for fx in fixtures
+            )
+            if not has_review_threads:
+                fixtures.append({
+                    "match": ["api", "graphql"],
+                    "stdout": json.dumps({
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": [],
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    }),
+                })
             fixtures_path.write_text(json.dumps(fixtures))
 
         def calls(self) -> list[dict]:
@@ -278,6 +301,50 @@ def test_fetch_pr_reviews_concatenates_paginated_arrays(gh_shim):
     }])
     out = gh.fetch_pr_reviews("acme/foo", 42)
     assert [c["id"] for c in out] == [10, 11]
+
+
+def test_fetch_review_thread_resolutions_uses_graphql(gh_shim):
+    gh_shim.set_fixtures([{
+        "match": ["api", "graphql"],
+        "stdout": json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [{
+                                "isResolved": True,
+                                "resolvedBy": {"login": "octocat"},
+                                "comments": {
+                                    "nodes": [
+                                        {"databaseId": 100},
+                                        {"databaseId": 101},
+                                    ],
+                                },
+                            }],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        },
+                    },
+                },
+            },
+        }),
+    }])
+
+    out = gh.fetch_review_thread_resolutions("acme/foo", 42)
+
+    assert out == [{
+        "comment_ids": ["100", "101"],
+        "resolved": True,
+        "resolved_by": "octocat",
+    }]
+    [call] = gh_shim.calls()
+    assert call["argv"] == ["api", "graphql", "-X", "POST", "--input", "-"]
+    payload = json.loads(call["stdin"])
+    assert payload["variables"]["owner"] == "acme"
+    assert payload["variables"]["name"] == "foo"
+    assert payload["variables"]["number"] == 42
 
 
 # ---------------- init --gh-pr ----------------
@@ -926,6 +993,171 @@ def test_gh_pull_appends_anchored_and_global_comments(gh_shim, tmp_path):
     # `feedback` — they're discussion, not actionable findings.
     assert by_author["gh:octocat"].severity == models.Severity.FEEDBACK.value
     assert by_author["gh:ghost"].severity == models.Severity.FEEDBACK.value
+
+
+def test_gh_pull_imports_resolved_review_thread(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    gh_shim.set_fixtures([
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/comments"],
+            "stdout": json.dumps([{
+                "id": 100,
+                "user": {"login": "octocat"},
+                "path": "src/x.py",
+                "line": 10,
+                "body": "anchored from github",
+                "html_url": "https://h/c/100",
+                "commit_id": "abc",
+            }]),
+        },
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "graphql"],
+            "stdout": json.dumps({
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{
+                                    "isResolved": True,
+                                    "resolvedBy": {"login": "reviewer"},
+                                    "comments": {"nodes": [{"databaseId": 100}]},
+                                }],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            },
+                        },
+                    },
+                },
+            }),
+        },
+    ])
+
+    rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.resolved is True
+    assert comment.resolved_by == "gh:reviewer"
+    assert comment.resolved_at is None
+
+
+def test_gh_pull_updates_existing_review_thread_resolution(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="gh:octocat", file="src/x.py", line=10, body="prior",
+        external_source="github", external_id="100",
+        external_synced_body="prior",
+    ))
+    gh_shim.set_fixtures([
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/comments"],
+            "stdout": json.dumps([{
+                "id": 100,
+                "user": {"login": "octocat"},
+                "path": "src/x.py",
+                "line": 10,
+                "body": "prior",
+                "html_url": "https://h/c/100",
+                "commit_id": "abc",
+            }]),
+        },
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "graphql"],
+            "stdout": json.dumps({
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{
+                                    "isResolved": True,
+                                    "resolvedBy": {"login": "reviewer"},
+                                    "comments": {"nodes": [{"databaseId": 100}]},
+                                }],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            },
+                        },
+                    },
+                },
+            }),
+        },
+    ])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+    assert "1 resolutions" in out.getvalue()
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.resolved is True
+    assert comment.resolved_by == "gh:reviewer"
+    assert comment.versions == []
+
+
+def test_gh_pull_unresolves_existing_review_thread(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="gh:octocat", file="src/x.py", line=10, body="prior",
+        resolved=True, resolved_by="gh:reviewer",
+        resolved_at="2026-04-13T16:57:01.000000+00:00",
+        external_source="github", external_id="100",
+        external_synced_body="prior",
+    ))
+    gh_shim.set_fixtures([
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/comments"],
+            "stdout": json.dumps([{
+                "id": 100,
+                "user": {"login": "octocat"},
+                "path": "src/x.py",
+                "line": 10,
+                "body": "prior",
+                "html_url": "https://h/c/100",
+                "commit_id": "abc",
+            }]),
+        },
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "graphql"],
+            "stdout": json.dumps({
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [{
+                                    "isResolved": False,
+                                    "resolvedBy": None,
+                                    "comments": {"nodes": [{"databaseId": 100}]},
+                                }],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            },
+                        },
+                    },
+                },
+            }),
+        },
+    ])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-pull"])
+    assert rc == 0
+    assert "1 resolutions" in out.getvalue()
+
+    [comment] = store.read_all_comments(sd)
+    assert comment.resolved is False
+    assert comment.resolved_by is None
+    assert comment.resolved_at is None
 
 
 def test_gh_pull_uses_github_timestamps_for_global_order(gh_shim, tmp_path):

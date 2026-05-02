@@ -7,12 +7,15 @@ The pull is keyed on provider source + `external_id`:
      local comment and stored as `reply_to`, normalized via
      `store.normalize_reply_to`.
   2. Non-empty PR review summaries are appended as high-level comments.
-  3. Existing comments whose GitHub body diverges from our last
+  3. GitHub review-thread resolved status is synced onto the local top-level
+     thread comment.
+  4. Existing comments whose GitHub body diverges from our last
      `external_synced_body` get an `edit_comment` applied so the change shows
      up in version history.
-  4. Existing comments with stale local import timestamps are retimestamped to
+  5. Existing comments with stale local import timestamps are retimestamped to
      the original GitHub timestamp.
-  5. Already-synced comments (matching id, body, and timestamp) are skipped.
+  6. Already-synced comments (matching id, body, timestamp, and resolved state)
+     are skipped.
 
 Idempotent: re-running with no upstream changes is a no-op.
 """
@@ -95,12 +98,14 @@ class PullResult:
     edited: int = 0
     retimestamped: int = 0
     recategorized: int = 0
+    resolution_changed: int = 0
     skipped: int = 0
 
     @property
     def total_changes(self) -> int:
         return (self.new_anchored + self.new_global + self.new_reviews +
-                self.edited + self.retimestamped + self.recategorized)
+                self.edited + self.retimestamped + self.recategorized +
+                self.resolution_changed)
 
     def summary(self) -> str:
         bits = [f"{self.new_anchored} anchored", f"{self.new_global} global"]
@@ -112,6 +117,8 @@ class PullResult:
             bits.append(f"{self.retimestamped} timestamps")
         if self.recategorized:
             bits.append(f"{self.recategorized} categories")
+        if self.resolution_changed:
+            bits.append(f"{self.resolution_changed} resolutions")
         return f"Pulled {' + '.join(bits)} ({self.skipped} already local)."
 
 
@@ -147,6 +154,67 @@ def _recategorize_existing(
     return True
 
 
+def _thread_resolution_by_comment_id(threads: list[dict]) -> dict[str, dict]:
+    by_comment: dict[str, dict] = {}
+    for thread in threads:
+        for comment_id in thread.get("comment_ids", []) or []:
+            by_comment[str(comment_id)] = thread
+    return by_comment
+
+
+def _sync_thread_resolutions(
+    session_dir: str | Path,
+    local_by_ext: dict[str, models.Comment],
+    threads: list[dict],
+    result: PullResult,
+    *,
+    new_root_ext_ids: set[str],
+    dry_run: bool,
+) -> None:
+    if not threads:
+        return
+
+    all_local = store.read_all_comments(session_dir)
+    by_id = {c.id: c for c in all_local}
+    seen_roots: set[str] = set()
+
+    for thread in threads:
+        root: models.Comment | None = None
+        for comment_ext_id in thread.get("comment_ids", []) or []:
+            local = local_by_ext.get(_external_key("github", str(comment_ext_id)))
+            if local is None:
+                continue
+            if local.reply_to and local.reply_to in by_id:
+                root = by_id[local.reply_to]
+            else:
+                root = local
+            break
+
+        if root is None or root.id in seen_roots:
+            continue
+        seen_roots.add(root.id)
+        if root.external_id in new_root_ext_ids:
+            continue
+
+        resolved = bool(thread.get("resolved"))
+        resolved_by_login = thread.get("resolved_by")
+        resolved_by = f"gh:{resolved_by_login}" if resolved_by_login else None
+
+        would_change = (
+            root.resolved != resolved or
+            (resolved and resolved_by is not None and root.resolved_by != resolved_by) or
+            (not resolved and (root.resolved_by is not None or root.resolved_at is not None))
+        )
+        if not would_change:
+            continue
+
+        result.resolution_changed += 1
+        if not dry_run:
+            store.sync_comment_resolution(
+                session_dir, root.id, resolved=resolved, resolved_by=resolved_by,
+            )
+
+
 def pull_comments(
     session_dir: str | Path,
     session: models.Session,
@@ -162,6 +230,8 @@ def pull_comments(
     review_comments = gh.fetch_review_comments(ghpr.repo, ghpr.number)
     issue_comments = gh.fetch_issue_comments(ghpr.repo, ghpr.number)
     pr_reviews = gh.fetch_pr_reviews(ghpr.repo, ghpr.number)
+    review_threads = gh.fetch_review_thread_resolutions(ghpr.repo, ghpr.number)
+    resolution_by_ext = _thread_resolution_by_comment_id(review_threads)
 
     local_by_ext: dict[str, models.Comment] = {
         _external_key(c.external_source, c.external_id): c
@@ -170,6 +240,7 @@ def pull_comments(
     }
 
     result = PullResult()
+    new_root_ext_ids: set[str] = set()
 
     def _resolve_reply_to(raw: dict) -> str | None:
         parent_ext = raw.get("in_reply_to_id")
@@ -215,6 +286,10 @@ def pull_comments(
             continue
 
         login = raw.get("user", {}).get("login", "unknown")
+        resolution = resolution_by_ext.get(ext_id)
+        is_root_comment = not raw.get("in_reply_to_id")
+        resolved = bool(resolution and resolution.get("resolved") and is_root_comment)
+        resolved_by_login = resolution.get("resolved_by") if resolution else None
         c = models.Comment(
             author=f"gh:{login}",
             file=raw.get("path", ""),
@@ -232,11 +307,21 @@ def pull_comments(
                                   if raw.get("in_reply_to_id") else None),
             external_synced_body=body,
             reply_to=_resolve_reply_to(raw),
+            resolved=resolved,
+            resolved_by=(f"gh:{resolved_by_login}"
+                         if resolved and resolved_by_login else None),
             **_comment_kwargs(raw, "created_at"),
         )
         store.append_comment(session_dir, c)
         local_by_ext[_external_key("github", ext_id)] = c
+        if is_root_comment:
+            new_root_ext_ids.add(ext_id)
         result.new_anchored += 1
+
+    _sync_thread_resolutions(
+        session_dir, local_by_ext, review_threads, result,
+        new_root_ext_ids=new_root_ext_ids, dry_run=dry_run,
+    )
 
     for raw in issue_comments:
         ext_id = str(raw["id"])

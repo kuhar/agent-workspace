@@ -632,6 +632,7 @@ class _Handler(BaseHTTPRequestHandler):
             "edited": r.edited,
             "retimestamped": r.retimestamped,
             "recategorized": r.recategorized,
+            "resolution_changed": r.resolution_changed,
             "skipped": r.skipped,
             "summary": r.summary(),
         })

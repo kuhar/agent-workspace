@@ -231,7 +231,11 @@ def cmd_start(args: argparse.Namespace) -> int:
     session_id = args.id or _session_id_for_pr(pr_info.repo, pr_info.number)
     session_dir = Path(args.session) if args.session else Path(cfg["reviewRoot"]) / session_id
     session_dir = session_dir.expanduser().resolve()
-    timeout = args.timeout if args.timeout is not None else int(cfg.get("timeout", 1200))
+    timeout = (
+        args.timeout
+        if args.timeout is not None
+        else int(cfg.get("reviewAgentTimeoutSeconds", 1200))
+    )
     personas_dir = args.personas_dir or cfg.get("personasDir") or _default_personas_dir()
 
     agents = cfg["agents"]
@@ -1111,7 +1115,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--id", default=None, metavar="SLUG",
                     help="Override session id/path slug")
     sp.add_argument("--timeout", type=int, default=None,
-                    help="Agent timeout override (default: config timeout or 1200)")
+                    help="Agent timeout override (default: reviewAgentTimeoutSeconds or 1200)")
     sp.add_argument("--personas-dir", help="Source dir for persona files")
     sp.add_argument("--no-launch", action="store_true",
                     help="Only create the session; do not spawn agents")

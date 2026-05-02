@@ -464,7 +464,7 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
         "reviewRoot": str(review_root),
         "workspaceRoot": str(tmp_path),
         "repoRelative": "ws",
-        "timeout": 77,
+        "reviewAgentTimeoutSeconds": 77,
         "agents": [
             {"name": "vera", "model": "opus", "persona": "vera.md"},
             {"name": "irene", "model": "gpt", "persona": "irene.md", "runner": "opencode"},

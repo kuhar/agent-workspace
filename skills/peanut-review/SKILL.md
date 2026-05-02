@@ -11,10 +11,29 @@ You drive the review lifecycle using the `peanut-review` CLI tool.
 
 ## Prerequisites
 
-- `peanut-review` CLI: either `pip install -e tools/peanut-review` or use
-  `tools/peanut-review/bin/peanut-review` directly (zero-install, sets PYTHONPATH)
+- Use the checked-out CLI directly: `tools/peanut-review/bin/peanut-review`.
+  It sets `PYTHONPATH` for the local checkout, so no setup step is needed.
+- For package-local development and tests, run commands from
+  `tools/peanut-review` with `uv run ...`.
 - Personas live in `skills/peanut-gallery-review/personas/`
 - Agent prompt template: `skills/peanut-review/agent-prompt.md`
+
+## Agent Permissions
+
+Cursor-based agents need a `.cursor/cli.json` in the workspace before launch.
+Copy the template to the workspace root:
+
+```bash
+cp skills/peanut-review/cli.sample.json <WORKSPACE>/.cursor/cli.json
+```
+
+Run from the repo root, or adjust the path to `cli.sample.json` accordingly.
+The template includes `Shell(peanut-review **)` plus read-only filesystem and
+git commands, test runners, and build tools.
+
+Keep `Shell(**)` out of the deny list. A deny entry of `Shell(**)` overrides
+all Shell allows, so agents cannot run peanut-review or project inspection
+commands. The launch command warns if it detects this configuration.
 
 ## Choose Review Mode
 
@@ -48,12 +67,12 @@ scripts should copy or generate this file in the worktree parent, next to
   "reviewRoot": "/home/jakub/reviews",
   "workspaceRoot": ".",
   "repoRelative": "iree",
-  "timeout": 2400,
+  "reviewAgentTimeoutSeconds": 900,
   "agents": [
-    {"name": "vera", "model": "openai/gpt-5.5", "persona": "vera.md", "runner": "opencode"},
-    {"name": "irene", "model": "openai/gpt-5.5", "persona": "irene.md", "runner": "opencode"},
-    {"name": "petra", "model": "openai/gpt-5.4-mini", "persona": "petra.md", "runner": "opencode"},
-    {"name": "soren", "model": "openai/gpt-5.4-mini", "persona": "soren.md", "runner": "opencode"}
+    {"name": "vera", "model": "gpt-5.5-high", "persona": "vera.md", "runner": "cursor"},
+    {"name": "irene", "model": "gpt-5.5-high", "persona": "irene.md", "runner": "cursor"},
+    {"name": "petra", "model": "composer-2", "persona": "petra.md", "runner": "cursor"},
+    {"name": "soren", "model": "composer-2", "persona": "soren.md", "runner": "cursor"}
   ]
 }
 ```
@@ -65,6 +84,7 @@ Config semantics:
 - `workspaceRoot`: project worktree root. Relative paths are resolved relative
   to the config file, so `"."` means the directory containing the config.
 - `repoRelative`: source repository path under `workspaceRoot`.
+- `reviewAgentTimeoutSeconds`: per-agent wall-clock timeout for reviewer runs.
 - `agents`: exact reviewer lineup. Use it as-is; do not re-select agents.
 
 Start a PR review from the worktree parent:
@@ -472,8 +492,8 @@ Agents can interact with peanut-review in two ways:
 
 `peanut-review launch` automatically configures an MCP server in
 `.cursor/mcp.json` and uses the `agent-prompt-mcp.md` template. The MCP server
-uses `uv run` for zero-install — no venv or `pip install` needed (requires
-`uv` on PATH). Agents call structured MCP tools (`add_comment`,
+uses `uv run` against the checked-out package (requires `uv` on PATH). Agents
+call structured MCP tools (`add_comment`,
 `add_global_comment`, `signal`, `wait`, etc.) instead of Shell commands.
 
 Benefits:
@@ -487,19 +507,3 @@ Benefits:
 If the `peanut-review-mcp` script is not found, agents use Shell commands via
 the `agent-prompt.md` template. This requires `Shell(peanut-review **)` in
 `.cursor/cli.json`.
-
-## CLI permissions for agents
-
-Copy the template to your workspace:
-```bash
-cp skills/peanut-review/cli.sample.json <WORKSPACE>/.cursor/cli.json
-```
-(Run from the repo root, or adjust the path to `cli.sample.json` accordingly.)
-
-The template includes `Shell(peanut-review **)` plus read-only filesystem and
-git commands, test runners, and build tools.
-
-**WARNING**: Do NOT add `Shell(**)` to the `deny` list. A deny entry of
-`Shell(**)` overrides ALL Shell allows — agents won't be able to run any
-shell commands including peanut-review. The launch command will warn if it
-detects this configuration.

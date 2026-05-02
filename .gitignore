@@ -3,6 +3,7 @@
 .cursor/*
 !.vscode/launch.json
 marks.md
+.beads/
 
 # Python
 .venv/

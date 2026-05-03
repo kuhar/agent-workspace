@@ -1,7 +1,6 @@
 ---
 name: peanut-review
 description: Orchestrate structured multi-agent code review for local changes or GitHub PRs using peanut-review CLI
-user_invocable: true
 ---
 
 # Peanut Review
@@ -16,13 +15,14 @@ Track these items explicitly. If your harness has a todo list, create this list
 before running commands and keep it current.
 
 - [ ] Choose one lifecycle: GitHub PR review or local author-owned review.
-- [ ] Record the session path, workspace root, source repo path, base/topic refs
-      or PR number, and configured reviewers.
+- [ ] Record the session path, source workspace, any separate build/tool root,
+      base/topic refs or PR number, and configured reviewers.
 - [ ] Ask for external facts/preferences that are not discoverable: review
       root, web UI root, repo layout, build/test command, session reuse/archive
       choice, persona lineup, runner, and model choices.
+- [ ] Confirm the checkout is built/testable and reviewer-visible tools are
+      reachable before launching reviewers.
 - [ ] Confirm project config and reviewer permissions are valid.
-- [ ] Confirm the checkout is built/testable before launching reviewers.
 - [ ] Launch reviewers and verify startup with `status`, `inbox`, logs, and
       `wait-all`.
 - [ ] Answer reviewer questions promptly.
@@ -73,7 +73,23 @@ parent and defines `reviewRoot`, `workspaceRoot`, `repoRelative`,
 the same `reviewRoot`. If no config exists, ask before choosing persistent
 roots, repo layout, reviewers, runners, or models.
 
-Cursor agents need `.cursor/cli.json` in the source workspace:
+Do not blur roots. `reviewRoot` is session storage/web UI state;
+`workspaceRoot` + `repoRelative` identify the checkout under review. If build
+outputs or project tools live outside the source checkout, make sure the actual
+runner workspace and permissions let agents reach them before launch.
+
+When root/layout changed or is ambiguous, dry-run before spending reviewer
+runs:
+
+```bash
+"$PR_BIN" start <pr> --config <config> --dry-run --no-launch
+"$PR_BIN" start <pr> --config <config> --no-launch
+SESSION=<printed-session-path>
+"$PR_BIN" --session "$SESSION" launch --dry-run
+```
+
+Cursor agents need `.cursor/cli.json` in the actual runner workspace shown by
+`launch --dry-run`.
 
 ```bash
 mkdir -p "$WORKSPACE/.cursor"
@@ -83,6 +99,9 @@ cp tools/peanut-review/peanut_review/templates/cli.sample.json "$WORKSPACE/.curs
 The launch command validates config and Cursor permissions. Keep
 `Shell(peanut-review **)` allowed, and keep `Shell(**)` out of the deny list
 because it overrides all Shell allows.
+
+When build tools live outside the runner workspace, Cursor permissions must
+also allow the paths or commands reviewers are expected to use.
 
 ## GitHub PR Review
 
@@ -98,7 +117,8 @@ approve/request-changes decision back to GitHub.
    SESSION=<printed-session-path>
    ```
 
-2. Build/test the checkout with the project workflow.
+2. Build/test the checkout with the project workflow. If reviewers need
+   non-obvious tool paths, record them in a session note before launch.
 
 3. Launch reviewers and run the shared monitoring commands:
 
@@ -216,6 +236,10 @@ Use `status` for a compact view, but treat signal files, comments, inbox, logs,
 and live processes as the real health checks. `process=...` is supervisor-owned
 runtime state; `review=done` means the agent posted `round-done`.
 
+After all reviewers signal `round-done`, agents may still be live waiting for a
+possible next round. If no immediate next round is planned, run `kill-agents` so
+idle reviewer processes do not linger.
+
 ## Reviewer Selection
 
 Use configured reviewers as-is during a review. When authoring config, ask
@@ -232,6 +256,10 @@ Soren. Map `tier: expert` personas to the strongest available model and
 The web UI reads the same session storage as the CLI. Its `--root` should match
 the configured `reviewRoot`; without `--root`, it uses `$PEANUT_SESSION`'s
 parent if set, otherwise `/tmp/peanut-review`.
+
+If the user says the review server is already up, discover its root from the
+running `peanut_review serve --root ...` process and use that for session
+storage instead of starting a new server or guessing a different root.
 
 ```bash
 "$PR_BIN" serve --root "$REVIEW_ROOT" --port 27183 --base-url /pr

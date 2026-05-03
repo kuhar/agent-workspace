@@ -152,14 +152,12 @@ jq -n \
     --arg pgid "$pgid" \
     --arg supervisor_pid "${PEANUT_SUPERVISOR_PID:-}" \
     --arg cursor_home "${PEANUT_CURSOR_HOME:-}" \
-    --arg mcp_config "${PEANUT_CURSOR_MCP_CONFIG:-}" \
     '{runner: "cursor", model: $model, workspace: $workspace, prompt: $prompt,
       start: $start, timeout: ($timeout | tonumber),
       pid: ($pid | tonumber),
       pgid: (if $pgid == "" then null else ($pgid | tonumber) end),
       supervisor_pid: (if $supervisor_pid == "" then null else ($supervisor_pid | tonumber) end),
-      cursor_home: (if $cursor_home == "" then null else $cursor_home end),
-      mcp_config: (if $mcp_config == "" then null else $mcp_config end)}' \
+      cursor_home: (if $cursor_home == "" then null else $cursor_home end)}' \
     > "$meta_file"
 
 # --- Run the agent ---
@@ -175,7 +173,6 @@ exec cursor-agent --print \
     --model "$model" \
     --force \
     --trust \
-    --approve-mcps \
     --output-format text \
     --workspace "$workspace" \
     "$prompt" \

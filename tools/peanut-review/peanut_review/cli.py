@@ -199,8 +199,8 @@ def cmd_launch(args: argparse.Namespace) -> int:
     """Spawn all agents."""
     session_dir = _get_session_dir(args)
     from . import launch
-    # When --template is omitted, let launch_agents pick per-agent based on
-    # each agent's runner (cursor → MCP-preferred, opencode → CLI).
+    # When --template is omitted, let launch_agents pick the default CLI
+    # prompt for each agent's runner.
     results = launch.launch_agents(
         session_dir, args.template,
         dry_run=args.dry_run,

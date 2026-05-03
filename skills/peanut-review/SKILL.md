@@ -473,50 +473,30 @@ diversity of personas alone still produces useful review breadth.
 ## Runners: cursor, opencode, codex
 
 - **cursor** (default): launches `cursor-agent --print` via `cursor-agent-task.sh`.
-  Requires cursor-agent to be logged in. Prefers MCP transport when the
-  `peanut-review-mcp` script is installed, falls back to CLI.
+  Requires cursor-agent to be logged in and uses Shell commands through
+  `.cursor/cli.json`.
 - **opencode**: launches `opencode run` directly via `opencode-agent-task.sh`.
   `opencode models` is the source of truth for what's available — cloud
   providers like `openai/*`, the free `opencode/*` tier, or local
   `llama.cpp/*` providers configured in `~/.config/opencode/opencode.json`.
   For local llama.cpp models, ensure llama-server is running before invoking
   (boot it out of band, e.g. `lcode qwen` — peanut-review does not wrap lcode).
-  Currently CLI mode only; MCP integration via `opencode.json` is not wired up.
+  CLI mode only.
 - **codex**: launches `codex exec` via `codex-agent-task.sh`. Requires
   `codex login` (ChatGPT OAuth or API key). The launcher passes
   `--add-dir <session_dir>` so the agent can write peanut-review session files
   outside the workspace sandbox.
 
-## Agent communication: MCP vs CLI
+## Agent communication: CLI
 
-Agents can interact with peanut-review in two ways:
+Agents interact with peanut-review by executing the checked-out CLI via Shell
+commands from the `agent-prompt.md` template. Cursor reviewers still receive
+the real source workspace as `--workspace`, but `peanut-review launch` gives
+each Cursor reviewer an isolated runtime home under
+`<session>/runtime/cursor/<agent>/` by setting `HOME`, `CURSOR_CONFIG_DIR`, and
+`CURSOR_DATA_DIR`; `XDG_CONFIG_HOME` stays pointed at the original user config
+location so Cursor login state is preserved.
 
-### MCP mode (preferred)
-
-`peanut-review launch` automatically configures an MCP server in each Cursor
-reviewer's isolated runtime home:
-`<session>/runtime/cursor/<agent>/.cursor/mcp.json`. Cursor still receives the
-real source workspace as `--workspace`, but `HOME`, `CURSOR_CONFIG_DIR`, and
-`CURSOR_DATA_DIR` point at the per-agent runtime directory so parallel Cursor
-reviewers do not share MCP state. The MCP server uses `uv run` against the
-checked-out package (requires `uv` on PATH). Agents call structured MCP tools
-(`add_comment`,
-`add_global_comment`, `note`, `signal`, `wait`, etc.) instead of Shell commands.
-
-Before launching Cursor reviewers, peanut-review removes only older
-peanut-review-generated `mcpServers.peanut-review` entries from the workspace
-`.cursor/mcp.json` and preserves unrelated MCP servers. If the workspace file
-contains a custom server named `peanut-review`, launch fails with a clear error
-because that server would shadow the per-agent MCP config.
-
-Benefits:
-- Agents call typed functions — no risk of printing commands instead of executing
-- No `Shell(peanut-review **)` permission needed
-- Better error messages (returned as tool results, not stderr)
-- Works reliably with Gemini and other models that struggle with Shell tool use
-
-### CLI mode (fallback)
-
-If the `peanut-review-mcp` script is not found, agents use Shell commands via
-the `agent-prompt.md` template. This requires `Shell(peanut-review **)` in
-`.cursor/cli.json`.
+Cursor reviewers require `Shell(peanut-review **)` in the source workspace's
+`.cursor/cli.json`. Peanut-review no longer manages `.cursor/mcp.json` or
+starts a peanut-review MCP server.

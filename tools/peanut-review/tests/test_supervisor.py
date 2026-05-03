@@ -102,7 +102,6 @@ def test_supervisor_records_failed_without_signal(tmp_path):
 def test_supervisor_records_cursor_runtime_metadata(tmp_path):
     sd = _make_session_dir()
     cursor_home = str(tmp_path / "cursor-home")
-    mcp_config = str(tmp_path / "cursor-home" / ".cursor" / "mcp.json")
     script = _script(
         tmp_path,
         "cursor-agent-task.sh",
@@ -121,7 +120,6 @@ def test_supervisor_records_cursor_runtime_metadata(tmp_path):
         env={
             **os.environ,
             "PEANUT_CURSOR_HOME": cursor_home,
-            "PEANUT_CURSOR_MCP_CONFIG": mcp_config,
         },
         kill_grace=0.1,
     )
@@ -130,7 +128,7 @@ def test_supervisor_records_cursor_runtime_metadata(tmp_path):
     meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
     assert meta["runner"] == "cursor"
     assert meta["cursor_home"] == cursor_home
-    assert meta["mcp_config"] == mcp_config
+    assert "mcp_config" not in meta
 
 
 def test_supervisor_records_shell_style_termination_signal(tmp_path):

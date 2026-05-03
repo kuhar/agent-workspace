@@ -8,8 +8,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from peanut_review import launch
 from peanut_review.models import AgentConfig
 
@@ -162,7 +160,7 @@ def test_launch_uses_python_supervisor_for_non_dry_run():
     assert stored.agents[0].supervisor_pid == 424242
 
 
-def test_cursor_agents_get_isolated_homes_and_mcp_configs(tmp_path):
+def test_cursor_agents_get_isolated_homes_without_mcp_config(tmp_path):
     workspace = _workspace_with_cursor_config(tmp_path)
     sd = _make_session_dir([
         AgentConfig(name="vera", model="opus", persona="vera.md"),
@@ -194,24 +192,21 @@ def test_cursor_agents_get_isolated_homes_and_mcp_configs(tmp_path):
     assert irene_env["XDG_CONFIG_HOME"] == "/home/original/.config"
     assert vera_env["PEANUT_CURSOR_HOME"] == results[0]["cursor_home"]
     assert irene_env["PEANUT_CURSOR_HOME"] == results[1]["cursor_home"]
-    assert vera_env["PEANUT_CURSOR_MCP_CONFIG"] == results[0]["mcp_config"]
-    assert irene_env["PEANUT_CURSOR_MCP_CONFIG"] == results[1]["mcp_config"]
-
-    for result in results:
-        mcp_config = json.loads(Path(result["mcp_config"]).read_text())
-        server = mcp_config["mcpServers"]["peanut-review"]
-        assert server["env"]["PEANUT_SESSION"] == sd
-        assert server["env"]["GIT_AUTHOR_NAME"] == result["name"]
-        assert server["env"]["PEANUT_REVIEW_MCP_MANAGED"] == "1"
+    assert "PEANUT_CURSOR_MCP_CONFIG" not in vera_env
+    assert "PEANUT_CURSOR_MCP_CONFIG" not in irene_env
+    assert "mcp_config" not in results[0]
+    assert "mcp_config" not in results[1]
+    assert not (Path(results[0]["cursor_home"]) / ".cursor" / "mcp.json").exists()
+    assert not (Path(results[1]["cursor_home"]) / ".cursor" / "mcp.json").exists()
 
 
-def test_cursor_launch_removes_old_generated_workspace_mcp(tmp_path):
+def test_cursor_launch_does_not_manage_workspace_mcp_config(tmp_path):
     workspace = _workspace_with_cursor_config(tmp_path)
     workspace_mcp = Path(workspace) / ".cursor" / "mcp.json"
-    workspace_mcp.write_text(json.dumps({
+    original = json.dumps({
         "mcpServers": {
             "peanut-review": {
-                "command": launch._find_mcp_script(),
+                "command": "custom-peanut-review-server",
                 "env": {
                     "PEANUT_SESSION": "/old/session",
                     "GIT_AUTHOR_NAME": "old-agent",
@@ -222,7 +217,8 @@ def test_cursor_launch_removes_old_generated_workspace_mcp(tmp_path):
                 "env": {"KEEP": "1"},
             },
         }
-    }))
+    }, indent=2) + "\n"
+    workspace_mcp.write_text(original)
     sd = _make_session_dir([
         AgentConfig(name="vera", model="opus", persona="vera.md"),
     ], workspace=workspace)
@@ -230,33 +226,7 @@ def test_cursor_launch_removes_old_generated_workspace_mcp(tmp_path):
     with patch("peanut_review.launch.subprocess.Popen", return_value=DummyProc()):
         launch.launch_agents(sd)
 
-    data = json.loads(workspace_mcp.read_text())
-    assert "peanut-review" not in data["mcpServers"]
-    assert data["mcpServers"]["unrelated"]["env"]["KEEP"] == "1"
-
-
-def test_cursor_launch_rejects_unrecognized_workspace_peanut_review_mcp(tmp_path):
-    workspace = _workspace_with_cursor_config(tmp_path)
-    workspace_mcp = Path(workspace) / ".cursor" / "mcp.json"
-    workspace_mcp.write_text(json.dumps({
-        "mcpServers": {
-            "peanut-review": {
-                "command": "custom-peanut-review-server",
-                "env": {"CUSTOM": "1"},
-            }
-        }
-    }))
-    sd = _make_session_dir([
-        AgentConfig(name="vera", model="opus", persona="vera.md"),
-    ], workspace=workspace)
-
-    with (
-        patch("peanut_review.launch.subprocess.Popen") as popen,
-        pytest.raises(RuntimeError, match="mcpServers.peanut-review"),
-    ):
-        launch.launch_agents(sd)
-
-    popen.assert_not_called()
+    assert workspace_mcp.read_text() == original
 
 
 def test_cursor_dry_run_does_not_mutate_workspace_mcp(tmp_path):
@@ -265,7 +235,7 @@ def test_cursor_dry_run_does_not_mutate_workspace_mcp(tmp_path):
     original = json.dumps({
         "mcpServers": {
             "peanut-review": {
-                "command": launch._find_mcp_script(),
+                "command": "legacy-peanut-review-mcp",
                 "env": {
                     "PEANUT_SESSION": "/old/session",
                     "GIT_AUTHOR_NAME": "old-agent",
@@ -295,26 +265,28 @@ def test_runner_wrappers_exec_without_shell_timeout():
 
     assert "exec cursor-agent --print" in cursor
     assert "PEANUT_CURSOR_HOME" in cursor
-    assert "PEANUT_CURSOR_MCP_CONFIG" in cursor
+    assert "PEANUT_CURSOR_MCP_CONFIG" not in cursor
+    assert "--approve-mcps" not in cursor
     assert 'exec "${cmd[@]}" > "$output_file"' in opencode
     assert 'exec "${cmd[@]}" > "$stream_file"' in codex
     assert 'agent: (if $agent == "" then null else $agent end)' in opencode
 
 
-def test_opencode_agent_uses_cli_prompt_template():
-    """Opencode should always get the CLI prompt (MCP not wired up yet)."""
+def test_agents_use_cli_prompt_template():
+    """Agents should always get the CLI prompt."""
     sd = _make_session_dir([
+        AgentConfig(name="vera", model="opus", persona="vera.md"),
         AgentConfig(
             name="felix", model="openai/gpt-5.5", persona="felix.md",
             runner="opencode",
         ),
     ])
     prompts = launch.render_all_prompts(sd)
+    cursor_rendered = prompts["vera"].read_text()
     rendered = prompts["felix"].read_text()
     # CLI template self-identifies by instructing the agent to execute shell commands.
+    assert "Shell tool" in cursor_rendered
     assert "Shell tool" in rendered
-    # The MCP template mentions MCP tool names like add_comment (not Shell).
-    assert "mcp__peanut-review" not in rendered
 
 
 def test_session_roundtrip_preserves_runner():

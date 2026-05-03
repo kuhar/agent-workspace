@@ -18,8 +18,6 @@ _LAUNCHER_SCRIPTS = {
     "opencode": "opencode-agent-task.sh",
     "codex": "codex-agent-task.sh",
 }
-_MCP_SERVER_NAME = "peanut-review"
-_MCP_MANAGED_ENV = "PEANUT_REVIEW_MCP_MANAGED"
 
 
 def _find_launcher_script(runner: str = "cursor") -> str:
@@ -46,19 +44,11 @@ def render_prompt(template_path: str | Path, variables: dict[str, str]) -> str:
 def _resolve_template(user_template: str | Path | None, runner: str) -> str:
     """Pick the prompt template for a given runner.
 
-    Explicit --template always wins. Otherwise: cursor prefers MCP if the MCP
-    launcher script is installed; opencode always uses the CLI template (MCP
-    integration is not wired up yet).
+    Explicit --template always wins. Otherwise all runners use the CLI prompt.
     """
     if user_template:
         return str(user_template)
     skills_dir = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "peanut-review"
-    if runner == "cursor":
-        mcp_script = Path(__file__).resolve().parent.parent / "bin" / "peanut-review-mcp"
-        if mcp_script.exists():
-            mcp_default = skills_dir / "agent-prompt-mcp.md"
-            if mcp_default.exists():
-                return str(mcp_default)
     default = skills_dir / "agent-prompt.md"
     if default.exists():
         return str(default)
@@ -128,94 +118,18 @@ def _validate_cli_json(workspace: str | Path) -> None:
         print(f"Warning: could not parse {cli_json_path}: {e}", file=sys.stderr)
 
 
-def _find_mcp_script() -> str | None:
-    """Find the peanut-review-mcp script (uses uv for zero-install)."""
-    script = Path(__file__).resolve().parent.parent / "bin" / "peanut-review-mcp"
-    if script.exists():
-        return str(script)
-    return None
-
-
-def _mcp_server_config(session_dir: Path, agent_name: str, mcp_script: str) -> dict:
-    return {
-        "mcpServers": {
-            _MCP_SERVER_NAME: {
-                "command": mcp_script,
-                "env": {
-                    "PEANUT_SESSION": str(session_dir),
-                    "GIT_AUTHOR_NAME": agent_name,
-                    _MCP_MANAGED_ENV: "1",
-                },
-            }
-        }
-    }
-
-
-def _is_generated_mcp_server(server: object) -> bool:
-    """Return true for peanut-review-managed MCP entries, including legacy ones."""
-    if not isinstance(server, dict):
-        return False
-    env = server.get("env")
-    env = env if isinstance(env, dict) else {}
-    if env.get(_MCP_MANAGED_ENV) == "1":
-        return True
-    command = server.get("command")
-    if not isinstance(command, str):
-        return False
-    return (
-        Path(command).name == "peanut-review-mcp"
-        and "PEANUT_SESSION" in env
-        and "GIT_AUTHOR_NAME" in env
-    )
-
-
-def _cleanup_workspace_mcp_config(workspace: str | Path, *, dry_run: bool = False) -> Path | None:
-    """Remove old generated workspace peanut-review MCP config.
-
-    Cursor still considers workspace .cursor/mcp.json. A custom server named
-    peanut-review there can shadow the per-agent config, so fail clearly unless
-    the entry looks like one peanut-review generated and can safely remove.
-    """
-    mcp_path = Path(workspace) / ".cursor" / "mcp.json"
-    if not mcp_path.exists():
-        return None
-    try:
-        data = json.loads(mcp_path.read_text())
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"could not parse Cursor MCP config {mcp_path}: {e}") from e
-    if not isinstance(data, dict):
-        return mcp_path
-    servers = data.get("mcpServers")
-    if not isinstance(servers, dict) or _MCP_SERVER_NAME not in servers:
-        return mcp_path
-    if not _is_generated_mcp_server(servers[_MCP_SERVER_NAME]):
-        raise RuntimeError(
-            f"{mcp_path} already defines mcpServers.{_MCP_SERVER_NAME}, but it "
-            "does not look like a peanut-review-generated entry. Remove or "
-            "rename that server before launching Cursor reviewers because it "
-            "would shadow the per-agent MCP config."
-        )
-    if dry_run:
-        return mcp_path
-    servers.pop(_MCP_SERVER_NAME, None)
-    mcp_path.write_text(json.dumps(data, indent=2) + "\n")
-    return mcp_path
-
-
 def _cursor_runtime_paths(session_dir: Path, agent_name: str) -> dict[str, Path]:
     cursor_home = session_dir / "runtime" / "cursor" / agent_name
     cursor_dir = cursor_home / ".cursor"
     return {
         "cursor_home": cursor_home,
         "cursor_dir": cursor_dir,
-        "mcp_config": cursor_dir / "mcp.json",
     }
 
 
 def _setup_cursor_runtime(
     session_dir: Path,
     agent_name: str,
-    mcp_script: str | None,
     *,
     dry_run: bool = False,
 ) -> dict[str, str]:
@@ -223,13 +137,7 @@ def _setup_cursor_runtime(
     paths = _cursor_runtime_paths(session_dir, agent_name)
     if not dry_run:
         paths["cursor_dir"].mkdir(parents=True, exist_ok=True)
-        if mcp_script:
-            mcp_config = _mcp_server_config(session_dir, agent_name, mcp_script)
-            paths["mcp_config"].write_text(json.dumps(mcp_config, indent=2) + "\n")
-    runtime = {"cursor_home": str(paths["cursor_home"])}
-    if mcp_script:
-        runtime["mcp_config"] = str(paths["mcp_config"])
-    return runtime
+    return {"cursor_home": str(paths["cursor_home"])}
 
 
 def _apply_cursor_env(env: dict[str, str], cursor_runtime: dict[str, str]) -> None:
@@ -243,8 +151,6 @@ def _apply_cursor_env(env: dict[str, str], cursor_runtime: dict[str, str]) -> No
     env["CURSOR_DATA_DIR"] = cursor_config_dir
     env["XDG_CONFIG_HOME"] = original_xdg_config
     env["PEANUT_CURSOR_HOME"] = cursor_home
-    if "mcp_config" in cursor_runtime:
-        env["PEANUT_CURSOR_MCP_CONFIG"] = cursor_runtime["mcp_config"]
 
 
 def _build_agent_cmd(
@@ -316,11 +222,6 @@ def launch_agents(
     runners = {a.runner for a in session.agents}
     if "cursor" in runners:
         _validate_cli_json(session.workspace)
-        _cleanup_workspace_mcp_config(session.workspace, dry_run=dry_run)
-
-    mcp_script = _find_mcp_script() if "cursor" in runners else None
-    if "cursor" in runners and not mcp_script:
-        print("  MCP: peanut-review-mcp script not found", file=sys.stderr)
 
     prompts = render_all_prompts(session_dir, template_path)
 
@@ -353,7 +254,6 @@ def launch_agents(
             cursor_runtime = _setup_cursor_runtime(
                 sdir,
                 agent.name,
-                mcp_script,
                 dry_run=dry_run,
             )
             _apply_cursor_env(env, cursor_runtime)

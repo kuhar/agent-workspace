@@ -245,6 +245,44 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_kill_signal(item: dict) -> str:
+    target = item.get("target")
+    ident = item.get("id")
+    sig = item.get("signal")
+    if target == "pgid":
+        return f"{sig} pgid={ident}"
+    if target == "supervisor":
+        return f"{sig} supervisor={ident}"
+    return f"{sig} {target}={ident}"
+
+
+def cmd_kill_agents(args: argparse.Namespace) -> int:
+    """Terminate launched reviewer agents."""
+    session_dir = _get_session_dir(args)
+    from . import agent_control
+    try:
+        results = agent_control.kill_agents(
+            session_dir,
+            agent_names=args.agent,
+            grace_seconds=args.timeout,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    failed = False
+    for result in results:
+        signals = " ".join(_format_kill_signal(s) for s in result["signals"])
+        reason = f" {result['reason']}" if result.get("reason") else ""
+        detail = f" {signals}" if signals else ""
+        print(f"  {result['name']}: {result['status']}{detail}{reason}")
+        if result["status"] == "error":
+            failed = True
+    return 1 if failed else 0
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """Initialize a PR review from `.peanut-review.json` and launch agents."""
     try:
@@ -1224,6 +1262,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--template", help="Agent prompt template path")
     sp.add_argument("--cli-json", help="Path to cli.json for agent permissions")
 
+    # kill-agents
+    sp = sub.add_parser(
+        "kill-agents",
+        help="Terminate launched reviewer agents",
+    )
+    sp.add_argument(
+        "--agent",
+        action="append",
+        metavar="NAME",
+        help="Kill only this configured agent (repeatable)",
+    )
+    sp.add_argument("--dry-run", action="store_true", help="Print targets only")
+    sp.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        help="Seconds to wait between SIGTERM and SIGKILL (default: 5)",
+    )
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="Signal recorded PIDs even if process environment cannot be verified",
+    )
+
     # start
     sp = sub.add_parser(
         "start",
@@ -1480,6 +1542,7 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init,
         "launch": cmd_launch,
         "rerun": cmd_rerun,
+        "kill-agents": cmd_kill_agents,
         "start": cmd_start,
         "add-comment": cmd_add_comment,
         "add-global-comment": cmd_add_global_comment,

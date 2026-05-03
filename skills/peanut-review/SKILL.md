@@ -123,6 +123,16 @@ runtime state, while `review=done` means the agent posted `round-done`.
 Treat `review=done` as review-pass completion; `process=running` after that
 usually means the wrapper is waiting for `next-round`.
 
+To stop launched reviewers, use `kill-agents` rather than ad hoc `ps | grep`
+matching. It uses recorded reviewer process groups and supervisor PIDs, and
+verifies the process environment matches the session and agent before
+signaling:
+
+```bash
+peanut-review --session <printed-session-path> kill-agents
+peanut-review --session <printed-session-path> kill-agents --agent irene
+```
+
 ### Step 2 — Build if needed
 
 Ensure the project compiles/builds before agents review it. If the checkout was

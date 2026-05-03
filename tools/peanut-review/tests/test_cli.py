@@ -123,6 +123,41 @@ def test_rerun_dry_run_targets_agent_without_clearing_signals():
     assert (Path(sd) / "signals" / "irene.round-done").exists()
 
 
+def test_kill_agents_cli_prints_results():
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, agents=[
+        {"name": "vera", "model": "opus", "persona": "vera.md"},
+    ])
+
+    def fake_kill_agents(session_dir, **kwargs):
+        assert session_dir == sd
+        assert kwargs["agent_names"] == ["vera"]
+        assert kwargs["dry_run"] is True
+        assert kwargs["grace_seconds"] == 2.0
+        return [{
+            "name": "vera",
+            "status": "dry-run",
+            "reason": "",
+            "signals": [{"target": "pgid", "id": 123, "signal": "SIGTERM"}],
+        }]
+
+    out = io.StringIO()
+    with (
+        patch("peanut_review.agent_control.kill_agents", side_effect=fake_kill_agents),
+        redirect_stdout(out),
+    ):
+        rc = main([
+            "--session", sd,
+            "kill-agents",
+            "--agent", "vera",
+            "--dry-run",
+            "--timeout", "2",
+        ])
+
+    assert rc == 0
+    assert "vera: dry-run SIGTERM pgid=123" in out.getvalue()
+
+
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
 def test_add_comment_and_list(mock_git):
     ws = _make_workspace({

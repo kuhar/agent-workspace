@@ -389,6 +389,7 @@ def _render_sidebar(
     files: list[FileDiff],
     inbox_transcript: list[dict] | None = None,
     notes: list[Note] | None = None,
+    agent_runtime: dict[str, dict[str, str]] | None = None,
 ) -> str:
     # Sidebar counters reflect what's visible (deleted hidden), with a
     # separate "deleted" row so the audit count is still discoverable.
@@ -437,11 +438,21 @@ def _render_sidebar(
         '</li>'
     )
 
-    agent_rows = "".join(
-        f'<li><span>{html.escape(a.name)}</span>'
-        f'<span class="v">{html.escape(a.status)}</span></li>'
-        for a in session.agents
-    )
+    runtime_by_agent = agent_runtime or {}
+    agent_rows = ""
+    for a in session.agents:
+        info = runtime_by_agent.get(a.name, {})
+        process = info.get("process_status", "")
+        review = info.get("protocol_status", "")
+        detail = f" p:{process} r:{review}" if process and review else ""
+        title = (
+            f' title="process={html.escape(process)} review={html.escape(review)}"'
+            if process and review else ""
+        )
+        agent_rows += (
+            f'<li><span>{html.escape(a.name)}</span>'
+            f'<span class="v"{title}>{html.escape(a.status + detail)}</span></li>'
+        )
     deleted_row = (
         f'<li data-k="deleted"><span>deleted</span><span class="v">{deleted}</span></li>'
         if deleted else ""
@@ -698,6 +709,7 @@ def render_page(
     head_shifted: bool = False,
     base_url: str = "",
     inbox_transcript: list[dict] | None = None,
+    agent_runtime: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """Build the full HTML page for a session.
 
@@ -715,6 +727,7 @@ def render_page(
     sidebar = _render_sidebar(
         session, comments, files,
         inbox_transcript=transcript, notes=note_items,
+        agent_runtime=agent_runtime,
     )
 
     head_badge = (

@@ -16,7 +16,13 @@ dev = ["pytest>=8", "pytest-xdist>=3"]
 peanut-review = "peanut_review.__main__:main"
 
 [tool.setuptools.package-data]
-peanut_review = ["web/assets/*"]
+peanut_review = [
+    "personas/*.md",
+    "runners/*.sh",
+    "templates/*.json",
+    "templates/*.md",
+    "web/assets/*",
+]
 
 [tool.pytest.ini_options]
 # Parallelize by default. The web tests dominate runtime (each spins up an

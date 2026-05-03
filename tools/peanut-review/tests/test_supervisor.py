@@ -64,6 +64,8 @@ def test_supervisor_records_done_when_signal_exists(tmp_path):
     meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
     assert meta["exit_code"] == 0
     assert meta["timed_out"] is False
+    assert meta["process_state"] == "exited"
+    assert meta["heartbeat_at"]
     assert meta["supervisor_pid"] == os.getpid()
     loaded = sess.load_session(sd)
     assert loaded.agents[0].status == "done"
@@ -96,6 +98,7 @@ def test_supervisor_records_failed_without_signal(tmp_path):
     meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
     assert meta["exit_code"] == 7
     assert meta["timed_out"] is False
+    assert meta["process_state"] == "failed"
     assert sess.load_session(sd).agents[0].status == "failed"
 
 
@@ -154,6 +157,7 @@ def test_supervisor_records_shell_style_termination_signal(tmp_path):
     assert rc == 143
     meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
     assert meta["termination_signal"] == "SIGTERM"
+    assert meta["process_state"] == "killed"
     assert meta["start"]
     assert sess.load_session(sd).agents[0].status == "failed"
 
@@ -181,5 +185,6 @@ def test_supervisor_times_out_and_kills_process_group(tmp_path):
     meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
     assert rc < 0
     assert meta["timed_out"] is True
+    assert meta["process_state"] == "timeout"
     assert meta["termination_signal"] in {"SIGTERM", "SIGKILL"}
     assert sess.load_session(sd).agents[0].status == "timeout"

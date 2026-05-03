@@ -6,6 +6,8 @@
       "LS(**)",
       "SemanticSearch(**)",
 
+      "Shell(peanut-review **)",
+
       "Shell(cat **)",
       "Shell(head **)",
       "Shell(tail **)",

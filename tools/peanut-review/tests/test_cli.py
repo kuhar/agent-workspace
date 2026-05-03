@@ -11,6 +11,15 @@ from peanut_review.cli import main
 from peanut_review import session as sess, models
 
 
+def test_default_personas_dir_is_bundled():
+    from peanut_review import cli
+
+    personas = Path(cli._default_personas_dir())
+    assert personas.name == "personas"
+    assert personas.parent.name == "peanut_review"
+    assert (personas / "vera.md").exists()
+
+
 def _make_workspace(files: dict[str, str] | None = None) -> str:
     """Create a temp workspace with optional files. Returns workspace path."""
     ws = tempfile.mkdtemp(prefix="pr-ws-")
@@ -276,8 +285,16 @@ def test_status(mock_git):
     main(["--session", sd, "init", "--workspace", "/tmp/repo",
           "--agents", json.dumps([{"name": "vera", "model": "opus", "persona": "vera.md"}])])
 
-    rc = main(["--session", sd, "status"])
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "status"])
     assert rc == 0
+    text = out.getvalue()
+    assert "vera" in text
+    assert "process=pending" in text
+    assert "review=pending" in text
+    assert "signal=no" in text
+    assert "comments=0" in text
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
@@ -775,6 +792,27 @@ def test_refresh_agent_statuses_marks_dead_no_signal_as_failed():
     assert s.agents[0].status == "failed"
 
 
+def test_refresh_agent_statuses_stale_running_meta_is_failed():
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
+
+    from peanut_review import runtime
+    runtime.update_agent_meta(sd, "vera", {
+        "process_state": "running",
+        "pid": 999999999,
+    })
+
+    s = sess.load_session(sd)
+    s.agents[0].status = "running"
+    s.agents[0].pid = 999999999
+    sess.save_session(sd, s)
+
+    from peanut_review.session import refresh_agent_statuses as _refresh_agent_statuses
+    changed = _refresh_agent_statuses(sd, s)
+    assert changed is True
+    assert s.agents[0].status == "failed"
+
+
 def test_refresh_agent_statuses_round_done_marks_done():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
@@ -791,6 +829,26 @@ def test_refresh_agent_statuses_round_done_marks_done():
     changed = _refresh_agent_statuses(sd, s)
     assert changed is True
     assert s.agents[0].status == "done"
+
+
+def test_refresh_agent_statuses_live_reviewer_pid_stays_running(monkeypatch):
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
+
+    s = sess.load_session(sd)
+    s.agents[0].status = "failed"
+    s.agents[0].pid = 123456
+    sess.save_session(sd, s)
+
+    monkeypatch.setattr(
+        "peanut_review.runtime.is_process_live",
+        lambda pid: pid == 123456,
+    )
+
+    from peanut_review.session import refresh_agent_statuses as _refresh_agent_statuses
+    changed = _refresh_agent_statuses(sd, s)
+    assert changed is True
+    assert s.agents[0].status == "running"
 
 
 def test_refresh_agent_statuses_leaves_pending_alone():

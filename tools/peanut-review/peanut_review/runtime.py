@@ -12,6 +12,25 @@ from .models import AgentConfig, AgentStatus
 
 ROUND_DONE_EVENT = "round-done"
 
+PROCESS_PENDING = "pending"
+PROCESS_LAUNCHING = "launching"
+PROCESS_RUNNING = "running"
+PROCESS_EXITED = "exited"
+PROCESS_FAILED = "failed"
+PROCESS_TIMEOUT = "timeout"
+PROCESS_KILLED = "killed"
+
+PROTOCOL_PENDING = "pending"
+PROTOCOL_ASKING = "asking"
+PROTOCOL_DONE = "done"
+
+_TERMINAL_PROCESS_STATES = {
+    PROCESS_EXITED,
+    PROCESS_FAILED,
+    PROCESS_TIMEOUT,
+    PROCESS_KILLED,
+}
+
 
 def agent_log_dir(session_dir: str | Path, agent_name: str) -> Path:
     return Path(session_dir) / "log" / agent_name
@@ -98,6 +117,75 @@ def agent_unanswered_count(session_dir: str | Path, agent_name: str) -> int:
     return len(polling.list_unanswered(session_dir, agent_name))
 
 
+def process_state_from_exit(
+    return_code: int,
+    *,
+    timed_out: bool = False,
+    termination_signal: str | None = None,
+) -> str:
+    """Classify process completion from supervisor-owned facts."""
+    if timed_out:
+        return PROCESS_TIMEOUT
+    if termination_signal:
+        return PROCESS_KILLED
+    if return_code == 0:
+        return PROCESS_EXITED
+    return PROCESS_FAILED
+
+
+def _meta_process_state(meta: dict[str, Any]) -> str | None:
+    state = meta.get("process_state")
+    return state if isinstance(state, str) and state else None
+
+
+def _derive_process_state(
+    *,
+    agent: AgentConfig,
+    meta: dict[str, Any],
+    pid: int | None,
+    supervisor_pid: int | None,
+    reviewer_live: bool,
+    supervisor_live: bool,
+    exit_code: int | None,
+    timed_out: bool,
+    termination_signal: str | None,
+    has_final_meta: bool,
+) -> str:
+    """Derive the supervisor/process axis without consulting review signals."""
+    if reviewer_live:
+        return PROCESS_RUNNING
+
+    if supervisor_live and not has_final_meta:
+        state = _meta_process_state(meta)
+        if state in {PROCESS_LAUNCHING, PROCESS_RUNNING}:
+            return state
+        return PROCESS_RUNNING if pid else PROCESS_LAUNCHING
+
+    if timed_out:
+        return PROCESS_TIMEOUT
+
+    if exit_code is not None:
+        state = _meta_process_state(meta)
+        if state in _TERMINAL_PROCESS_STATES:
+            return state
+        return process_state_from_exit(
+            exit_code,
+            timed_out=timed_out,
+            termination_signal=termination_signal,
+        )
+
+    if agent.status == AgentStatus.PENDING.value and not (pid or supervisor_pid or meta):
+        return PROCESS_PENDING
+
+    state = _meta_process_state(meta)
+    if state in _TERMINAL_PROCESS_STATES:
+        return state
+    if state == PROCESS_PENDING and not (pid or supervisor_pid):
+        return PROCESS_PENDING
+
+    return PROCESS_FAILED
+
+
 def inspect_agent_runtime(session_dir: str | Path, agent: AgentConfig) -> dict[str, Any]:
     meta = read_agent_meta(session_dir, agent.name)
     pid = agent.pid if agent.pid is not None else _as_int(meta.get("pid"))
@@ -109,9 +197,28 @@ def inspect_agent_runtime(session_dir: str | Path, agent: AgentConfig) -> dict[s
     )
     exit_code = _as_int(meta.get("exit_code"))
     timed_out = bool(meta.get("timed_out"))
+    termination_signal = meta.get("termination_signal")
+    termination_signal = termination_signal if isinstance(termination_signal, str) else None
     signal = has_round_done_signal(session_dir, agent.name)
     reviewer_live = is_process_live(pid)
     supervisor_live = is_process_live(supervisor_pid)
+    has_final_meta = any(k in meta for k in ("end", "exit_code", "timed_out"))
+    process_state = _derive_process_state(
+        agent=agent,
+        meta=meta,
+        pid=pid,
+        supervisor_pid=supervisor_pid,
+        reviewer_live=reviewer_live,
+        supervisor_live=supervisor_live,
+        exit_code=exit_code,
+        timed_out=timed_out,
+        termination_signal=termination_signal,
+        has_final_meta=has_final_meta,
+    )
+    protocol_status = PROTOCOL_DONE if signal else PROTOCOL_PENDING
+    unanswered = agent_unanswered_count(session_dir, agent.name)
+    if protocol_status == PROTOCOL_PENDING and unanswered:
+        protocol_status = PROTOCOL_ASKING
     return {
         "meta": meta,
         "pid": pid,
@@ -119,28 +226,26 @@ def inspect_agent_runtime(session_dir: str | Path, agent: AgentConfig) -> dict[s
         "supervisor_pid": supervisor_pid,
         "reviewer_live": reviewer_live,
         "supervisor_live": supervisor_live,
+        "process_state": process_state,
+        "protocol_status": protocol_status,
         "signal": signal,
         "comments": agent_comment_count(session_dir, agent.name),
-        "unanswered": agent_unanswered_count(session_dir, agent.name),
+        "unanswered": unanswered,
         "exit_code": exit_code,
         "timed_out": timed_out,
-        "termination_signal": meta.get("termination_signal"),
-        "has_final_meta": any(k in meta for k in ("end", "exit_code", "timed_out")),
+        "termination_signal": termination_signal,
+        "has_final_meta": has_final_meta,
     }
 
 
 def derive_status_from_snapshot(agent: AgentConfig, snapshot: dict[str, Any]) -> str:
-    if snapshot["signal"]:
+    if snapshot["protocol_status"] == PROTOCOL_DONE:
         return AgentStatus.DONE.value
-    if snapshot["timed_out"]:
+    if snapshot["process_state"] == PROCESS_TIMEOUT:
         return AgentStatus.TIMEOUT.value
-    if snapshot["reviewer_live"]:
+    if snapshot["process_state"] in {PROCESS_LAUNCHING, PROCESS_RUNNING}:
         return AgentStatus.RUNNING.value
-    if snapshot["supervisor_live"] and not snapshot["has_final_meta"]:
-        return AgentStatus.RUNNING.value
-    if agent.status == AgentStatus.PENDING.value and not (
-        snapshot["pid"] or snapshot["supervisor_pid"] or snapshot["has_final_meta"]
-    ):
+    if snapshot["process_state"] == PROCESS_PENDING:
         return AgentStatus.PENDING.value
     return AgentStatus.FAILED.value
 

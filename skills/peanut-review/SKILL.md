@@ -15,8 +15,8 @@ You drive the review lifecycle using the `peanut-review` CLI tool.
   It sets `PYTHONPATH` for the local checkout, so no setup step is needed.
 - For package-local development and tests, run commands from
   `tools/peanut-review` with `uv run ...`.
-- Personas live in `skills/peanut-gallery-review/personas/`
-- Agent prompt template: `skills/peanut-review/agent-prompt.md`
+- Default personas live in `tools/peanut-review/peanut_review/personas/`
+- Agent prompt template: `tools/peanut-review/peanut_review/templates/agent-prompt.md`
 
 ## Agent Permissions
 
@@ -24,10 +24,9 @@ Cursor-based agents need a `.cursor/cli.json` in the workspace before launch.
 Copy the template to the workspace root:
 
 ```bash
-cp skills/peanut-review/cli.sample.json <WORKSPACE>/.cursor/cli.json
+cp tools/peanut-review/peanut_review/templates/cli.sample.json <WORKSPACE>/.cursor/cli.json
 ```
 
-Run from the repo root, or adjust the path to `cli.sample.json` accordingly.
 The template includes `Shell(peanut-review **)` plus read-only filesystem and
 git commands, test runners, and build tools.
 
@@ -119,6 +118,10 @@ peanut-review --session <printed-session-path> status
 
 If status shows agents as done immediately or there are no comments, inspect
 `<session>/log/*.log` before assuming the review is running.
+The status output has two separate axes: `process=...` is supervisor-owned
+runtime state, while `review=done` means the agent posted `round-done`.
+Treat `review=done` as review-pass completion; `process=running` after that
+usually means the wrapper is waiting for `next-round`.
 
 ### Step 2 — Build if needed
 

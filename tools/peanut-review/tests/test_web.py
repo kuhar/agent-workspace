@@ -529,6 +529,8 @@ def test_server_session_api(session_dir: Path):
         assert data["state"] == "init"
         assert data["comment_count"] == 0
         assert "agents" in data
+        assert data["agents"][0]["process_status"] == "pending"
+        assert data["agents"][0]["protocol_status"] == "pending"
     finally:
         srv.shutdown()
 

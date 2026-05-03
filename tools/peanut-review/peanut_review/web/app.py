@@ -263,10 +263,17 @@ class _Handler(BaseHTTPRequestHandler):
                 session.workspace, session.base_ref, session.topic_ref,
             )
             transcript = polling.list_transcript(session_dir)
+            agent_runtime = {}
+            for agent in session.agents:
+                snapshot = runtime.inspect_agent_runtime(session_dir, agent)
+                agent_runtime[agent.name] = {
+                    "process_status": snapshot["process_state"],
+                    "protocol_status": snapshot["protocol_status"],
+                }
             html_out = render_page(
                 load_session(session_dir), session_id, files, comments,
                 notes=notes, head_shifted=shifted, base_url=self.base_url,
-                inbox_transcript=transcript,
+                inbox_transcript=transcript, agent_runtime=agent_runtime,
             )
             self._html(200, html_out)
             return
@@ -276,6 +283,26 @@ class _Handler(BaseHTTPRequestHandler):
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
             live = [c for c in comments if not c.deleted]
+            agent_payload = []
+            for agent in session.agents:
+                snapshot = runtime.inspect_agent_runtime(session_dir, agent)
+                agent_payload.append({
+                    "name": agent.name,
+                    "model": agent.model,
+                    "status": runtime.derive_status_from_snapshot(agent, snapshot),
+                    "process_status": snapshot["process_state"],
+                    "protocol_status": snapshot["protocol_status"],
+                    "runner": agent.runner,
+                    "pid": snapshot["pid"],
+                    "pgid": snapshot["pgid"],
+                    "supervisor_pid": snapshot["supervisor_pid"],
+                    "signal": snapshot["signal"],
+                    "comments": snapshot["comments"],
+                    "unanswered": snapshot["unanswered"],
+                    "exit_code": snapshot["exit_code"],
+                    "timed_out": snapshot["timed_out"],
+                    "termination_signal": snapshot["termination_signal"],
+                })
             payload = {
                 "id": session.id,
                 "state": session.state,
@@ -284,19 +311,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "original_head": session.original_head,
                 "current_head": session.current_head,
                 "workspace": session.workspace,
-                "agents": [
-                    {
-                        "name": a.name,
-                        "model": a.model,
-                        "status": a.status,
-                        "runner": a.runner,
-                        "pid": a.pid,
-                        "pgid": a.pgid,
-                        "supervisor_pid": a.supervisor_pid,
-                        "signal": runtime.has_round_done_signal(session_dir, a.name),
-                    }
-                    for a in session.agents
-                ],
+                "agents": agent_payload,
                 "comment_count": len(live),
                 "note_count": len(notes),
                 "stale_count": sum(1 for c in live if c.stale),

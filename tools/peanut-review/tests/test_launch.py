@@ -54,18 +54,24 @@ class DummyProc:
 def test_find_launcher_script_cursor():
     path = launch._find_launcher_script("cursor")
     assert path.endswith("cursor-agent-task.sh")
+    assert Path(path).parent.name == "runners"
+    assert "ask-the-peanut-gallery" not in path
     assert Path(path).exists()
 
 
 def test_find_launcher_script_opencode():
     path = launch._find_launcher_script("opencode")
     assert path.endswith("opencode-agent-task.sh")
+    assert Path(path).parent.name == "runners"
+    assert "ask-the-peanut-gallery" not in path
     assert Path(path).exists()
 
 
 def test_find_launcher_script_codex():
     path = launch._find_launcher_script("codex")
     assert path.endswith("codex-agent-task.sh")
+    assert Path(path).parent.name == "runners"
+    assert "ask-the-peanut-gallery" not in path
     assert Path(path).exists()
 
 
@@ -281,6 +287,9 @@ def test_agents_use_cli_prompt_template():
             runner="opencode",
         ),
     ])
+    template = launch._resolve_template(None, "cursor")
+    assert Path(template).parent.name == "templates"
+    assert "skills/peanut-review" not in template
     prompts = launch.render_all_prompts(sd)
     cursor_rendered = prompts["vera"].read_text()
     rendered = prompts["felix"].read_text()

@@ -47,7 +47,7 @@ def _get_author(args: argparse.Namespace) -> str:
 
 def _default_personas_dir() -> str:
     """Find the default personas directory."""
-    p = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "peanut-gallery-review" / "personas"
+    p = Path(__file__).resolve().parent / "personas"
     return str(p) if p.exists() else ""
 
 
@@ -1013,7 +1013,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         status = runtime.derive_status_from_snapshot(a, snapshot)
         model = runtime.compact_model(a.model)
         details = " ".join(runtime.status_detail_parts(snapshot, status))
-        print(f"  {a.name:<12} {status:<8} {model:<22} {details}")
+        print(
+            f"  {a.name:<12} {status:<8} {model:<22} "
+            f"process={snapshot['process_state']:<9} "
+            f"review={snapshot['protocol_status']:<7} {details}"
+        )
 
     # Comment counts — deleted comments are hidden from the total but
     # surfaced separately for transparency.

@@ -7,12 +7,15 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import runtime
 from .models import AgentStatus
 from .session import update_agent_status
+
+HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _now_iso() -> str:
@@ -134,6 +137,7 @@ def supervise_agent(
     child_env["PEANUT_SUPERVISOR_PID"] = str(os.getpid())
     runner = _runner_from_command(command)
     runner_meta = _runner_env_meta(child_env)
+    now = _now_iso()
 
     runtime.update_agent_meta(
         sdir,
@@ -141,7 +145,9 @@ def supervise_agent(
         {
             "runner": runner,
             "supervisor_pid": os.getpid(),
-            "supervisor_start": _now_iso(),
+            "supervisor_start": now,
+            "process_state": runtime.PROCESS_LAUNCHING,
+            "heartbeat_at": now,
             "command": command,
             **runner_meta,
         },
@@ -161,14 +167,17 @@ def supervise_agent(
             start_new_session=True,
         )
     except OSError as e:
+        now = _now_iso()
         runtime.update_agent_meta(
             sdir,
             agent_name,
             {
                 "runner": runner,
-                "end": _now_iso(),
+                "end": now,
                 "exit_code": 127,
                 "timed_out": False,
+                "process_state": runtime.PROCESS_FAILED,
+                "heartbeat_at": now,
                 "error": str(e),
                 **runner_meta,
             },
@@ -188,6 +197,8 @@ def supervise_agent(
             "supervisor_pid": os.getpid(),
             "command": command,
             "start": reviewer_start,
+            "process_state": runtime.PROCESS_RUNNING,
+            "heartbeat_at": reviewer_start,
             **runner_meta,
         },
     )
@@ -203,7 +214,32 @@ def supervise_agent(
     timed_out = False
     termination_signal: str | None = None
     try:
-        return_code = proc.wait(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                return_code = proc.wait(
+                    timeout=min(HEARTBEAT_INTERVAL_SECONDS, remaining)
+                )
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise
+                runtime.update_agent_meta(
+                    sdir,
+                    agent_name,
+                    {
+                        "runner": runner,
+                        "pid": proc.pid,
+                        "pgid": pgid,
+                        "supervisor_pid": os.getpid(),
+                        "process_state": runtime.PROCESS_RUNNING,
+                        "heartbeat_at": _now_iso(),
+                        **runner_meta,
+                    },
+                )
     except subprocess.TimeoutExpired:
         timed_out = True
         if _terminate_group(pgid, signal.SIGTERM):
@@ -219,6 +255,12 @@ def supervise_agent(
         termination_signal = _termination_signal_from_return_code(return_code)
 
     _postprocess_codex_output(sdir, agent_name)
+    process_state = runtime.process_state_from_exit(
+        return_code,
+        timed_out=timed_out,
+        termination_signal=termination_signal,
+    )
+    now = _now_iso()
     runtime.update_agent_meta(
         sdir,
         agent_name,
@@ -229,10 +271,12 @@ def supervise_agent(
             "supervisor_pid": os.getpid(),
             "command": command,
             "start": reviewer_start,
-            "end": _now_iso(),
+            "end": now,
             "exit_code": return_code,
             "timed_out": timed_out,
             "termination_signal": termination_signal,
+            "process_state": process_state,
+            "heartbeat_at": now,
             **runner_meta,
         },
     )

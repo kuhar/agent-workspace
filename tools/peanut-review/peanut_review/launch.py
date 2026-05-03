@@ -21,12 +21,11 @@ _LAUNCHER_SCRIPTS = {
 
 
 def _find_launcher_script(runner: str = "cursor") -> str:
-    """Find the launcher script for a given runner ("cursor" or "opencode")."""
+    """Find the bundled launcher script for a given runner."""
     script_name = _LAUNCHER_SCRIPTS.get(runner)
     if not script_name:
         raise ValueError(f"unknown runner: {runner!r} (expected one of {list(_LAUNCHER_SCRIPTS)})")
-    path = (Path(__file__).resolve().parent.parent.parent.parent
-            / "skills" / "ask-the-peanut-gallery" / script_name)
+    path = Path(__file__).resolve().parent / "runners" / script_name
     if path.exists():
         return str(path)
     raise FileNotFoundError(f"{script_name} not found at {path}")
@@ -48,12 +47,11 @@ def _resolve_template(user_template: str | Path | None, runner: str) -> str:
     """
     if user_template:
         return str(user_template)
-    skills_dir = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "peanut-review"
-    default = skills_dir / "agent-prompt.md"
+    default = Path(__file__).resolve().parent / "templates" / "agent-prompt.md"
     if default.exists():
         return str(default)
     raise FileNotFoundError(
-        f"no prompt template found for runner={runner!r} (looked in {skills_dir})"
+        f"no prompt template found for runner={runner!r} (looked at {default})"
     )
 
 

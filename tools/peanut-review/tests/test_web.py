@@ -180,6 +180,53 @@ def test_render_sidebar_files_dash_when_no_comments(session_dir: Path, repo: Pat
     assert '<span class="count empty">—</span>' in html
 
 
+def test_render_sidebar_agents_show_model_and_hides_kill_controls_when_idle(
+    session_dir: Path,
+    repo: Path,
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert '<span class="agent-name">felix</span>' in html
+    assert '<span class="agent-model mono" title="m">m</span>' in html
+    assert 'id="kill-all-agents-btn"' in html
+    assert 'id="kill-all-agents-btn" type="button" class="agent-kill-all" title="Stop all agents" hidden' in html
+    assert 'data-agent-kill="felix"' not in html
+
+
+def test_render_sidebar_agents_show_kill_controls_when_running(
+    session_dir: Path,
+    repo: Path,
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(
+        s,
+        s.id,
+        files,
+        [],
+        head_shifted=False,
+        agent_runtime={"felix": {"process_status": "running", "protocol_status": "pending"}},
+    )
+
+    assert 'id="kill-all-agents-btn" type="button" class="agent-kill-all" title="Stop all agents" hidden' not in html
+    assert 'data-agent-kill="felix"' in html
+
+
+def test_render_sidebar_action_shortcuts_use_namespaced_bindings(
+    session_dir: Path,
+    repo: Path,
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert '<kbd class="prefix">␣</kbd><kbd>c</kbd><kbd>a</kbd>' in html
+    assert '<kbd class="prefix">␣</kbd><kbd>a</kbd><kbd>K</kbd>' in html
+    assert '<kbd class="prefix">␣</kbd><kbd>a</kbd></span><span class="desc">add global comment' not in html
+
+
 def test_render_global_section_appears_above_files(session_dir: Path, repo: Path):
     """The high-level feedback section is rendered, contains the add button,
     and includes any file=='' comment in its own block."""
@@ -556,8 +603,44 @@ def test_server_session_api(session_dir: Path):
         assert data["state"] == "init"
         assert data["comment_count"] == 0
         assert "agents" in data
+        assert data["agents"][0]["model"] == "m"
         assert data["agents"][0]["process_status"] == "pending"
         assert data["agents"][0]["protocol_status"] == "pending"
+    finally:
+        srv.shutdown()
+
+
+def test_server_kill_agents_endpoint(session_dir: Path, monkeypatch):
+    calls = []
+
+    def fake_kill_agents(session_dir_arg, **kwargs):
+        calls.append((Path(session_dir_arg), kwargs))
+        return [{
+            "name": "felix",
+            "status": "skipped",
+            "reason": "not running",
+            "signals": [],
+        }]
+
+    monkeypatch.setattr(web_app.agent_control, "kill_agents", fake_kill_agents)
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/agents/kill",
+            {"agent": "felix"},
+        )
+        assert code == 200
+        assert calls[-1] == (session_dir, {"agent_names": ["felix"]})
+        assert data["results"][0]["status"] == "skipped"
+        assert data["agents"][0]["name"] == "felix"
+        assert data["agents"][0]["model"] == "m"
+
+        code, _ = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/agents/kill",
+            {},
+        )
+        assert code == 200
+        assert calls[-1] == (session_dir, {"agent_names": None})
     finally:
         srv.shutdown()
 

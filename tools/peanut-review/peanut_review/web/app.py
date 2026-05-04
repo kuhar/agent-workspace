@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import gh, gh_pull, gh_push, polling, runtime, store
+from .. import agent_control, gh, gh_pull, gh_push, polling, runtime, store
 from ..models import Comment, CommentCategory, Note, Severity, normalize_comment_category
 from ..session import (
     GLOBAL_FILE,
@@ -283,26 +283,6 @@ class _Handler(BaseHTTPRequestHandler):
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
             live = [c for c in comments if not c.deleted]
-            agent_payload = []
-            for agent in session.agents:
-                snapshot = runtime.inspect_agent_runtime(session_dir, agent)
-                agent_payload.append({
-                    "name": agent.name,
-                    "model": agent.model,
-                    "status": runtime.derive_status_from_snapshot(agent, snapshot),
-                    "process_status": snapshot["process_state"],
-                    "protocol_status": snapshot["protocol_status"],
-                    "runner": agent.runner,
-                    "pid": snapshot["pid"],
-                    "pgid": snapshot["pgid"],
-                    "supervisor_pid": snapshot["supervisor_pid"],
-                    "signal": snapshot["signal"],
-                    "comments": snapshot["comments"],
-                    "unanswered": snapshot["unanswered"],
-                    "exit_code": snapshot["exit_code"],
-                    "timed_out": snapshot["timed_out"],
-                    "termination_signal": snapshot["termination_signal"],
-                })
             payload = {
                 "id": session.id,
                 "state": session.state,
@@ -311,7 +291,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "original_head": session.original_head,
                 "current_head": session.current_head,
                 "workspace": session.workspace,
-                "agents": agent_payload,
+                "agents": _agent_payload(session_dir, session),
                 "comment_count": len(live),
                 "note_count": len(notes),
                 "stale_count": sum(1 for c in live if c.stale),
@@ -407,6 +387,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if tail == "/api/gh/pull":
             self._post_gh_pull(session_dir)
+            return
+        if tail == "/api/agents/kill":
+            self._post_agents_kill(session_dir, data)
             return
         self._error(404, f"no route for {tail}")
 
@@ -675,6 +658,28 @@ class _Handler(BaseHTTPRequestHandler):
             "summary": r.summary(),
         })
 
+    def _post_agents_kill(self, session_dir: Path, data: dict) -> None:
+        raw = data.get("agents", data.get("agent"))
+        if raw is None:
+            agent_names = None
+        elif isinstance(raw, str):
+            agent_names = [raw]
+        elif isinstance(raw, list):
+            agent_names = [str(name) for name in raw]
+        else:
+            return self._error(400, "agent must be a string or agents must be a list")
+
+        try:
+            results = agent_control.kill_agents(session_dir, agent_names=agent_names)
+        except ValueError as e:
+            return self._error(400, str(e))
+
+        session = load_session(session_dir)
+        self._json(200, {
+            "results": results,
+            "agents": _agent_payload(session_dir, session),
+        })
+
 
 def _comment_to_dict(c: Comment) -> dict:
     return {
@@ -712,6 +717,30 @@ def _note_to_dict(n: Note) -> dict:
         "timestamp": n.timestamp,
         "body": n.body,
     }
+
+
+def _agent_payload(session_dir: Path, session) -> list[dict]:
+    payload = []
+    for agent in session.agents:
+        snapshot = runtime.inspect_agent_runtime(session_dir, agent)
+        payload.append({
+            "name": agent.name,
+            "model": agent.model,
+            "status": runtime.derive_status_from_snapshot(agent, snapshot),
+            "process_status": snapshot["process_state"],
+            "protocol_status": snapshot["protocol_status"],
+            "runner": agent.runner,
+            "pid": snapshot["pid"],
+            "pgid": snapshot["pgid"],
+            "supervisor_pid": snapshot["supervisor_pid"],
+            "signal": snapshot["signal"],
+            "comments": snapshot["comments"],
+            "unanswered": snapshot["unanswered"],
+            "exit_code": snapshot["exit_code"],
+            "timed_out": snapshot["timed_out"],
+            "termination_signal": snapshot["termination_signal"],
+        })
+    return payload
 
 
 def _default_author() -> str:

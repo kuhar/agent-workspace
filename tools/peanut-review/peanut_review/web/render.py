@@ -38,6 +38,7 @@ SESSION_STATE_LABELS = {
     "complete": "done",
     "aborted": "aborted",
 }
+KILLABLE_PROCESS_STATES = {"launching", "running"}
 
 
 def _session_state_label(state: str) -> str:
@@ -452,19 +453,41 @@ def _render_sidebar(
 
     runtime_by_agent = agent_runtime or {}
     agent_rows = ""
+    any_killable = False
     for a in session.agents:
         info = runtime_by_agent.get(a.name, {})
         process = info.get("process_status", "")
         review = info.get("protocol_status", "")
         detail = f" p:{process} r:{review}" if process and review else ""
+        status = html.escape(a.status + detail)
         title = (
             f' title="process={html.escape(process)} review={html.escape(review)}"'
             if process and review else ""
         )
-        agent_rows += (
-            f'<li><span>{html.escape(a.name)}</span>'
-            f'<span class="v"{title}>{html.escape(a.status + detail)}</span></li>'
+        agent_name = html.escape(a.name)
+        agent_attr = html.escape(a.name, quote=True)
+        model = html.escape(a.model)
+        model_attr = html.escape(a.model, quote=True)
+        can_kill = process in KILLABLE_PROCESS_STATES
+        any_killable = any_killable or can_kill
+        kill_button = (
+            f'<button type="button" class="agent-kill" data-agent-kill="{agent_attr}" '
+            f'title="Stop {agent_attr}">kill</button>'
+            if can_kill else ""
         )
+        agent_rows += (
+            f'<li class="agent-row" data-agent="{agent_attr}">'
+            '<span class="agent-ident">'
+            f'<span class="agent-name">{agent_name}</span>'
+            f'<span class="agent-model mono" title="{model_attr}">{model}</span>'
+            '</span>'
+            '<span class="agent-controls">'
+            f'<span class="v"{title}>{status}</span>'
+            f'{kill_button}'
+            '</span>'
+            '</li>'
+        )
+    kill_all_hidden = "" if any_killable else " hidden"
     deleted_row = (
         f'<li data-k="deleted"><span>deleted</span><span class="v">{deleted}</span></li>'
         if deleted else ""
@@ -519,8 +542,12 @@ def _render_sidebar(
         f'<li data-k="critical"><span>critical</span><span class="v">{crit}</span></li>'
         f'{deleted_row}'
         '</ul>'
+        '<div class="sidebar-heading">'
         '<h3>Agents</h3>'
-        f'<ul>{agent_rows or "<li>(none)</li>"}</ul>'
+        '<button id="kill-all-agents-btn" type="button" class="agent-kill-all" '
+        f'title="Stop all agents"{kill_all_hidden}>kill all</button>'
+        '</div>'
+        f'<ul id="agent-list" class="agent-list">{agent_rows or "<li>(none)</li>"}</ul>'
         '<h3>Navigation</h3>'
         '<ul class="shortcuts">'
         '<li><span class="keys"><kbd>n</kbd><kbd>p</kbd></span>'
@@ -544,8 +571,10 @@ def _render_sidebar(
         '<span class="desc">toggle resolved</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>D</kbd></span>'
         '<span class="desc">delete</span></li>'
-        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>a</kbd></span>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>c</kbd><kbd>a</kbd></span>'
         '<span class="desc">add global comment</span></li>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>a</kbd><kbd>K</kbd></span>'
+        '<span class="desc">kill all agents</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>f</kbd></span>'
         '<span class="desc">fetch from GitHub</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>p</kbd></span>'

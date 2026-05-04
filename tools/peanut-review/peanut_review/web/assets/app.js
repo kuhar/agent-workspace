@@ -12,6 +12,9 @@
     d.textContent = s;
     return d.innerHTML;
   }
+  function attrEsc(s) {
+    return esc(s).replace(/"/g, "&quot;");
+  }
   function sessionStateLabel(state) {
     const labels = {
       init: "ready",
@@ -1016,6 +1019,105 @@
   }
   setInterval(refreshInbox, 3000);
 
+  function agentStatusText(agent) {
+    const status = agent.status || "";
+    const process = agent.process_status || "";
+    const protocol = agent.protocol_status || "";
+    return process && protocol
+      ? `${status} p:${process} r:${protocol}`
+      : status;
+  }
+
+  function agentCanKill(agent) {
+    const process = String(agent.process_status || "");
+    return process === "launching" || process === "running";
+  }
+
+  function renderAgentRow(agent) {
+    const name = String(agent.name || "");
+    const model = String(agent.model || "");
+    const process = String(agent.process_status || "");
+    const protocol = String(agent.protocol_status || "");
+    const title = process && protocol
+      ? ` title="process=${attrEsc(process)} review=${attrEsc(protocol)}"`
+      : "";
+    const killButton = agentCanKill(agent)
+      ? `<button type="button" class="agent-kill" data-agent-kill="${attrEsc(name)}" title="Stop ${attrEsc(name)}">kill</button>`
+      : "";
+    return `<li class="agent-row" data-agent="${attrEsc(name)}">`
+      + `<span class="agent-ident">`
+      + `<span class="agent-name">${esc(name)}</span>`
+      + `<span class="agent-model mono" title="${attrEsc(model)}">${esc(model)}</span>`
+      + `</span>`
+      + `<span class="agent-controls">`
+      + `<span class="v"${title}>${esc(agentStatusText(agent))}</span>`
+      + killButton
+      + `</span>`
+      + `</li>`;
+  }
+
+  function updateAgentList(agents) {
+    const list = document.getElementById("agent-list");
+    if (list) {
+      list.innerHTML = agents.length
+        ? agents.map(renderAgentRow).join("")
+        : "<li>(none)</li>";
+    }
+    const killAll = document.getElementById("kill-all-agents-btn");
+    if (killAll) {
+      const anyKillable = agents.some(agentCanKill);
+      killAll.hidden = !anyKillable;
+      killAll.disabled = !anyKillable;
+    }
+  }
+
+  function killSummary(results) {
+    const counts = {};
+    for (const r of results || []) counts[r.status] = (counts[r.status] || 0) + 1;
+    const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`);
+    return parts.length ? parts.join(", ") : "No agents selected";
+  }
+
+  async function killAgents(agentName) {
+    const payload = agentName ? { agent: agentName } : {};
+    const label = agentName || "all agents";
+    if (!confirm(`Kill ${label}?`)) return;
+    document.querySelectorAll(".agent-kill, #kill-all-agents-btn").forEach((b) => {
+      b.disabled = true;
+    });
+    try {
+      const res = await api("POST", "/api/agents/kill", payload);
+      updateAgentList(res.agents || []);
+      const errors = (res.results || []).filter((r) => r.status === "error");
+      if (errors.length) {
+        alert("Kill failed: " + errors.map((r) => `${r.name}: ${r.reason}`).join("; "));
+      } else {
+        flashToast(killSummary(res.results));
+      }
+    } catch (e) {
+      alert("Kill failed: " + e.message);
+    } finally {
+      document.querySelectorAll(".agent-kill, #kill-all-agents-btn").forEach((b) => {
+        b.disabled = false;
+      });
+      refreshSidebar();
+    }
+  }
+
+  const agentList = document.getElementById("agent-list");
+  if (agentList) {
+    agentList.addEventListener("click", (ev) => {
+      if (!(ev.target instanceof Element)) return;
+      const btn = ev.target.closest("[data-agent-kill]");
+      if (!btn) return;
+      killAgents(btn.dataset.agentKill);
+    });
+  }
+  const killAllAgentsBtn = document.getElementById("kill-all-agents-btn");
+  if (killAllAgentsBtn) {
+    killAllAgentsBtn.addEventListener("click", () => killAgents(null));
+  }
+
   // --- Periodic session refresh (for state/signals) ---
   async function refreshSidebar() {
     try {
@@ -1029,6 +1131,7 @@
       set("head", (s.current_head || "").slice(0, 12));
       set("stale_comments", s.stale_count);
       updatePushButton(s.pending_push);
+      updateAgentList(s.agents || []);
       if (s.head_shifted) {
         const h = document.querySelector("header .badge.head");
         if (h) { h.textContent = "HEAD shifted"; h.style.background = "#5d4a2a"; }
@@ -1407,7 +1510,7 @@
 
   function clickById(id) {
     const btn = document.getElementById(id);
-    if (!btn || btn.disabled) return false;
+    if (!btn || btn.disabled || btn.hidden) return false;
     btn.click();
     return true;
   }
@@ -1465,8 +1568,12 @@
          ) },
     D: { label: "delete",
          run: () => clickInFocused(':scope > .comment:not(.reply) [data-delete]') },
-    a: { label: "add global comment",
-         run: () => clickById("add-global-btn") },
+    c: { label: "comment…", submap: {
+           a: { label: "add global comment", run: () => clickById("add-global-btn") },
+         } },
+    a: { label: "agent…", submap: {
+           K: { label: "kill all agents", run: () => clickById("kill-all-agents-btn") },
+         } },
     g: { label: "github…", submap: {
            f: { label: "fetch from GitHub", run: ghFetch },
            p: { label: "push", run: () => clickById("gh-push-btn") },

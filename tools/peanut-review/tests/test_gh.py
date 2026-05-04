@@ -278,6 +278,39 @@ def test_post_issue_comment_routes_to_issues_endpoint(gh_shim):
     assert payload == {"body": "overall lgtm"}
 
 
+def test_post_pr_review_can_batch_inline_comments(gh_shim):
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"],
+        "stdout": json.dumps({"id": 300, "html_url": "https://example/r/300"}),
+    }])
+    resp = gh.post_pr_review(
+        "acme/foo", 42,
+        event="COMMENT",
+        body="overall",
+        commit_id="abc",
+        comments=[{
+            "path": "src/x.py",
+            "line": 10,
+            "side": "RIGHT",
+            "body": "anchored",
+        }],
+    )
+    assert resp["id"] == 300
+    [call] = gh_shim.calls()
+    payload = json.loads(call["stdin"])
+    assert payload == {
+        "event": "COMMENT",
+        "body": "overall",
+        "commit_id": "abc",
+        "comments": [{
+            "path": "src/x.py",
+            "line": 10,
+            "side": "RIGHT",
+            "body": "anchored",
+        }],
+    }
+
+
 # ---------------- fetch_*_comments paginated ----------------
 
 
@@ -311,6 +344,15 @@ def test_fetch_pr_reviews_concatenates_paginated_arrays(gh_shim):
     }])
     out = gh.fetch_pr_reviews("acme/foo", 42)
     assert [c["id"] for c in out] == [10, 11]
+
+
+def test_fetch_pr_review_comments_scopes_to_one_review(gh_shim):
+    gh_shim.set_fixtures([{
+        "match": ["api", "repos/acme/foo/pulls/42/reviews/300/comments"],
+        "stdout": json.dumps([{"id": 100, "body": "anchored"}]),
+    }])
+    out = gh.fetch_pr_review_comments("acme/foo", 42, "300")
+    assert out == [{"id": 100, "body": "anchored"}]
 
 
 def test_fetch_review_thread_resolutions_uses_graphql(gh_shim):
@@ -567,6 +609,47 @@ def _make_gh_session(tmp_path: Path) -> str:
     return str(sd)
 
 
+def _review_post_fixture(review_id: int = 300) -> dict:
+    return {
+        "match": ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"],
+        "stdout": json.dumps({
+            "id": review_id,
+            "html_url": f"https://h/r/{review_id}",
+        }),
+    }
+
+
+def _review_comments_fixture(review_id: int, comments: list[dict]) -> dict:
+    return {
+        "match": [
+            "api",
+            f"repos/acme/foo/pulls/42/reviews/{review_id}/comments",
+        ],
+        "stdout": json.dumps(comments),
+    }
+
+
+def _review_comment_raw(
+    ext_id: int,
+    *,
+    body: str,
+    path: str = "src/x.py",
+    line: int = 10,
+    html_url: str | None = None,
+    start_line: int | None = None,
+) -> dict:
+    raw = {
+        "id": ext_id,
+        "path": path,
+        "line": line,
+        "body": body,
+        "html_url": html_url if html_url is not None else f"https://h/c/{ext_id}",
+    }
+    if start_line is not None:
+        raw["start_line"] = start_line
+    return raw
+
+
 def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     sd = _make_gh_session(tmp_path)
     store.append_comment(sd, models.Comment(
@@ -579,14 +662,10 @@ def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     ))
 
     gh_shim.set_fixtures([
-        {
-            "match": ["api", "repos/acme/foo/pulls/42/comments", "-X", "POST"],
-            "stdout": json.dumps({"id": 100, "html_url": "https://h/c/100"}),
-        },
-        {
-            "match": ["api", "repos/acme/foo/issues/42/comments", "-X", "POST"],
-            "stdout": json.dumps({"id": 200, "html_url": "https://h/i/200"}),
-        },
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(100, body="anchored", html_url="https://h/c/100"),
+        ]),
     ])
 
     out = io.StringIO()
@@ -600,8 +679,58 @@ def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     assert cs["anchored"].external_id == "100"
     assert cs["anchored"].external_url == "https://h/c/100"
     assert cs["anchored"].external_synced_body == "anchored"
-    assert cs["global"].external_id == "200"
-    assert cs["global"].external_url == "https://h/i/200"
+    assert cs["global"].deleted is True
+    assert cs["global"].deleted_by == "github-push"
+    assert cs["global"].external_source == "github-review"
+    assert cs["global"].external_id == "300"
+    assert cs["global"].external_url == "https://h/r/300"
+    assert cs["global"].external_synced_body == "global"
+
+    review_posts = [
+        c for c in gh_shim.calls()
+        if c["argv"][:4] == ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"]
+    ]
+    assert len(review_posts) == 1
+    payload = json.loads(review_posts[0]["stdin"])
+    assert payload["event"] == "COMMENT"
+    assert payload["body"] == "global"
+    assert payload["commit_id"] == "abc"
+    assert payload["comments"] == [{
+        "body": "anchored",
+        "path": "src/x.py",
+        "line": 10,
+        "side": "RIGHT",
+    }]
+    assert not any(
+        any("issues/42/comments" in arg for arg in c["argv"])
+        for c in gh_shim.calls()
+    )
+
+
+def test_gh_push_concats_global_comments_and_deletes_individuals(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="vera", file="", line=0, body="first overall",
+    ))
+    store.append_comment(sd, models.Comment(
+        author="felix", file="", line=0, body="second overall",
+    ))
+
+    gh_shim.set_fixtures([_review_post_fixture(300)])
+
+    rc = main(["--session", sd, "gh-push"])
+    assert rc == 0
+
+    [call] = gh_shim.calls()
+    payload = json.loads(call["stdin"])
+    assert payload == {
+        "event": "COMMENT",
+        "body": "first overall\n\nsecond overall",
+    }
+
+    comments = store.read_all_comments(sd)
+    assert [c.deleted for c in comments] == [True, True]
+    assert gh_push.plan_push(comments).total == 0
 
 
 def test_gh_push_global_approval_posts_pr_review(gh_shim, tmp_path):
@@ -628,6 +757,8 @@ def test_gh_push_global_approval_posts_pr_review(gh_shim, tmp_path):
     [stored] = store.read_all_comments(sd)
     assert stored.external_source == "github-review"
     assert stored.external_id == "300"
+    assert stored.deleted is True
+    assert stored.deleted_by == "github-push"
 
 
 def test_gh_push_global_request_changes_posts_blocking_review(gh_shim, tmp_path):
@@ -664,10 +795,12 @@ def test_gh_push_skips_already_pushed_comments(gh_shim, tmp_path):
     )
     store.append_comment(sd, pushed)
 
-    gh_shim.set_fixtures([{
-        "match": ["api", "repos/acme/foo/pulls/42/comments"],
-        "stdout": json.dumps({"id": 101, "html_url": "https://h/c/101"}),
-    }])
+    gh_shim.set_fixtures([
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(101, body="local-only", html_url="https://h/c/101"),
+        ]),
+    ])
 
     out = io.StringIO()
     with redirect_stdout(out):
@@ -676,7 +809,7 @@ def test_gh_push_skips_already_pushed_comments(gh_shim, tmp_path):
     # Only the local-only one was POSTed.
     posts = [c for c in gh_shim.calls() if "-X" in c["argv"]]
     assert len(posts) == 1
-    assert json.loads(posts[0]["stdin"])["body"] == "local-only"
+    assert json.loads(posts[0]["stdin"])["comments"][0]["body"] == "local-only"
 
 
 def test_gh_push_multiline_sends_end_as_line_and_start_as_start_line(gh_shim, tmp_path):
@@ -689,15 +822,17 @@ def test_gh_push_multiline_sends_end_as_line_and_start_as_start_line(gh_shim, tm
         body="range comment", severity="warning",
     ))
 
-    gh_shim.set_fixtures([{
-        "match": ["api", "repos/acme/foo/pulls/42/comments", "-X", "POST"],
-        "stdout": json.dumps({"id": 1, "html_url": ""}),
-    }])
+    gh_shim.set_fixtures([
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(1, body="range comment", line=14, start_line=10),
+        ]),
+    ])
 
     main(["--session", sd, "gh-push"])
 
-    [call] = gh_shim.calls()
-    payload = json.loads(call["stdin"])
+    [call] = [c for c in gh_shim.calls() if "-X" in c["argv"]]
+    payload = json.loads(call["stdin"])["comments"][0]
     assert payload["line"] == 14, "line must be the higher (end) bound"
     assert payload["start_line"] == 10, "start_line must be the lower bound"
     assert payload["start_side"] == "RIGHT"
@@ -711,17 +846,38 @@ def test_gh_push_single_line_omits_start_line(gh_shim, tmp_path):
         author="vera", file="src/x.py", line=7, body="single",
     ))
 
-    gh_shim.set_fixtures([{
-        "match": ["api", "repos/acme/foo/pulls/42/comments", "-X", "POST"],
-        "stdout": json.dumps({"id": 1, "html_url": ""}),
-    }])
+    gh_shim.set_fixtures([
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(1, body="single", line=7),
+        ]),
+    ])
 
     main(["--session", sd, "gh-push"])
 
-    [call] = gh_shim.calls()
-    payload = json.loads(call["stdin"])
+    [call] = [c for c in gh_shim.calls() if "-X" in c["argv"]]
+    payload = json.loads(call["stdin"])["comments"][0]
     assert payload["line"] == 7
     assert "start_line" not in payload
+
+
+def test_gh_push_inline_only_uses_default_review_body(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="vera", file="src/x.py", line=7, body="single",
+    ))
+
+    gh_shim.set_fixtures([
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(1, body="single", line=7),
+        ]),
+    ])
+
+    rc = main(["--session", sd, "gh-push"])
+    assert rc == 0
+    [call] = [c for c in gh_shim.calls() if "-X" in c["argv"]]
+    assert json.loads(call["stdin"])["body"] == "A few comments"
 
 
 def test_gh_error_surfaces_response_body(gh_shim):
@@ -758,14 +914,16 @@ def test_gh_push_uses_current_head_as_commit_id(gh_shim, tmp_path):
         author="vera", file="src/x.py", line=10, body="x",
     ))
 
-    gh_shim.set_fixtures([{
-        "match": ["api", "repos/acme/foo/pulls/42/comments"],
-        "stdout": json.dumps({"id": 1, "html_url": ""}),
-    }])
+    gh_shim.set_fixtures([
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(1, body="x"),
+        ]),
+    ])
 
     main(["--session", sd, "gh-push"])
 
-    [call] = gh_shim.calls()
+    [call] = [c for c in gh_shim.calls() if "-X" in c["argv"]]
     assert json.loads(call["stdin"])["commit_id"] == "AGENTS_REVIEWED_THIS_SHA"
 
 
@@ -783,10 +941,10 @@ def test_gh_push_pushes_reply_after_parent(gh_shim, tmp_path):
     ))
 
     gh_shim.set_fixtures([
-        {
-            "match": ["api", "repos/acme/foo/pulls/42/comments", "-X", "POST"],
-            "stdout": json.dumps({"id": 200, "html_url": "https://h/c/200"}),
-        },
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(200, body="parent", html_url="https://h/c/200"),
+        ]),
         {
             "match": ["api", "repos/acme/foo/pulls/42/comments/200/replies",
                       "-X", "POST"],
@@ -910,10 +1068,12 @@ def test_gh_push_skips_meta_comments(gh_shim, tmp_path):
         author="vera", file="src/x.py", line=10, body="real finding",
     ))
 
-    gh_shim.set_fixtures([{
-        "match": ["api", "repos/acme/foo/pulls/42/comments"],
-        "stdout": json.dumps({"id": 1, "html_url": ""}),
-    }])
+    gh_shim.set_fixtures([
+        _review_post_fixture(300),
+        _review_comments_fixture(300, [
+            _review_comment_raw(1, body="real finding"),
+        ]),
+    ])
 
     out = io.StringIO()
     with redirect_stdout(out):
@@ -921,7 +1081,7 @@ def test_gh_push_skips_meta_comments(gh_shim, tmp_path):
     assert rc == 0
     posts = [c for c in gh_shim.calls() if "-X" in c["argv"]]
     assert len(posts) == 1  # real finding only
-    assert json.loads(posts[0]["stdin"])["body"] == "real finding"
+    assert json.loads(posts[0]["stdin"])["comments"][0]["body"] == "real finding"
     assert "skipped 1 __meta__" in out.getvalue()
 
 

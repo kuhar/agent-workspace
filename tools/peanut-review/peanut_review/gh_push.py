@@ -4,15 +4,20 @@ web UI's confirmation-modal endpoints.
 Two phases so the UI can preview before committing:
 - `plan_push(comments)` — pure: classify into new-top/reply/edit buckets,
   build the local→external id map, count skipped rows.
-- `execute_push(session_dir, session, ghpr, plan)` — side-effecting: hits
-  `gh` for each bucket, persists external_* on each successful comment.
+- `execute_push(session_dir, session, ghpr, plan)` — side-effecting: creates
+  one GitHub review for new top-level feedback, then persists external_* on
+  each successful comment.
 """
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gh, models, session as sess, store
+
+
+DEFAULT_REVIEW_BODY = "A few comments"
 
 
 @dataclass
@@ -108,13 +113,107 @@ def filter_plan(plan: PushPlan, comment_ids: set[str]) -> PushPlan:
     )
 
 
+def _review_comment_payload(c: models.Comment) -> dict:
+    """Build a GitHub review `comments[]` item for one anchored comment."""
+    end = c.end_line if c.end_line is not None else c.line
+    lo, hi = (c.line, end) if c.line <= end else (end, c.line)
+    payload: dict = {
+        "body": c.body,
+        "path": c.file,
+        "line": hi,
+        "side": "RIGHT",
+    }
+    if lo != hi:
+        payload["start_line"] = lo
+        payload["start_side"] = "RIGHT"
+    return payload
+
+
+def _review_body(global_comments: list[models.Comment]) -> str:
+    """Fold selected global comments into one GitHub review summary."""
+    return "\n\n".join(c.body.strip() for c in global_comments if c.body.strip())
+
+
+def _review_event(global_comments: list[models.Comment]) -> str:
+    categories = {
+        models.normalize_comment_category(c.category) for c in global_comments
+    }
+    if models.CommentCategory.REQUEST_CHANGES.value in categories:
+        return "REQUEST_CHANGES"
+    if models.CommentCategory.APPROVE.value in categories:
+        return "APPROVE"
+    return "COMMENT"
+
+
+def _payload_signature(payload: dict) -> tuple[str, int, int, str]:
+    line = int(payload.get("line") or 0)
+    start_line = int(payload.get("start_line") or 0)
+    if start_line == line:
+        start_line = 0
+    return (
+        str(payload.get("path") or ""),
+        line,
+        start_line,
+        str(payload.get("body") or ""),
+    )
+
+
+def _remote_signature(raw: dict) -> tuple[str, int, int, str]:
+    line = int(raw.get("line") or raw.get("original_line") or 0)
+    start_line = int(raw.get("start_line") or 0)
+    if start_line == line:
+        start_line = 0
+    return (
+        str(raw.get("path") or ""),
+        line,
+        start_line,
+        str(raw.get("body") or ""),
+    )
+
+
+def _remote_key(raw: dict) -> str:
+    return str(raw.get("id") or id(raw))
+
+
+def _match_review_comments(
+    local_comments: list[models.Comment],
+    payloads: list[dict],
+    remote_comments: list[dict],
+) -> dict[str, dict]:
+    """Map GitHub's created review comments back to local comment ids."""
+    by_signature: dict[tuple[str, int, int, str], deque[dict]] = defaultdict(deque)
+    for raw in remote_comments:
+        by_signature[_remote_signature(raw)].append(raw)
+
+    remaining = deque(remote_comments)
+    used: set[str] = set()
+    matched: dict[str, dict] = {}
+    for c, payload in zip(local_comments, payloads):
+        raw = None
+        queue = by_signature.get(_payload_signature(payload))
+        while queue and _remote_key(queue[0]) in used:
+            queue.popleft()
+        if queue:
+            raw = queue.popleft()
+        else:
+            while remaining and _remote_key(remaining[0]) in used:
+                remaining.popleft()
+            if remaining:
+                raw = remaining.popleft()
+        if raw is None:
+            continue
+        used.add(_remote_key(raw))
+        matched[c.id] = raw
+    return matched
+
+
 def execute_push(
     session_dir: str | Path,
     session: models.Session,
     ghpr: models.GitHubPR,
     plan: PushPlan,
 ) -> PushResult:
-    """Run the plan: POST new top-levels, then replies, then PATCH edits.
+    """Run the plan: submit new top-levels, then replies, then PATCH edits.
 
     Replies whose parent has no external_id (and isn't pushed in this run)
     are reported as orphaned. Each successful op stamps `external_id`,
@@ -127,61 +226,97 @@ def execute_push(
     )
     ext_map = dict(plan.ext_map)  # local copy — don't mutate caller's
 
-    for c in plan.new_top:
+    inline_top = [c for c in plan.new_top if c.file != sess.GLOBAL_FILE]
+    global_top = [c for c in plan.new_top if c.file == sess.GLOBAL_FILE]
+    review_body = _review_body(global_top)
+    review_event = _review_event(global_top)
+    inline_payloads = [_review_comment_payload(c) for c in inline_top]
+    if review_event == "COMMENT" and not review_body:
+        review_body = DEFAULT_REVIEW_BODY
+    created_inline: dict[str, dict] = {}
+    review_id: str | None = None
+    review_url = ""
+    if inline_top or global_top:
         try:
-            if c.file == sess.GLOBAL_FILE:
-                if c.category == models.CommentCategory.APPROVE.value:
-                    resp = gh.post_pr_review(
-                        ghpr.repo, ghpr.number, event="APPROVE", body=c.body,
-                    )
-                elif c.category == models.CommentCategory.REQUEST_CHANGES.value:
-                    resp = gh.post_pr_review(
-                        ghpr.repo, ghpr.number,
-                        event="REQUEST_CHANGES", body=c.body,
-                    )
-                else:
-                    resp = gh.post_issue_comment(ghpr.repo, ghpr.number, body=c.body)
-            else:
-                # GitHub anchors a multi-line comment at its END line and
-                # uses `start_line` for the (strictly smaller) start. Our
-                # local model stores `line=lo, end_line=hi` (web composer
-                # normalizes that way), so swap the roles here. For a
-                # single-line comment end_line is None and we send only
-                # `line`, with `start_line=None` suppressing the field.
-                end = c.end_line if c.end_line is not None else c.line
-                lo, hi = (c.line, end) if c.line <= end else (end, c.line)
-                resp = gh.post_review_comment(
-                    ghpr.repo, ghpr.number,
-                    body=c.body,
-                    commit_id=session.current_head,
-                    path=c.file,
-                    line=hi,
-                    start_line=lo if lo != hi else None,
-                )
+            resp = gh.post_pr_review(
+                ghpr.repo, ghpr.number,
+                event=review_event,
+                body=review_body,
+                commit_id=session.current_head if inline_payloads else None,
+                comments=inline_payloads or None,
+            )
         except gh.GhError as e:
-            result.items.append(PushItemResult(id=c.id, action="new", error=str(e)))
-            result.failed += 1
-            continue
-        ext_id = str(resp["id"])
-        url = resp.get("html_url", "")
-        external_source = (
-            "github-review"
-            if c.category in {
-                models.CommentCategory.APPROVE.value,
-                models.CommentCategory.REQUEST_CHANGES.value,
-            }
-            else "github"
-        )
-        store.update_comment_external(
-            session_dir, c.id,
-            external_source=external_source, external_id=ext_id,
-            external_url=url, external_synced_body=c.body,
-        )
-        ext_map[c.id] = ext_id
-        result.items.append(PushItemResult(
-            id=c.id, action="new", external_id=ext_id, external_url=url,
-        ))
-        result.pushed += 1
+            for c in plan.new_top:
+                result.items.append(PushItemResult(
+                    id=c.id, action="new", error=str(e),
+                ))
+            result.failed += len(plan.new_top)
+        else:
+            review_id = str(resp["id"])
+            review_url = resp.get("html_url", "")
+            if inline_top:
+                try:
+                    remote_inline = gh.fetch_pr_review_comments(
+                        ghpr.repo, ghpr.number, review_id,
+                    )
+                    created_inline = _match_review_comments(
+                        inline_top, inline_payloads, remote_inline,
+                    )
+                except gh.GhError as e:
+                    for c in inline_top:
+                        result.items.append(PushItemResult(
+                            id=c.id, action="new",
+                            error=(
+                                "review created but comments could not be "
+                                f"fetched: {e}"
+                            ),
+                        ))
+                    result.failed += len(inline_top)
+
+            failed_new_ids = {i.id for i in result.items if i.error}
+            stamped_review_summary = False
+            for c in plan.new_top:
+                if c.file == sess.GLOBAL_FILE:
+                    if not stamped_review_summary:
+                        store.update_comment_external(
+                            session_dir, c.id,
+                            external_source="github-review",
+                            external_id=review_id,
+                            external_url=review_url,
+                            external_synced_body=review_body,
+                        )
+                        stamped_review_summary = True
+                    store.delete_comment(session_dir, c.id, deleted_by="github-push")
+                    result.items.append(PushItemResult(
+                        id=c.id, action="new",
+                        external_id=review_id, external_url=review_url,
+                    ))
+                    result.pushed += 1
+                    continue
+
+                raw = created_inline.get(c.id)
+                if raw is None:
+                    if c.id not in failed_new_ids:
+                        result.items.append(PushItemResult(
+                            id=c.id, action="new",
+                            error="review created but comment id was not returned",
+                        ))
+                        result.failed += 1
+                        failed_new_ids.add(c.id)
+                    continue
+                ext_id = str(raw["id"])
+                url = raw.get("html_url", "")
+                store.update_comment_external(
+                    session_dir, c.id,
+                    external_source="github", external_id=ext_id,
+                    external_url=url, external_synced_body=c.body,
+                )
+                ext_map[c.id] = ext_id
+                result.items.append(PushItemResult(
+                    id=c.id, action="new",
+                    external_id=ext_id, external_url=url,
+                ))
+                result.pushed += 1
 
     for c in plan.new_replies:
         parent_ext = ext_map.get(c.reply_to or "")

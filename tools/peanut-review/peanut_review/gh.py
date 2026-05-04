@@ -208,6 +208,15 @@ def fetch_pr_reviews(repo: str, number: int) -> list[dict]:
     return _parse_paginated(raw)
 
 
+def fetch_pr_review_comments(repo: str, number: int, review_id: str) -> list[dict]:
+    """Inline comments belonging to one submitted PR review."""
+    raw = _api(
+        f"repos/{repo}/pulls/{number}/reviews/{review_id}/comments",
+        paginate=True,
+    )
+    return _parse_paginated(raw)
+
+
 _REVIEW_THREAD_RESOLUTIONS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
@@ -359,17 +368,29 @@ def patch_issue_comment(repo: str, ext_id: str, *, body: str) -> dict:
     return json.loads(out)
 
 
-def post_pr_review(repo: str, number: int, *, event: str,
-                   body: str = "") -> dict:
+def post_pr_review(
+    repo: str,
+    number: int,
+    *,
+    event: str,
+    body: str = "",
+    commit_id: str | None = None,
+    comments: list[dict] | None = None,
+) -> dict:
     """Submit a PR review (verdict). `event` must be one of APPROVE,
     REQUEST_CHANGES, COMMENT (GitHub's enum). `body` is optional except
-    REQUEST_CHANGES which requires it.
+    REQUEST_CHANGES which requires it. `comments` batches inline review
+    comments into the same submitted review.
     """
     if event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
         raise ValueError(f"event must be APPROVE/REQUEST_CHANGES/COMMENT, got {event!r}")
     payload: dict = {"event": event}
     if body:
         payload["body"] = body
+    if commit_id:
+        payload["commit_id"] = commit_id
+    if comments:
+        payload["comments"] = comments
     out = _api(
         f"repos/{repo}/pulls/{number}/reviews",
         method="POST", payload=payload,

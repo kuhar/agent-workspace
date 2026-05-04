@@ -82,6 +82,25 @@ def _session_state_label(state: str) -> str:
     return SESSION_STATE_LABELS.get(state, state.replace("-", " "))
 
 
+def _github_change_title(session: Session) -> str:
+    if session.github and session.github.title:
+        return session.github.title.strip()
+    return ""
+
+
+def _change_label(session: Session) -> str:
+    return _github_change_title(session) or f"{session.base_ref} … {session.topic_ref}"
+
+
+def _github_pr_label(session: Session) -> str:
+    if not session.github:
+        return ""
+    label = session.github.repo
+    if session.github.number:
+        label = f"{label}#{session.github.number}"
+    return label
+
+
 def _lexer_for(path: str):
     try:
         return get_lexer_for_filename(path, stripall=False)
@@ -539,6 +558,15 @@ def _render_sidebar(
         f'<li data-k="deleted"><span>deleted</span><span class="v">{deleted}</span></li>'
         if deleted else ""
     )
+    pr_row = ""
+    if session.github:
+        pr_label = html.escape(_github_pr_label(session))
+        pr_row = f'<li data-k="pr"><span>pr</span><span class="v mono">{pr_label}</span></li>'
+    session_rows = (
+        f'<li data-k="head"><span>head</span><span class="v mono">{html.escape(session.current_head[:12])}</span></li>'
+        f'<li data-k="base"><span>base</span><span class="v mono">{html.escape(session.base_ref)}</span></li>'
+        f'{pr_row}'
+    )
     file_rows = "".join(
         _render_file_row(fd, per_file_unresolved.get(fd.path, 0),
                          per_file_total.get(fd.path, 0))
@@ -581,8 +609,7 @@ def _render_sidebar(
         '<h3>Session</h3>'
         '<ul>'
         f'<li data-k="state"><span>state</span><span class="v">{html.escape(session.state)}</span></li>'
-        f'<li data-k="head"><span>head</span><span class="v mono">{html.escape(session.current_head[:12])}</span></li>'
-        f'<li data-k="base"><span>base</span><span class="v mono">{html.escape(session.base_ref)}</span></li>'
+        f'{session_rows}'
         f'<li data-k="total"><span>comments</span><span class="v">{len(live)}</span></li>'
         f'<li data-k="stale_comments"><span>stale</span><span class="v">{stale_count}</span></li>'
         f'<li data-k="resolved"><span>resolved</span><span class="v">{resolved}</span></li>'
@@ -697,8 +724,8 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     sid = html.escape(s["id"])
     state = html.escape(s.get("state", ""))
     state_label = html.escape(_session_state_label(s.get("state", "")))
-    base = html.escape(s.get("base_ref", ""))
-    topic = html.escape(s.get("topic_ref", ""))
+    fallback_change = f"{s.get('base_ref', '')} … {s.get('topic_ref', '')}"
+    change = html.escape(s.get("change_label") or fallback_change)
     workspace = html.escape(s.get("workspace", ""))
     created = html.escape(s.get("created_at", ""))
     total = s.get("comment_count", 0)
@@ -706,7 +733,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     stale = s.get("stale_count", 0)
     crit = s.get("critical_count", 0)
     agent_count = s.get("agent_count", 0)
-    head = html.escape(s.get("current_head", ""))
+    session_subtitle = html.escape(s.get("session_subtitle") or s.get("current_head", ""))
     counts = (
         f'<span class="n">{total}</span>'
         f'<span class="sub"> total</span>'
@@ -717,11 +744,11 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     return (
         f'<tr class="session-row state-{state}" data-id="{sid}">'
         f'<td class="id"><a href="{base_url}/{sid}">{sid}</a>'
-        f'<div class="mono head">{head}</div></td>'
+        f'<div class="mono head">{session_subtitle}</div></td>'
         f'<td><span class="badge state-{state}" '
         f'title="session state: {state}">{state_label}</span>'
         f'<div class="sub">{agent_count} agent{"s" if agent_count != 1 else ""}</div></td>'
-        f'<td class="mono refs">{base} … {topic}</td>'
+        f'<td class="change" title="{change}">{change}</td>'
         f'<td class="mono workspace">{workspace}</td>'
         f'<td class="counts">{counts}</td>'
         f'<td class="mono created">{created}</td>'
@@ -745,7 +772,7 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
         body = (
             '<table class="sessions">'
             '<thead><tr>'
-            '<th>Session</th><th>State</th><th>Base … Topic</th>'
+            '<th>Session</th><th>State</th><th>Change</th>'
             '<th>Workspace</th><th>Comments</th><th>Created</th>'
             '</tr></thead>'
             f'<tbody id="session-rows">{rows}</tbody>'
@@ -827,6 +854,9 @@ def render_page(
     state = html.escape(session.state)
     state_class = f"state-{state}"
     state_label = html.escape(_session_state_label(session.state))
+    change_label = _change_label(session)
+    change_label_html = html.escape(change_label)
+    title_label = change_label if _github_change_title(session) else session_id
 
     # Full PR URL + push button in the header for gh-backed sessions. URL is
     # rendered verbatim (no truncation) so triple-click → copy works. The
@@ -875,7 +905,7 @@ def render_page(
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>peanut-review — {html.escape(session_id)}</title>
+  <title>peanut-review — {html.escape(title_label)}</title>
   <link rel="icon" href="{FAVICON_HREF}">
   <style>{css}</style>
 </head>
@@ -883,7 +913,7 @@ def render_page(
   <header>
     <h1><a href="{index_href}">🥜 peanut-review</a></h1>
     <span class="meta mono">{html.escape(session_id)}</span>
-    <span class="meta">{html.escape(session.base_ref)} … {html.escape(session.topic_ref)}</span>
+    <span class="meta change-title" title="{change_label_html}">{change_label_html}</span>
     {gh_link_html}
     <span class="spacer"></span>
     {gh_push_button}

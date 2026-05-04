@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -96,9 +97,19 @@ def _load_project_config(
     return cfg, config_path
 
 
-def _session_id_for_pr(repo: str, number: int) -> str:
-    owner, repo_name = repo.split("/", 1)
-    return f"{owner}-{repo_name}-pr-{number}"
+def _slugify_session_part(value: str, *, max_length: int = 80) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip()).strip("-").lower()
+    slug = re.sub(r"-+", "-", slug)
+    return slug[:max_length].strip("-")
+
+
+def _session_id_for_pr(repo: str, number: int, change_title: str | None = None) -> str:
+    _owner, repo_name = repo.split("/", 1)
+    repo_slug = _slugify_session_part(repo_name, max_length=40) or "repo"
+    change_slug = _slugify_session_part(change_title or "", max_length=80)
+    if not change_slug:
+        change_slug = f"pr-{number}"
+    return f"{repo_slug}-{change_slug}"
 
 
 # ── Subcommand handlers ────────────────────────────────────────────
@@ -116,8 +127,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     # --gh-pr resolves PR metadata up front: defaults base/topic to PR's
     # base/head SHAs, populates session.github, and (unless overridden) gives
-    # the session a readable id like `<owner>-<repo>-pr-<n>` so URLs are
-    # nicer than the timestamp+hex auto-generated form.
+    # the session a readable id like `<repo>-<change-title>` so URLs are nicer
+    # than the timestamp+hex auto-generated form.
     # base_ref/topic_ref default to None so we can distinguish "user passed
     # the same string as the default" from "user didn't pass anything". This
     # matters for --gh-pr: if the user explicitly passes refs, honor them;
@@ -135,8 +146,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         base_ref = args.base if args.base is not None else pr_info.base_sha
         topic_ref = args.topic if args.topic is not None else pr_info.head_sha
         if session_id is None:
-            owner, repo_name = pr_info.repo.split("/", 1)
-            session_id = f"{owner}-{repo_name}-pr-{pr_info.number}"
+            session_id = _session_id_for_pr(
+                pr_info.repo, pr_info.number,
+                pr_info.head_ref_name or pr_info.title,
+            )
         github = models.GitHubPR(
             repo=pr_info.repo,
             number=pr_info.number,
@@ -144,6 +157,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             head_sha=pr_info.head_sha,
             base_sha=pr_info.base_sha,
             title=pr_info.title,
+            head_ref_name=pr_info.head_ref_name,
         )
     else:
         base_ref = args.base if args.base is not None else "main"
@@ -286,7 +300,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    session_id = args.id or _session_id_for_pr(pr_info.repo, pr_info.number)
+    session_id = args.id or _session_id_for_pr(
+        pr_info.repo, pr_info.number,
+        pr_info.head_ref_name or pr_info.title,
+    )
     session_dir = Path(args.session) if args.session else Path(cfg["reviewRoot"]) / session_id
     session_dir = session_dir.expanduser().resolve()
     timeout = (
@@ -338,6 +355,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             head_sha=pr_info.head_sha,
             base_sha=pr_info.base_sha,
             title=pr_info.title,
+            head_ref_name=pr_info.head_ref_name,
         )
         try:
             session_obj, created_dir = sess.create_session(

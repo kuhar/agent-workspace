@@ -213,6 +213,7 @@ class GitHubPR:
     head_sha: str = ""
     base_sha: str = ""
     title: str = ""
+    head_ref_name: str = ""
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v not in (None, "", 0)}

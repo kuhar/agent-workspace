@@ -60,6 +60,13 @@ header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 header h1 a { color: inherit; text-decoration: none; }
 header h1 a:hover { text-decoration: underline; }
 header .meta { color: var(--muted); font-size: 12px; }
+header .meta.change-title {
+  min-width: 0;
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 header .gh-pr-link {
   color: var(--accent);
   font-size: 12px;
@@ -705,8 +712,14 @@ table.sessions td.id a {
 table.sessions td.id a:hover { text-decoration: underline; }
 table.sessions td .head { color: var(--muted); font-size: 11px; margin-top: 2px; }
 table.sessions td .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
-table.sessions td.refs, table.sessions td.workspace,
+table.sessions td.change, table.sessions td.workspace,
 table.sessions td.created { color: var(--muted); font-size: 12px; }
+table.sessions td.change {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 table.sessions td.workspace {
   max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }

@@ -33,13 +33,15 @@
 
   function rowHtml(s) {
     const agent = `${s.agent_count} agent${s.agent_count !== 1 ? "s" : ""}`;
+    const change = s.change_label || `${s.base_ref} … ${s.topic_ref}`;
+    const sessionSubtitle = s.session_subtitle || s.current_head || "";
     return `
       <tr class="session-row state-${esc(s.state)}" data-id="${esc(s.id)}">
         <td class="id"><a href="${BASE}/${esc(s.id)}">${esc(s.id)}</a>
-          <div class="mono head">${esc(s.current_head || "")}</div></td>
+          <div class="mono head">${esc(sessionSubtitle)}</div></td>
         <td><span class="badge state-${esc(s.state)}" title="session state: ${esc(s.state)}">${esc(sessionStateLabel(s.state))}</span>
           <div class="sub">${esc(agent)}</div></td>
-        <td class="mono refs">${esc(s.base_ref)} … ${esc(s.topic_ref)}</td>
+        <td class="change" title="${esc(change)}">${esc(change)}</td>
         <td class="mono workspace">${esc(s.workspace)}</td>
         <td class="counts">${countsCell(s)}</td>
         <td class="mono created">${esc(s.created_at)}</td>

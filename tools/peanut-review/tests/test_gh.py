@@ -20,7 +20,7 @@ import pytest
 from peanut_review import gh, gh_push, models
 from peanut_review import session as sess
 from peanut_review import store
-from peanut_review.cli import main
+from peanut_review.cli import _session_id_for_pr, main
 
 
 # ---------------- gh shim ----------------
@@ -194,6 +194,7 @@ def test_fetch_pr_info_parses_gh_view_output(gh_shim):
             "number": 42,
             "headRefOid": "abc123",
             "baseRefOid": "def456",
+            "headRefName": "feature/add-it",
             "url": "https://github.com/acme/foo/pull/42",
             "title": "Add a feature",
         }),
@@ -204,6 +205,7 @@ def test_fetch_pr_info_parses_gh_view_output(gh_shim):
     assert info.head_sha == "abc123"
     assert info.base_sha == "def456"
     assert info.title == "Add a feature"
+    assert info.head_ref_name == "feature/add-it"
 
 
 def test_fetch_pr_info_propagates_gh_errors(gh_shim):
@@ -215,6 +217,14 @@ def test_fetch_pr_info_propagates_gh_errors(gh_shim):
     with pytest.raises(gh.GhError) as ei:
         gh.fetch_pr_info("acme/foo", 99)
     assert "could not find" in ei.value.stderr
+
+
+def test_session_id_for_pr_uses_repo_change_title_convention():
+    assert (
+        _session_id_for_pr("acme/foo", 42, "user/feature/Add a thing")
+        == "foo-user-feature-add-a-thing"
+    )
+    assert _session_id_for_pr("acme/foo", 42, "!!!") == "foo-pr-42"
 
 
 # ---------------- post helpers ----------------
@@ -382,6 +392,7 @@ def test_init_with_gh_pr_stamps_metadata_and_uses_pr_shas(gh_shim, tmp_path):
             "number": 42,
             "headRefOid": head,
             "baseRefOid": base,
+            "headRefName": "feature/add-it",
             "url": "https://github.com/acme/foo/pull/42",
             "title": "Add a feature",
         }),
@@ -396,12 +407,13 @@ def test_init_with_gh_pr_stamps_metadata_and_uses_pr_shas(gh_shim, tmp_path):
     assert rc == 0
 
     s = sess.load_session(sd)
-    assert s.id == "acme-foo-pr-42"  # auto-defaulted from PR spec
+    assert s.id == "foo-feature-add-it"  # auto-defaulted from PR branch
     assert s.github is not None
     assert s.github.repo == "acme/foo"
     assert s.github.number == 42
     assert s.github.head_sha == head
     assert s.github.base_sha == base
+    assert s.github.head_ref_name == "feature/add-it"
     assert s.base_ref == base   # defaulted from PR
     assert s.topic_ref == head  # defaulted from PR
 
@@ -418,6 +430,7 @@ def test_init_id_overrides_auto_default(gh_shim, tmp_path):
         "match": ["pr", "view"],
         "stdout": json.dumps({
             "number": 42, "headRefOid": head, "baseRefOid": base,
+            "headRefName": "feature/add-it",
             "url": "u", "title": "t",
         }),
     }])
@@ -477,11 +490,12 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
             "stdout": json.dumps({"url": "https://github.com/acme/foo/pull/42"}),
         },
         {
-            "match": ["pr", "view", "42", "number,headRefOid,baseRefOid,url,title"],
+            "match": ["pr", "view", "42", "number,headRefOid,baseRefOid,headRefName,url,title"],
             "stdout": json.dumps({
                 "number": 42,
                 "headRefOid": head,
                 "baseRefOid": base,
+                "headRefName": "feature/add-it",
                 "url": "https://github.com/acme/foo/pull/42",
                 "title": "Add a feature",
             }),
@@ -512,7 +526,7 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
     rc = main(["start", "42", "--config", str(config_path), "--no-launch"])
     assert rc == 0
 
-    sd = review_root / "acme-foo-pr-42"
+    sd = review_root / "foo-feature-add-it"
     s = sess.load_session(sd)
     assert s.workspace == ws
     assert s.timeout == 77

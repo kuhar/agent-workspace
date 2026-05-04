@@ -138,6 +138,37 @@ def test_render_page_labels_round_state_as_in_review(
     assert ">round</span>" not in header
 
 
+def test_render_page_uses_github_title_for_change_label(
+    session_dir: Path, repo: Path
+):
+    s = sess.load_session(session_dir)
+    s.base_ref = "base-sha"
+    s.topic_ref = "topic-sha"
+    s.current_head = "topic-sha"
+    s.github = GitHubPR(
+        repo="acme/foo",
+        number=42,
+        url="https://github.com/acme/foo/pull/42",
+        head_sha="topic-sha",
+        base_sha="base-sha",
+        title="Add a feature",
+    )
+    files = diffmod.parse_diff(str(repo), "main~1", "main")
+
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+    header = html[html.index("<header>"):html.index("</header>")]
+    sidebar = html[html.index("<aside"):html.index("</aside>")]
+
+    assert "Add a feature" in header
+    assert "base-sha" not in header
+    assert "topic-sha" not in header
+    assert '<li data-k="change"><span>change</span>' not in sidebar
+    assert "Add a feature" not in sidebar
+    assert '<li data-k="head"><span>head</span><span class="v mono">topic-sha</span></li>' in sidebar
+    assert '<li data-k="base"><span>base</span><span class="v mono">base-sha</span></li>' in sidebar
+    assert '<li data-k="pr"><span>pr</span><span class="v mono">acme/foo#42</span></li>' in sidebar
+
+
 def test_render_comment_escapes_html(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
@@ -1180,6 +1211,48 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         c1, _ = _get(f"http://127.0.0.1:{port}/{s1.id}/")
         c2, _ = _get(f"http://127.0.0.1:{port}/{s2.id}/")
         assert c1 == 200 and c2 == 200
+    finally:
+        srv.shutdown()
+
+
+def test_index_and_api_sessions_use_github_title(tmp_path: Path, repo: Path):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    s, sd = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "sess-a"),
+    )
+    s.base_ref = "base-sha"
+    s.topic_ref = "topic-sha"
+    s.github = GitHubPR(
+        repo="acme/foo",
+        number=42,
+        url="https://github.com/acme/foo/pull/42",
+        head_sha="topic-sha",
+        base_sha="base-sha",
+        title="Add a feature",
+    )
+    sess.save_session(sd, s)
+
+    registry = web_app.SessionRegistry([root])
+    srv = web_app.make_server("127.0.0.1", 0, registry)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{port}/")
+        assert code == 200
+        text = body.decode("utf-8")
+        assert "Add a feature" in text
+        assert "acme/foo#42" in text
+        assert "base-sha … topic-sha" not in text
+
+        code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
+        assert code == 200
+        [item] = json.loads(raw)
+        assert item["change_label"] == "Add a feature"
+        assert item["github_title"] == "Add a feature"
+        assert item["session_subtitle"] == "acme/foo#42"
     finally:
         srv.shutdown()
 

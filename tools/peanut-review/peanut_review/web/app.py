@@ -116,14 +116,27 @@ class SessionRegistry:
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
             live = [c for c in comments if not c.deleted]
+            github_title = (
+                s.github.title.strip()
+                if s.github and s.github.title else ""
+            )
+            change_label = github_title or f"{s.base_ref} … {s.topic_ref}"
+            session_subtitle = (
+                f"{s.github.repo}#{s.github.number}"
+                if s.github and s.github.repo and s.github.number
+                else (s.current_head or "")[:12]
+            )
             summaries.append({
                 "id": sid,
                 "session_dir": str(sdir),
                 "state": s.state,
                 "base_ref": s.base_ref,
                 "topic_ref": s.topic_ref,
+                "change_label": change_label,
+                "github_title": github_title,
                 "created_at": s.created_at,
                 "workspace": s.workspace,
+                "session_subtitle": session_subtitle,
                 "current_head": (s.current_head or "")[:12],
                 "comment_count": len(live),
                 "unresolved_count": sum(1 for c in live if not c.resolved),
@@ -283,11 +296,19 @@ class _Handler(BaseHTTPRequestHandler):
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
             live = [c for c in comments if not c.deleted]
+            github_title = (
+                session.github.title.strip()
+                if session.github and session.github.title else ""
+            )
             payload = {
                 "id": session.id,
                 "state": session.state,
                 "base_ref": session.base_ref,
                 "topic_ref": session.topic_ref,
+                "change_label": (
+                    github_title or f"{session.base_ref} … {session.topic_ref}"
+                ),
+                "github_title": github_title,
                 "original_head": session.original_head,
                 "current_head": session.current_head,
                 "workspace": session.workspace,

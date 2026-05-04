@@ -66,6 +66,8 @@ LAST_COMMENT_ID=<last-reviewed-comment-id>
 ```
 
 Examples assume `PR_BIN` and the intended `SESSION` path are set.
+Name new sessions `<repo>-<change-title>`, using the PR head branch or local
+branch/topic slug for `change-title`; avoid bare PR-number session names.
 
 ## Config And Permissions
 

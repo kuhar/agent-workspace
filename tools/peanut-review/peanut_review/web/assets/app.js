@@ -5,6 +5,12 @@
 (function () {
   const sessionUrl = window.PR_SESSION_URL;  // set in index template
   const sessionId = window.PR_SESSION_ID;
+  const THEME_KEY = "pr.theme";
+  const THEMES = [
+    { value: "system", label: "system" },
+    { value: "dark-plus", label: "Dark+" },
+    { value: "light", label: "light" },
+  ];
 
   // --- Utilities ---
   function esc(s) {
@@ -36,6 +42,46 @@
     }
     if (raw) badge.classList.add(`state-${raw}`);
   }
+  function themeConfig(value) {
+    return THEMES.find((t) => t.value === value) || THEMES[0];
+  }
+  function storedTheme() {
+    try {
+      return localStorage.getItem(THEME_KEY) || "system";
+    } catch {
+      return "system";
+    }
+  }
+  function applyTheme(value) {
+    const theme = themeConfig(value);
+    if (theme.value === "system") {
+      document.documentElement.removeAttribute("data-theme");
+    } else {
+      document.documentElement.dataset.theme = theme.value;
+    }
+    const btn = document.getElementById("theme-toggle");
+    if (btn) {
+      btn.textContent = `theme: ${theme.label}`;
+      btn.title = `Color theme: ${theme.label}`;
+      btn.dataset.theme = theme.value;
+    }
+  }
+  function setStoredTheme(value) {
+    const theme = themeConfig(value);
+    try {
+      if (theme.value === "system") localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, theme.value);
+    } catch { /* ignore */ }
+    applyTheme(theme.value);
+  }
+  function cycleTheme() {
+    const current = themeConfig(storedTheme()).value;
+    const idx = THEMES.findIndex((t) => t.value === current);
+    setStoredTheme(THEMES[(idx + 1) % THEMES.length].value);
+    updateStickyOffsets();
+  }
+  applyTheme(storedTheme());
+  document.getElementById("theme-toggle")?.addEventListener("click", cycleTheme);
   function api(method, path, body) {
     const opts = { method, headers: { "Content-Type": "application/json" } };
     if (body !== undefined) opts.body = JSON.stringify(body);

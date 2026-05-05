@@ -109,6 +109,8 @@ def test_render_page_smoke(session_dir: Path, repo: Path):
     assert f"/{s.id}" in html
     assert "nice" in html  # comment body rendered
     assert "felix" in html  # author
+    assert 'id="theme-toggle"' in html
+    assert 'localStorage.getItem("pr.theme")' in html
 
 
 def test_render_page_keeps_file_header_sticky(session_dir: Path, repo: Path):
@@ -121,6 +123,13 @@ def test_render_page_keeps_file_header_sticky(session_dir: Path, repo: Path):
     assert "top: var(--sticky-file-top);" in html
     assert "--sticky-target-offset" in html
     assert '<span class="path" title="foo.py">foo.py</span>' in html
+
+
+def test_render_index_includes_theme_toggle():
+    html = render.render_index([], roots=["/tmp/reviews"])
+
+    assert 'id="theme-toggle"' in html
+    assert 'localStorage.getItem("pr.theme")' in html
 
 
 def test_render_page_labels_round_state_as_in_review(
@@ -1520,6 +1529,18 @@ def test_client_keymap_has_comment_collapse_chord():
     assert 'c: { label: "comment…", submap:' in block
     assert 'c: { label: "toggle collapse"' in block
     assert 'clickInFocused("[data-thread-collapse]")' in block
+
+
+def test_client_theme_toggle_cycles_between_system_dark_plus_and_light():
+    asset_dir = Path(web_app.__file__).parent / "assets"
+    for name in ("app.js", "index.js"):
+        text = (asset_dir / name).read_text()
+        assert 'const THEME_KEY = "pr.theme"' in text
+        assert '{ value: "system", label: "system" }' in text
+        assert '{ value: "dark-plus", label: "Dark+" }' in text
+        assert '{ value: "light", label: "light" }' in text
+        assert 'document.documentElement.dataset.theme = theme.value' in text
+        assert 'setStoredTheme(THEMES[(idx + 1) % THEMES.length].value)' in text
 
 
 def test_client_agent_activity_renderer_uses_relative_time():

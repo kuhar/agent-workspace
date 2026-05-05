@@ -32,6 +32,20 @@ _FAVICON_SVG = (
     "</svg>"
 )
 FAVICON_HREF = "data:image/svg+xml;utf8," + _FAVICON_SVG.replace("#", "%23").replace('"', "%22")
+THEME_BOOTSTRAP = """<script>
+(function () {
+  try {
+    var theme = localStorage.getItem("pr.theme");
+    if (theme === "dark-plus" || theme === "light") {
+      document.documentElement.dataset.theme = theme;
+    }
+  } catch (e) {}
+})();
+</script>"""
+THEME_TOGGLE_BUTTON = (
+    '<button id="theme-toggle" class="theme-toggle" type="button" '
+    'title="Color theme: system">theme: system</button>'
+)
 
 SESSION_STATE_LABELS = {
     "init": "ready",
@@ -839,6 +853,7 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
   <meta charset="utf-8">
   <title>peanut-review — sessions</title>
   <link rel="icon" href="{FAVICON_HREF}">
+  {THEME_BOOTSTRAP}
   <style>{css}</style>
 </head>
 <body class="index">
@@ -847,6 +862,7 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
     <span class="meta">{len(sessions)} session{"s" if len(sessions) != 1 else ""}</span>
     <span class="meta mono">{roots_str}</span>
     <span class="spacer"></span>
+    {THEME_TOGGLE_BUTTON}
     <button id="refresh" title="Rescan">Refresh</button>
   </header>
   <main class="index-main">
@@ -952,6 +968,7 @@ def render_page(
   <meta charset="utf-8">
   <title>peanut-review — {html.escape(title_label)}</title>
   <link rel="icon" href="{FAVICON_HREF}">
+  {THEME_BOOTSTRAP}
   <style>{css}</style>
 </head>
 <body>
@@ -961,6 +978,7 @@ def render_page(
     <span class="meta change-title" title="{change_label_html}">{change_label_html}</span>
     {gh_link_html}
     <span class="spacer"></span>
+    {THEME_TOGGLE_BUTTON}
     {gh_push_button}
     {head_badge}
     <span class="badge session-state {state_class}" data-session-state="{state}"

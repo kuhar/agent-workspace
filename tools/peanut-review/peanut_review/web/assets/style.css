@@ -385,7 +385,7 @@ main {
   background: var(--surface);
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
-  border-radius: 6px 6px 0 0;
+  border-radius: 0;
   display: flex;
   align-items: center;
   gap: 12px;

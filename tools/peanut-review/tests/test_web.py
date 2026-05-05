@@ -121,6 +121,7 @@ def test_render_page_keeps_file_header_sticky(session_dir: Path, repo: Path):
     assert ".file-header" in html
     assert "position: sticky;" in html
     assert "top: var(--sticky-file-top);" in html
+    assert "border-radius: 0;" in html
     assert "--sticky-target-offset" in html
     assert '<span class="path" title="foo.py">foo.py</span>' in html
 

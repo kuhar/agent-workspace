@@ -240,9 +240,39 @@ add_bind_if_exists() {
     local source="$2"
     local dest="${3:-$source}"
 
-    if path_exists "$source"; then
+    path_exists "$source" || return 0
+
+    if [[ -d "$source" ]]; then
         BWRAP_ARGS+=("$mode" "$source" "$dest")
+        return 0
     fi
+
+    # File mount destinations do not exist under the private home tmpfs yet.
+    # Data binds create the file inside the sandbox without exposing its parent.
+    case "$mode" in
+        --ro-bind)
+            add_file_data_bind --ro-bind-data "$source" "$dest"
+            ;;
+        --bind)
+            add_file_data_bind --bind-data "$source" "$dest"
+            ;;
+        *)
+            BWRAP_ARGS+=("$mode" "$source" "$dest")
+            ;;
+    esac
+}
+
+add_file_data_bind() {
+    local mode="$1"
+    local source="$2"
+    local dest="$3"
+    local fd
+
+    [[ -r "$source" ]] || return 0
+
+    exec {fd}<"$source"
+    BWRAP_DATA_FDS+=("$fd")
+    BWRAP_ARGS+=("$mode" "$fd" "$dest")
 }
 
 add_env_if_set() {
@@ -253,6 +283,7 @@ add_env_if_set() {
     fi
 }
 
+BWRAP_DATA_FDS=()
 BWRAP_ARGS=(
     --ro-bind /usr /usr
     --symlink usr/bin /bin
@@ -287,6 +318,8 @@ for path in \
     "$HOME/.cargo" \
     "$HOME/.config" \
     "$HOME/.gitconfig" \
+    "$HOME/.git-hooks" \
+    "$HOME/.git-confidential-patterns" \
     "$HOME/.local" \
     "$HOME/.nvm" \
     "$HOME/.profile" \

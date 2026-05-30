@@ -34,7 +34,7 @@ Usage:
 Options:
   --harness, -H NAME       Select claude, opencode, or codex (default: claude)
   --im-feeling-lucky      Use real gh/git/ssh credentials instead of sandbox credentials
-  --airgap, --no-network  Disable network access inside the sandbox
+  --airgap, --no-network  Disable shell command networking and Codex web tools
   -h, --help              Show this help
 
 Examples:
@@ -130,6 +130,38 @@ has_arg() {
     return 1
 }
 
+codex_airgap_blocks_feature() {
+    case "$1" in
+        browser_use|browser_use_external|computer_use|image_generation|in_app_browser|standalone_web_search|search_tool|web_search_cached|web_search_request)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+codex_airgap_config_enables_blocked_feature() {
+    local config="$1"
+    local compact="${config//[[:space:]]/}"
+    local feature
+
+    for feature in browser_use browser_use_external computer_use image_generation in_app_browser standalone_web_search search_tool web_search_cached web_search_request; do
+        case "$compact" in
+            "features.$feature=true"|"features.$feature=1")
+                return 0
+                ;;
+        esac
+    done
+
+    case "$compact" in
+        "web_search=\"live\""|"web_search='live'"|"web_search=live"|"web_search=\"cached\""|"web_search='cached'"|"web_search=cached"|"web_search=true"|"web_search=1")
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
 resolve_command() {
     local env_name="$1"
     local fallback="$2"
@@ -183,16 +215,90 @@ case "$HARNESS" in
         CODEX_ARGS=()
         CODEX_HAS_CD=false
         CODEX_HAS_SANDBOX_OVERRIDE=false
+        CODEX_HAS_APPROVAL_OVERRIDE=false
+        CODEX_AIRGAP_UNSAFE_OVERRIDE=false
+        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=false
+        CODEX_EXPECTS_SANDBOX_VALUE=false
+        CODEX_EXPECTS_ENABLE_VALUE=false
+        CODEX_EXPECTS_CONFIG_VALUE=false
         for arg in "${HARNESS_ARGS[@]}"; do
+            if $CODEX_EXPECTS_SANDBOX_VALUE; then
+                [[ "$arg" == "danger-full-access" ]] && CODEX_AIRGAP_UNSAFE_OVERRIDE=true
+                CODEX_EXPECTS_SANDBOX_VALUE=false
+                continue
+            fi
+            if $CODEX_EXPECTS_ENABLE_VALUE; then
+                if codex_airgap_blocks_feature "$arg"; then
+                    CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                fi
+                CODEX_EXPECTS_ENABLE_VALUE=false
+                continue
+            fi
+            if $CODEX_EXPECTS_CONFIG_VALUE; then
+                if codex_airgap_config_enables_blocked_feature "$arg"; then
+                    CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                fi
+                CODEX_EXPECTS_CONFIG_VALUE=false
+                continue
+            fi
+
             case "$arg" in
                 --cd|--cd=*|-C) CODEX_HAS_CD=true ;;
-                --sandbox|--sandbox=*|-s|--full-auto|--dangerously-bypass-approvals-and-sandbox) CODEX_HAS_SANDBOX_OVERRIDE=true ;;
+                --search) CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true ;;
+                --enable) CODEX_EXPECTS_ENABLE_VALUE=true ;;
+                --enable=*)
+                    if codex_airgap_blocks_feature "${arg#*=}"; then
+                        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                    fi
+                    ;;
+                -c|--config) CODEX_EXPECTS_CONFIG_VALUE=true ;;
+                --config=*)
+                    if codex_airgap_config_enables_blocked_feature "${arg#*=}"; then
+                        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                    fi
+                    ;;
+                --sandbox|-s)
+                    CODEX_HAS_SANDBOX_OVERRIDE=true
+                    CODEX_EXPECTS_SANDBOX_VALUE=true
+                    ;;
+                --sandbox=*)
+                    CODEX_HAS_SANDBOX_OVERRIDE=true
+                    [[ "${arg#*=}" == "danger-full-access" ]] && CODEX_AIRGAP_UNSAFE_OVERRIDE=true
+                    ;;
+                --full-auto)
+                    CODEX_HAS_SANDBOX_OVERRIDE=true
+                    CODEX_HAS_APPROVAL_OVERRIDE=true
+                    ;;
+                --dangerously-bypass-approvals-and-sandbox)
+                    CODEX_HAS_SANDBOX_OVERRIDE=true
+                    CODEX_AIRGAP_UNSAFE_OVERRIDE=true
+                    ;;
+                --ask-for-approval|--ask-for-approval=*|-a) CODEX_HAS_APPROVAL_OVERRIDE=true ;;
             esac
         done
+        if $AIRGAP && $CODEX_AIRGAP_UNSAFE_OVERRIDE; then
+            echo "Error: codex airgap mode needs Codex's command sandbox; remove danger-full-access/bypass overrides." >&2
+            exit 1
+        fi
+        if $AIRGAP && $CODEX_AIRGAP_WEB_TOOL_OVERRIDE; then
+            echo "Error: codex airgap mode disables Codex web/search/browser tools; remove --search or blocked feature overrides." >&2
+            exit 1
+        fi
         if ! $CODEX_HAS_CD; then
             CODEX_ARGS+=(--cd "$PROJECT_DIR")
         fi
-        if ! $CODEX_HAS_SANDBOX_OVERRIDE; then
+        if $AIRGAP; then
+            CODEX_ARGS+=(-c 'web_search="disabled"')
+            for feature in browser_use browser_use_external computer_use image_generation in_app_browser standalone_web_search search_tool; do
+                CODEX_ARGS+=(--disable "$feature")
+            done
+            if ! $CODEX_HAS_SANDBOX_OVERRIDE; then
+                CODEX_ARGS+=(--sandbox workspace-write)
+            fi
+            if ! $CODEX_HAS_APPROVAL_OVERRIDE; then
+                CODEX_ARGS+=(--ask-for-approval never)
+            fi
+        elif ! $CODEX_HAS_SANDBOX_OVERRIDE; then
             CODEX_ARGS+=(--dangerously-bypass-approvals-and-sandbox)
         fi
         CODEX_ARGS+=("${HARNESS_ARGS[@]}")
@@ -213,18 +319,39 @@ else
     echo "Sandboxed $HARNESS in: $PROJECT_DIR"
 fi
 if $AIRGAP; then
-    echo "  Network: disabled"
+    if [[ "$HARNESS" == "codex" ]]; then
+        echo "  Network: enabled for codex control plane; Codex web tools disabled; shell commands use Codex sandbox"
+    else
+        echo "  Network: disabled"
+    fi
 fi
 
 # --- Detect git worktrees with git dirs outside the project ---
 GIT_DIR_BINDS=()
-for gitfile in "$PROJECT_DIR"/*/.git; do
+add_git_dir_bind() {
+    local label="$1"
+    local path="$2"
+    local existing
+
+    [[ -d "$path" ]] || return 0
+    case "$path" in "$PROJECT_DIR"/*) return 0 ;; esac
+    for existing in "${GIT_DIR_BIND_PATHS[@]}"; do
+        [[ "$existing" == "$path" ]] && return 0
+    done
+
+    GIT_DIR_BIND_PATHS+=("$path")
+    GIT_DIR_BINDS+=(--bind "$path" "$path")
+    echo "  $label: $path"
+}
+
+GIT_DIR_BIND_PATHS=()
+for gitfile in "$PROJECT_DIR/.git" "$PROJECT_DIR"/*/.git; do
     [[ -f "$gitfile" ]] || continue
     repo_dir="$(dirname "$gitfile")"
+    git_dir="$(cd "$repo_dir" && realpath "$(git rev-parse --git-dir)" 2>/dev/null)" || continue
     git_common_dir="$(cd "$repo_dir" && realpath "$(git rev-parse --git-common-dir)" 2>/dev/null)" || continue
-    case "$git_common_dir" in "$PROJECT_DIR"/*) continue ;; esac
-    GIT_DIR_BINDS+=(--bind "$git_common_dir" "$git_common_dir")
-    echo "  Worktree git dir: $git_common_dir"
+    add_git_dir_bind "Worktree git dir" "$git_dir"
+    add_git_dir_bind "Worktree common git dir" "$git_common_dir"
 done
 
 # --- Build bwrap command ---
@@ -303,7 +430,10 @@ BWRAP_ARGS=(
 )
 
 add_bind_if_exists --ro-bind /opt /opt
-if $AIRGAP; then
+# Codex needs network for its control plane. In airgap mode, keep the parent
+# Codex process online, disable native web tools, and rely on Codex's command
+# sandbox for shell commands.
+if $AIRGAP && [[ "$HARNESS" != "codex" ]]; then
     BWRAP_ARGS+=(--unshare-net --tmpfs /tmp)
 else
     BWRAP_ARGS+=(--bind /tmp /tmp)

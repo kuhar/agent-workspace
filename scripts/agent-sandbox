@@ -354,6 +354,14 @@ for gitfile in "$PROJECT_DIR/.git" "$PROJECT_DIR"/*/.git; do
     add_git_dir_bind "Worktree common git dir" "$git_common_dir"
 done
 
+if [[ "$HARNESS" == "codex" && ${#GIT_DIR_BIND_PATHS[@]} -gt 0 ]]; then
+    CODEX_ADD_DIR_ARGS=()
+    for path in "${GIT_DIR_BIND_PATHS[@]}"; do
+        CODEX_ADD_DIR_ARGS+=(--add-dir "$path")
+    done
+    AGENT_CMD=("${AGENT_CMD[0]}" "${CODEX_ADD_DIR_ARGS[@]}" "${AGENT_CMD[@]:1}")
+fi
+
 # --- Build bwrap command ---
 # On this system /bin, /lib, /lib64 are symlinks into /usr, so binding
 # /usr and recreating the symlinks is sufficient for all system tools.

@@ -58,6 +58,38 @@ def session_dir(tmp_path: Path, repo: Path) -> Path:
     return sd
 
 
+def _long_repo(tmp_path: Path, *, line_count: int, changed_line: int) -> Path:
+    wd = tmp_path / "long-repo"
+    wd.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(wd)], check=True)
+    subprocess.run(["git", "-C", str(wd), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wd), "config", "user.name", "t"], check=True)
+    base_lines = [
+        f"value_{i:03d} = {i}\n"
+        for i in range(1, line_count + 1)
+    ]
+    (wd / "long.py").write_text("".join(base_lines))
+    _git(wd, "add", ".")
+    _git(wd, "commit", "-q", "-m", "base")
+    changed_lines = list(base_lines)
+    changed_lines[changed_line - 1] = f"value_{changed_line:03d} = 'changed'\n"
+    (wd / "long.py").write_text("".join(changed_lines))
+    _git(wd, "commit", "-q", "-am", "change long file")
+    return wd
+
+
+def _session_for_repo(tmp_path: Path, repo: Path) -> Path:
+    sd = tmp_path / "sess"
+    sess.create_session(
+        workspace=str(repo),
+        base_ref="main~1",
+        topic_ref="main",
+        agents=[{"name": "felix", "model": "m", "persona": "felix.md"}],
+        session_dir=str(sd),
+    )
+    return sd
+
+
 # ---------------- diff parser ----------------
 
 def test_parse_diff_added_modified(repo: Path):
@@ -111,6 +143,41 @@ def test_render_page_smoke(session_dir: Path, repo: Path):
     assert "felix" in html  # author
     assert 'id="theme-toggle"' in html
     assert 'localStorage.getItem("pr.theme")' in html
+
+
+def test_render_page_folds_long_unchanged_context(tmp_path: Path):
+    repo = _long_repo(tmp_path, line_count=120, changed_line=60)
+    session_dir = _session_for_repo(tmp_path, repo)
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert 'class="line fold-gap"' in html
+    assert 'data-folded-lines="27"' in html
+    assert "27 unchanged lines hidden" in html
+    assert "28 unchanged lines hidden" in html
+    assert "value_001" not in html
+    assert "value_028" in html
+    assert "value_092" in html
+    assert "value_093" not in html
+
+
+def test_render_page_keeps_comment_anchor_visible_when_context_folded(
+    tmp_path: Path,
+):
+    repo = _long_repo(tmp_path, line_count=160, changed_line=120)
+    session_dir = _session_for_repo(tmp_path, repo)
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    c = Comment(author="vera", file="long.py", line=5, body="look here",
+                severity="warning")
+
+    html = render.render_page(s, s.id, files, [c], head_shifted=False)
+
+    assert "look here" in html
+    assert "value_005" in html
+    assert 'data-line="5"' in html
 
 
 def test_render_page_keeps_file_header_sticky(session_dir: Path, repo: Path):

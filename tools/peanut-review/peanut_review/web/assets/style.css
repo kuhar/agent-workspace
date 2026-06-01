@@ -446,6 +446,21 @@ body.wrap-lines .line .content {
 .line.range-selected .ln,
 .line.range-selected .content { background: var(--range-selected-bg); }
 body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !important; }
+.line.fold-gap .ln {
+  cursor: default;
+  background: var(--surface-muted);
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.line.fold-gap .content {
+  background: var(--surface-muted);
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.line.fold-gap:hover .content { outline: none; }
 .line .content::before {
   display: inline-block;
   width: 10px;

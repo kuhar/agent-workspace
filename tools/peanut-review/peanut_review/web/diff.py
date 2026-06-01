@@ -61,7 +61,7 @@ def parse_diff(workspace: str, base: str, topic: str) -> list[FileDiff]:
     old_ln = 0
     new_ln = 0
 
-    for line in raw.split("\n"):
+    for line in raw.splitlines():
         if line.startswith("diff --git"):
             if current:
                 files.append(current)

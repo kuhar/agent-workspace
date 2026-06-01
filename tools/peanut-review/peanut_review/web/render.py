@@ -15,7 +15,7 @@ from pygments.util import ClassNotFound
 
 from ..models import Comment, Note, Session
 from ..session import GLOBAL_FILE
-from .diff import FileDiff
+from .diff import DiffLine, FileDiff
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
@@ -53,6 +53,9 @@ SESSION_STATE_LABELS = {
     "complete": "done",
     "aborted": "aborted",
 }
+
+DIFF_CONTEXT_LINES = 32
+FOLD_MIN_OMITTED_LINES = 8
 
 
 def _relative_time_label(timestamp: str, *, now: datetime | None = None) -> str:
@@ -141,9 +144,9 @@ def _lexer_for(path: str):
 
 
 def _highlight_file(path: str, lines: list[str]) -> list[str]:
-    """Syntax-highlight a file's contents line-by-line.
+    """Syntax-highlight a rendered slice of file contents line-by-line.
 
-    We highlight the full file once (for consistent tokenization across
+    We highlight all rendered lines once (for consistent tokenization across
     multi-line constructs like docstrings) and split back into per-line HTML.
     """
     if not lines:
@@ -452,6 +455,98 @@ def _render_thread(thread: list[Comment]) -> str:
     )
 
 
+def _thread_anchor_lines(
+    path: str,
+    threads_at_line: dict[tuple[str, int], list[list[Comment]]],
+) -> set[int]:
+    return {
+        line
+        for (thread_path, line) in threads_at_line
+        if thread_path == path
+    }
+
+
+def _visible_line_ranges(
+    fd: FileDiff,
+    threads_at_line: dict[tuple[str, int], list[list[Comment]]],
+) -> list[tuple[int, int]]:
+    """Return half-open line-index ranges worth rendering for this file.
+
+    Changed rows drive the primary windows. Existing comment anchors also get
+    context windows so old review threads remain visible even when they are on
+    unchanged lines outside the current diff hunks.
+    """
+    line_count = len(fd.lines)
+    if line_count == 0:
+        return []
+
+    anchor_indices = {
+        idx for idx, dl in enumerate(fd.lines) if dl.kind != "context"
+    }
+    comment_lines = _thread_anchor_lines(fd.path, threads_at_line)
+    if comment_lines:
+        for idx, dl in enumerate(fd.lines):
+            if dl.new_lineno in comment_lines:
+                anchor_indices.add(idx)
+
+    if not anchor_indices:
+        return [(0, line_count)]
+
+    windows = sorted(
+        (
+            max(0, idx - DIFF_CONTEXT_LINES),
+            min(line_count, idx + DIFF_CONTEXT_LINES + 1),
+        )
+        for idx in anchor_indices
+    )
+
+    merged: list[tuple[int, int]] = []
+    for start, end in windows:
+        if not merged or start > merged[-1][1] + FOLD_MIN_OMITTED_LINES:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        merged[-1] = (prev_start, max(prev_end, end))
+
+    if merged[0][0] <= FOLD_MIN_OMITTED_LINES:
+        merged[0] = (0, merged[0][1])
+    if line_count - merged[-1][1] <= FOLD_MIN_OMITTED_LINES:
+        merged[-1] = (merged[-1][0], line_count)
+    return merged
+
+
+def _line_span_label(lines: list[int | None]) -> str:
+    nums = [n for n in lines if n is not None]
+    if not nums:
+        return ""
+    if nums[0] == nums[-1]:
+        return str(nums[0])
+    return f"{nums[0]}-{nums[-1]}"
+
+
+def _render_fold_gap(lines: list[DiffLine]) -> str:
+    count = len(lines)
+    if count == 0:
+        return ""
+    label = f"{count} unchanged line{'s' if count != 1 else ''} hidden"
+    old_span = _line_span_label([dl.old_lineno for dl in lines])
+    new_span = _line_span_label([dl.new_lineno for dl in lines])
+    title_parts = [label]
+    if old_span:
+        title_parts.append(f"old {old_span}")
+    if new_span:
+        title_parts.append(f"new {new_span}")
+    title = html.escape(" | ".join(title_parts), quote=True)
+    label_html = html.escape(label)
+    return (
+        f'<div class="line fold-gap" data-folded-lines="{count}" title="{title}">'
+        '<span class="ln old fold-marker">...</span>'
+        '<span class="ln new fold-marker">...</span>'
+        f'<span class="content fold-summary">{label_html}</span>'
+        '</div>'
+    )
+
+
 def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[Comment]]]) -> str:
     anchor = _file_anchor(fd.path)
     path_html = html.escape(fd.path)
@@ -465,42 +560,58 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
             f'</div></div>'
         )
 
-    # Highlight the final-file view (context + added lines).
-    final_contents = [dl.content for dl in fd.lines if dl.kind != "deleted"]
+    ranges = _visible_line_ranges(fd, threads_at_line)
+    visible_indices = [
+        idx for start, end in ranges for idx in range(start, end)
+    ]
+
+    # Highlight only the rendered final-file view (context + added lines).
+    final_contents = [
+        fd.lines[idx].content
+        for idx in visible_indices
+        if fd.lines[idx].kind != "deleted"
+    ]
     hl = iter(_highlight_file(fd.path, final_contents))
     rows = []
-    for dl in fd.lines:
-        old_ln = dl.old_lineno if dl.old_lineno is not None else ""
-        new_ln = dl.new_lineno if dl.new_lineno is not None else ""
-        if dl.kind == "deleted":
-            content_html = html.escape(dl.content)  # no highlight for deleted
-        else:
-            content_html = next(hl, html.escape(dl.content))
+    rendered_until = 0
+    for start, end in ranges:
+        if start > rendered_until:
+            rows.append(_render_fold_gap(fd.lines[rendered_until:start]))
+        for idx in range(start, end):
+            dl = fd.lines[idx]
+            old_ln = dl.old_lineno if dl.old_lineno is not None else ""
+            new_ln = dl.new_lineno if dl.new_lineno is not None else ""
+            if dl.kind == "deleted":
+                content_html = html.escape(dl.content)  # no highlight for deleted
+            else:
+                content_html = next(hl, html.escape(dl.content))
 
-        line_attr = (
-            f' data-line="{dl.new_lineno}"' if dl.new_lineno is not None
-            else f' data-line="{dl.old_lineno}"'
-        )
-        row = (
-            f'<div class="line {dl.kind}">'
-            f'<span class="ln old">{old_ln}</span>'
-            f'<span class="ln new"{line_attr}>{new_ln}</span>'
-            f'<span class="content">{content_html}</span>'
-            f'</div>'
-        )
-        rows.append(row)
-
-        # Append the comment-thread row for threads anchored at this new-file
-        # line. Comments are stored with the source-file (new) line number.
-        # Multiple top-level threads can share the same line — they render as
-        # sibling .thread blocks inside one .comment-thread container.
-        key = (fd.path, dl.new_lineno) if dl.new_lineno is not None else None
-        if key and key in threads_at_line:
-            inner = "".join(_render_thread(t) for t in threads_at_line[key])
-            rows.append(
-                f'<div class="comment-thread" data-file="{html.escape(fd.path)}"'
-                f' data-line="{dl.new_lineno}">{inner}</div>'
+            line_attr = (
+                f' data-line="{dl.new_lineno}"' if dl.new_lineno is not None
+                else f' data-line="{dl.old_lineno}"'
             )
+            row = (
+                f'<div class="line {dl.kind}">'
+                f'<span class="ln old">{old_ln}</span>'
+                f'<span class="ln new"{line_attr}>{new_ln}</span>'
+                f'<span class="content">{content_html}</span>'
+                f'</div>'
+            )
+            rows.append(row)
+
+            # Append the comment-thread row for threads anchored at this
+            # new-file line. Comments are stored with the source-file (new)
+            # line number. Multiple top-level threads can share the same line.
+            key = (fd.path, dl.new_lineno) if dl.new_lineno is not None else None
+            if key and key in threads_at_line:
+                inner = "".join(_render_thread(t) for t in threads_at_line[key])
+                rows.append(
+                    f'<div class="comment-thread" data-file="{html.escape(fd.path)}"'
+                    f' data-line="{dl.new_lineno}">{inner}</div>'
+                )
+        rendered_until = end
+    if rendered_until < len(fd.lines):
+        rows.append(_render_fold_gap(fd.lines[rendered_until:]))
 
     return (
         f'<div class="file" id="{anchor}" data-file="{path_html}">'

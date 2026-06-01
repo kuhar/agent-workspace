@@ -524,26 +524,63 @@ def _line_span_label(lines: list[int | None]) -> str:
     return f"{nums[0]}-{nums[-1]}"
 
 
-def _render_fold_gap(lines: list[DiffLine]) -> str:
+def _fold_payload_json(lines: list[DiffLine]) -> str:
+    payload = [
+        {
+            "kind": dl.kind,
+            "old_lineno": dl.old_lineno,
+            "new_lineno": dl.new_lineno,
+            "content": dl.content,
+        }
+        for dl in lines
+    ]
+    return json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+
+
+def _line_bounds(lines: list[int | None]) -> tuple[int | None, int | None]:
+    nums = [n for n in lines if n is not None]
+    if not nums:
+        return None, None
+    return nums[0], nums[-1]
+
+
+def _render_fold_gap(lines: list[DiffLine], fold_id: str) -> str:
     count = len(lines)
     if count == 0:
         return ""
     label = f"{count} unchanged line{'s' if count != 1 else ''} hidden"
     old_span = _line_span_label([dl.old_lineno for dl in lines])
     new_span = _line_span_label([dl.new_lineno for dl in lines])
+    old_start, old_end = _line_bounds([dl.old_lineno for dl in lines])
+    new_start, new_end = _line_bounds([dl.new_lineno for dl in lines])
     title_parts = [label]
     if old_span:
         title_parts.append(f"old {old_span}")
     if new_span:
         title_parts.append(f"new {new_span}")
     title = html.escape(" | ".join(title_parts), quote=True)
+    fold_id_html = html.escape(fold_id, quote=True)
     label_html = html.escape(label)
+    data_attrs = [f'data-folded-lines="{count}"']
+    if old_start is not None and old_end is not None:
+        data_attrs.append(f'data-fold-old-start="{old_start}"')
+        data_attrs.append(f'data-fold-old-end="{old_end}"')
+    if new_start is not None and new_end is not None:
+        data_attrs.append(f'data-fold-new-start="{new_start}"')
+        data_attrs.append(f'data-fold-new-end="{new_end}"')
+    payload = _fold_payload_json(lines)
     return (
-        f'<div class="line fold-gap" data-folded-lines="{count}" title="{title}">'
+        f'<div class="line fold-gap" {" ".join(data_attrs)} title="{title}">'
         '<span class="ln old fold-marker">...</span>'
         '<span class="ln new fold-marker">...</span>'
-        f'<span class="content fold-summary">{label_html}</span>'
+        '<span class="content fold-summary">'
+        f'<button type="button" class="fold-toggle" '
+        f'data-fold-expand="{fold_id_html}">Expand</button>'
+        f'<span class="fold-count">{label_html}</span>'
+        '</span>'
         '</div>'
+        f'<script type="application/json" id="fold-data-{fold_id_html}" '
+        f'class="fold-payload">{payload}</script>'
     )
 
 
@@ -574,9 +611,14 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
     hl = iter(_highlight_file(fd.path, final_contents))
     rows = []
     rendered_until = 0
+    fold_index = 0
     for start, end in ranges:
         if start > rendered_until:
-            rows.append(_render_fold_gap(fd.lines[rendered_until:start]))
+            rows.append(_render_fold_gap(
+                fd.lines[rendered_until:start],
+                f"{anchor}-fold-{fold_index}",
+            ))
+            fold_index += 1
         for idx in range(start, end):
             dl = fd.lines[idx]
             old_ln = dl.old_lineno if dl.old_lineno is not None else ""
@@ -611,7 +653,10 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
                 )
         rendered_until = end
     if rendered_until < len(fd.lines):
-        rows.append(_render_fold_gap(fd.lines[rendered_until:]))
+        rows.append(_render_fold_gap(
+            fd.lines[rendered_until:],
+            f"{anchor}-fold-{fold_index}",
+        ))
 
     return (
         f'<div class="file" id="{anchor}" data-file="{path_html}">'

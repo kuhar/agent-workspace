@@ -682,6 +682,65 @@
     }
   }
 
+  function renderExpandedFoldLine(line) {
+    const kind = ["context", "added", "deleted"].includes(line.kind)
+      ? line.kind
+      : "context";
+    const row = document.createElement("div");
+    row.className = `line ${kind}`;
+
+    const oldLn = document.createElement("span");
+    oldLn.className = "ln old";
+    oldLn.textContent = line.old_lineno == null ? "" : String(line.old_lineno);
+
+    const newLn = document.createElement("span");
+    newLn.className = "ln new";
+    newLn.textContent = line.new_lineno == null ? "" : String(line.new_lineno);
+    const dataLine = line.new_lineno == null ? line.old_lineno : line.new_lineno;
+    if (dataLine != null) newLn.dataset.line = String(dataLine);
+
+    const content = document.createElement("span");
+    content.className = "content";
+    content.textContent = line.content || "";
+
+    row.append(oldLn, newLn, content);
+    return row;
+  }
+
+  function expandFoldGap(gap) {
+    if (!gap) return false;
+    const btn = gap.querySelector("[data-fold-expand]");
+    const foldId = btn && btn.dataset.foldExpand;
+    if (!foldId) return false;
+    const payload = document.getElementById(`fold-data-${foldId}`);
+    if (!payload) return false;
+    let lines;
+    try {
+      lines = JSON.parse(payload.textContent || "[]");
+    } catch {
+      return false;
+    }
+    const frag = document.createDocumentFragment();
+    for (const line of lines) frag.appendChild(renderExpandedFoldLine(line));
+    gap.after(frag);
+    payload.remove();
+    gap.remove();
+    updateStickyOffsets();
+    return true;
+  }
+
+  function expandFoldGapContainingLine(fileEl, lineNo) {
+    for (const gap of fileEl.querySelectorAll(".fold-gap")) {
+      const start = Number(gap.dataset.foldNewStart);
+      const end = Number(gap.dataset.foldNewEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (lineNo >= Math.min(start, end) && lineNo <= Math.max(start, end)) {
+        return expandFoldGap(gap);
+      }
+    }
+    return false;
+  }
+
   // Edit + history. Edit replaces the comment-body with a textarea + Save/Cancel.
   // History toggles a panel under the comment showing prior versions inline.
   function applyEditedComment(node, c) {
@@ -808,6 +867,11 @@
       openGlobalForm();
       return;
     }
+    const foldBtn = ev.target.closest("[data-fold-expand]");
+    if (foldBtn) {
+      expandFoldGap(foldBtn.closest(".fold-gap"));
+      return;
+    }
     const collapseBtn = ev.target.closest("[data-thread-collapse]");
     if (collapseBtn) {
       const threadEl = collapseBtn.closest(".thread");
@@ -904,6 +968,12 @@
     for (const el of fileEl.querySelectorAll(".line")) {
       const newLn = el.querySelector(".ln.new");
       if (newLn && Number(newLn.dataset.line) === lineNo) return el;
+    }
+    if (expandFoldGapContainingLine(fileEl, lineNo)) {
+      for (const el of fileEl.querySelectorAll(".line")) {
+        const newLn = el.querySelector(".ln.new");
+        if (newLn && Number(newLn.dataset.line) === lineNo) return el;
+      }
     }
     return null;
   }

@@ -155,12 +155,14 @@ def test_render_page_folds_long_unchanged_context(tmp_path: Path):
 
     assert 'class="line fold-gap"' in html
     assert 'data-folded-lines="27"' in html
+    assert 'class="fold-toggle"' in html
+    assert 'data-fold-expand=' in html
+    assert 'class="fold-payload"' in html
     assert "27 unchanged lines hidden" in html
     assert "28 unchanged lines hidden" in html
-    assert "value_001" not in html
+    assert html.count('class="line context"') < 80
     assert "value_028" in html
     assert "value_092" in html
-    assert "value_093" not in html
 
 
 def test_render_page_keeps_comment_anchor_visible_when_context_folded(

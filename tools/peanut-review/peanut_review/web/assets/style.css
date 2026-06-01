@@ -54,6 +54,8 @@
   --success-border: #23835c;
   --success-border-strong: #3fb950;
   --range-selected-bg: rgba(55, 148, 255, 0.22);
+  --fold-bg: #332d1f;
+  --fold-border: #6a5630;
   --danger-hover-bg: rgba(244, 71, 71, 0.2);
   --focus-shadow: rgba(255, 216, 102, 0.25);
   --shadow-color: rgba(0, 0, 0, 0.35);
@@ -113,6 +115,8 @@
     --success-border: #1a7f37;
     --success-border-strong: #116329;
     --range-selected-bg: rgba(9, 105, 218, 0.16);
+    --fold-bg: #fff8c5;
+    --fold-border: #d4a72c;
     --danger-hover-bg: rgba(207, 34, 46, 0.12);
     --focus-shadow: rgba(191, 135, 0, 0.25);
     --shadow-color: rgba(31, 35, 40, 0.18);
@@ -172,6 +176,8 @@
   --success-border: #1a7f37;
   --success-border-strong: #116329;
   --range-selected-bg: rgba(9, 105, 218, 0.16);
+  --fold-bg: #fff8c5;
+  --fold-border: #d4a72c;
   --danger-hover-bg: rgba(207, 34, 46, 0.12);
   --focus-shadow: rgba(191, 135, 0, 0.25);
   --shadow-color: rgba(31, 35, 40, 0.18);
@@ -448,19 +454,35 @@ body.wrap-lines .line .content {
 body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !important; }
 .line.fold-gap .ln {
   cursor: default;
-  background: var(--surface-muted);
+  background: var(--fold-bg);
   color: var(--muted);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--fold-border);
+  border-bottom: 1px solid var(--fold-border);
 }
 .line.fold-gap .content {
-  background: var(--surface-muted);
+  background: var(--fold-bg);
   color: var(--muted);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--fold-border);
+  border-bottom: 1px solid var(--fold-border);
   font-size: 11px;
 }
 .line.fold-gap:hover .content { outline: none; }
+.fold-toggle {
+  background: var(--surface-alt);
+  color: var(--accent);
+  border: 1px solid var(--fold-border);
+  border-radius: 3px;
+  padding: 1px 8px;
+  margin-right: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+.fold-toggle:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.fold-count { color: var(--muted); }
 .line .content::before {
   display: inline-block;
   width: 10px;

@@ -158,6 +158,7 @@ def test_render_page_folds_long_unchanged_context(tmp_path: Path):
     assert 'class="fold-toggle"' in html
     assert 'data-fold-expand=' in html
     assert 'class="fold-payload"' in html
+    assert "MAX_FOLD_EXPAND_LINES = 100" in html
     assert "27 unchanged lines hidden" in html
     assert "28 unchanged lines hidden" in html
     assert html.count('class="line context"') < 80

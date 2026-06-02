@@ -342,6 +342,9 @@ def test_render_sidebar_files_list_with_counts(session_dir: Path, repo: Path):
                               head_shifted=False)
 
     assert "<h3>Files " in html, "sidebar should have a Files heading"
+    assert 'class="sidebar-heading files-heading"' in html
+    assert '<span class="file-total-stats" title="Cumulative lines changed">' in html
+    assert '<span class="add">+1</span> <span class="del">-1</span>' in html
     assert 'class="files"' in html
     # Anchor id on file section + matching href in sidebar.
     assert 'id="f-foo-py"' in html

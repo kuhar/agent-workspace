@@ -841,6 +841,14 @@ def _render_sidebar(
                          per_file_total.get(fd.path, 0))
         for fd in files
     ) or '<li class="muted">(no files)</li>'
+    total_additions = sum(fd.additions for fd in files)
+    total_deletions = sum(fd.deletions for fd in files)
+    file_totals = (
+        '<span class="file-total-stats" title="Cumulative lines changed">'
+        f'<span class="add">+{total_additions}</span> '
+        f'<span class="del">-{total_deletions}</span>'
+        '</span>'
+    )
 
     # Activity jump row: same shape as global-row so it shares the file-row
     # layout/CSS. Pending = unanswered agent questions; total = notes plus
@@ -873,7 +881,10 @@ def _render_sidebar(
 
     return (
         '<aside id="sidebar">'
+        '<div class="sidebar-heading files-heading">'
         f'<h3>Files ({len(files)})</h3>'
+        f'{file_totals}'
+        '</div>'
         f'<ul class="files">{global_row}{file_rows}{inbox_row}</ul>'
         '<h3>Session</h3>'
         '<ul>'

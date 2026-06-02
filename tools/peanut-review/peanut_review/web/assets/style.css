@@ -697,6 +697,17 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   margin: 0 0 8px 0;
 }
 #sidebar .sidebar-heading h3 { margin: 0; }
+#sidebar .files-heading .file-total-stats {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#sidebar .files-heading .add { color: var(--suggestion); }
+#sidebar .files-heading .del { color: var(--critical); }
 #sidebar .agent-list li.agent-row {
   display: block;
   padding: 5px 0 6px;

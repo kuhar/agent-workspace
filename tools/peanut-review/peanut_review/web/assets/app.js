@@ -481,10 +481,13 @@
   function lineElsBetween(file, lo, hi) {
     const fileEl = document.querySelector(`.file[data-file="${cssEsc(file)}"]`);
     if (!fileEl) return [];
+    if (lo === hi) {
+      const row = rowForNewLine(fileEl, lo);
+      return row ? [row] : [];
+    }
     const out = [];
-    for (const el of fileEl.querySelectorAll(".line")) {
-      const newLn = el.querySelector(".ln.new");
-      const n = newLn ? Number(newLn.dataset.line) : NaN;
+    for (const el of fileEl.querySelectorAll(".line[data-new-line]")) {
+      const n = Number(el.dataset.newLine);
       if (Number.isInteger(n) && n >= lo && n <= hi) out.push(el);
     }
     return out;
@@ -695,12 +698,14 @@
     const oldLn = document.createElement("span");
     oldLn.className = "ln old";
     oldLn.textContent = line.old_lineno == null ? "" : String(line.old_lineno);
+    if (line.old_lineno != null) row.dataset.oldLine = String(line.old_lineno);
 
     const newLn = document.createElement("span");
     newLn.className = "ln new";
     newLn.textContent = line.new_lineno == null ? "" : String(line.new_lineno);
     const dataLine = line.new_lineno == null ? line.old_lineno : line.new_lineno;
     if (dataLine != null) newLn.dataset.line = String(dataLine);
+    if (line.new_lineno != null) row.dataset.newLine = String(line.new_lineno);
 
     const content = document.createElement("span");
     content.className = "content";
@@ -1069,18 +1074,17 @@
   // against the DOM: insert new ones, remove vanished ones, reflect resolved
   // state changes. Meant to run while agents are posting during a review.
 
+  function rowForNewLine(fileEl, lineNo) {
+    return fileEl.querySelector(`.line[data-new-line="${lineNo}"]`);
+  }
+
   function findRowForAnchor(fileEl, lineNo) {
     // Match the `.ln.new` (right-gutter) cell that carries the new-file line
     // number, same axis threads are keyed on server-side.
-    for (const el of fileEl.querySelectorAll(".line")) {
-      const newLn = el.querySelector(".ln.new");
-      if (newLn && Number(newLn.dataset.line) === lineNo) return el;
-    }
+    const row = rowForNewLine(fileEl, lineNo);
+    if (row) return row;
     if (expandFoldGapContainingLine(fileEl, lineNo)) {
-      for (const el of fileEl.querySelectorAll(".line")) {
-        const newLn = el.querySelector(".ln.new");
-        if (newLn && Number(newLn.dataset.line) === lineNo) return el;
-      }
+      return rowForNewLine(fileEl, lineNo);
     }
     return null;
   }

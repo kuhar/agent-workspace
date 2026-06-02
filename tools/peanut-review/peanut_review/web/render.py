@@ -56,6 +56,7 @@ SESSION_STATE_LABELS = {
 
 DIFF_CONTEXT_LINES = 32
 FOLD_MIN_OMITTED_LINES = 8
+MAX_INITIAL_CHANGED_BLOCK_LINES = 100
 
 
 def _relative_time_label(timestamp: str, *, now: datetime | None = None) -> str:
@@ -480,9 +481,7 @@ def _visible_line_ranges(
     if line_count == 0:
         return []
 
-    anchor_indices = {
-        idx for idx, dl in enumerate(fd.lines) if dl.kind != "context"
-    }
+    anchor_indices = _changed_anchor_indices(fd.lines)
     comment_lines = _thread_anchor_lines(fd.path, threads_at_line)
     if comment_lines:
         for idx, dl in enumerate(fd.lines):
@@ -513,6 +512,25 @@ def _visible_line_ranges(
     if line_count - merged[-1][1] <= FOLD_MIN_OMITTED_LINES:
         merged[-1] = (merged[-1][0], line_count)
     return merged
+
+
+def _changed_anchor_indices(lines: list[DiffLine]) -> set[int]:
+    out: set[int] = set()
+    idx = 0
+    while idx < len(lines):
+        if lines[idx].kind == "context":
+            idx += 1
+            continue
+        start = idx
+        while idx < len(lines) and lines[idx].kind != "context":
+            idx += 1
+        end = idx
+        block_len = end - start
+        if block_len <= MAX_INITIAL_CHANGED_BLOCK_LINES:
+            out.update(range(start, end))
+        else:
+            out.update(range(start, start + MAX_INITIAL_CHANGED_BLOCK_LINES))
+    return out
 
 
 def _line_span_label(lines: list[int | None]) -> str:
@@ -548,7 +566,16 @@ def _render_fold_gap(lines: list[DiffLine], fold_id: str) -> str:
     count = len(lines)
     if count == 0:
         return ""
-    label = f"{count} unchanged line{'s' if count != 1 else ''} hidden"
+    kinds = {dl.kind for dl in lines}
+    if kinds == {"context"}:
+        label_kind = "unchanged"
+    elif kinds == {"added"}:
+        label_kind = "added"
+    elif kinds == {"deleted"}:
+        label_kind = "deleted"
+    else:
+        label_kind = "diff"
+    label = f"{count} {label_kind} line{'s' if count != 1 else ''} hidden"
     old_span = _line_span_label([dl.old_lineno for dl in lines])
     new_span = _line_span_label([dl.new_lineno for dl in lines])
     old_start, old_end = _line_bounds([dl.old_lineno for dl in lines])
@@ -632,8 +659,13 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
                 f' data-line="{dl.new_lineno}"' if dl.new_lineno is not None
                 else f' data-line="{dl.old_lineno}"'
             )
+            row_attrs = [f'class="line {dl.kind}"']
+            if dl.old_lineno is not None:
+                row_attrs.append(f'data-old-line="{dl.old_lineno}"')
+            if dl.new_lineno is not None:
+                row_attrs.append(f'data-new-line="{dl.new_lineno}"')
             row = (
-                f'<div class="line {dl.kind}">'
+                f'<div {" ".join(row_attrs)}>'
                 f'<span class="ln old">{old_ln}</span>'
                 f'<span class="ln new"{line_attr}>{new_ln}</span>'
                 f'<span class="content">{content_html}</span>'

@@ -78,6 +78,24 @@ def _long_repo(tmp_path: Path, *, line_count: int, changed_line: int) -> Path:
     return wd
 
 
+def _new_large_file_repo(tmp_path: Path, *, line_count: int) -> Path:
+    wd = tmp_path / "new-large-file-repo"
+    wd.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(wd)], check=True)
+    subprocess.run(["git", "-C", str(wd), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wd), "config", "user.name", "t"], check=True)
+    (wd / "seed.txt").write_text("base\n")
+    _git(wd, "add", ".")
+    _git(wd, "commit", "-q", "-m", "base")
+    (wd / "generated.py").write_text("".join(
+        f"value_{i:03d} = {i}\n"
+        for i in range(1, line_count + 1)
+    ))
+    _git(wd, "add", ".")
+    _git(wd, "commit", "-q", "-m", "add generated")
+    return wd
+
+
 def _session_for_repo(tmp_path: Path, repo: Path) -> Path:
     sd = tmp_path / "sess"
     sess.create_session(
@@ -164,6 +182,20 @@ def test_render_page_folds_long_unchanged_context(tmp_path: Path):
     assert html.count('class="line context"') < 80
     assert "value_028" in html
     assert "value_092" in html
+
+
+def test_render_page_folds_large_added_files(tmp_path: Path):
+    repo = _new_large_file_repo(tmp_path, line_count=250)
+    session_dir = _session_for_repo(tmp_path, repo)
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert "generated.py" in html
+    assert "added lines hidden" in html
+    assert html.count('class="line added"') < 150
+    assert 'data-new-line="1"' in html
 
 
 def test_render_page_keeps_comment_anchor_visible_when_context_folded(

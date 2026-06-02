@@ -50,11 +50,12 @@ cat ${SESSION}/personas/${PERSONA}
 
 # Review target
 
-Repository: `${WORKSPACE}`
+Workspace: `${WORKSPACE}`
+Repository: `${REPO_PATH}`
 
 View the diff you are reviewing:
 ```
-cd ${WORKSPACE} && ${DIFF_COMMANDS}
+cd ${REPO_PATH} && ${DIFF_COMMANDS}
 ```
 
 # Round 1 — Review the diff
@@ -130,7 +131,7 @@ Read ALL prior context before forming opinions:
    for findings they chose not to fix.
 
 3. **Fix diff** (what the orchestrator changed in response to Round 1):
-   `cd ${WORKSPACE} && git log --oneline -5` to find the fix commit, then
+   `cd ${REPO_PATH} && git log --oneline -5` to find the fix commit, then
    `git diff <original-head>..<fix-commit>` to see the actual fixes.
 
 Now assess: for each rebutted finding, do you agree with the rebuttal? If

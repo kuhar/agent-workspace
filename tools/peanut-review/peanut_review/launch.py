@@ -10,7 +10,13 @@ from string import Template
 from typing import Sequence
 
 from .models import AgentStatus, SessionState
-from .session import load_session, reset_agent_runtime, save_session, update_agent_status
+from .session import (
+    load_session,
+    repo_path,
+    reset_agent_runtime,
+    save_session,
+    update_agent_status,
+)
 from .validation import validate_launch_prerequisites
 
 
@@ -75,10 +81,13 @@ def render_all_prompts(
     pr_bin = str(Path(__file__).resolve().parent.parent / "bin" / "peanut-review")
 
     result = {}
+    repo = repo_path(session)
     for agent in agents:
         variables = {
             "SESSION": str(sdir),
             "WORKSPACE": session.workspace,
+            "REPO_PATH": repo,
+            "REPO_RELATIVE": session.repo_relative or ".",
             "AGENT": agent.name,
             "PERSONA": agent.persona,
             "DIFF_COMMANDS": " && ".join(session.diff_commands),

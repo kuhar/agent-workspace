@@ -115,6 +115,27 @@ def test_persona_copying(mock_git):
     assert (Path(session_dir) / "personas" / "felix.md").exists()
 
 
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_create_session_preserves_nested_repo_relative(mock_git):
+    sd = tempfile.mkdtemp(prefix="pr-test-")
+    session_dir = os.path.join(sd, "session")
+    workspace = Path(sd) / "review"
+
+    s, _ = create_session(
+        workspace=str(workspace),
+        repo_relative="rocm-systems",
+        session_dir=session_dir,
+    )
+
+    assert s.workspace == str(workspace.resolve())
+    assert s.repo_relative == "rocm-systems"
+    assert s.repo_path() == str((workspace / "rocm-systems").resolve())
+    assert load_session(session_dir).repo_relative == "rocm-systems"
+    mock_git.assert_any_call(
+        str((workspace / "rocm-systems").resolve()), "rev-parse", "HEAD",
+    )
+
+
 def test_discover_session_env():
     with patch.dict(os.environ, {"PEANUT_SESSION": "/tmp/test-session"}):
         assert discover_session() == "/tmp/test-session"

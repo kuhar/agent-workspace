@@ -166,6 +166,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     try:
         session, session_dir = sess.create_session(
             workspace=os.path.abspath(args.workspace),
+            repo_relative=getattr(args, "repo_relative", None),
             base_ref=base_ref,
             topic_ref=topic_ref,
             agents=agents,
@@ -294,7 +295,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     from . import gh
     try:
-        repo, number = gh.resolve_pr_spec(args.pr, workspace=cfg["workspace"])
+        repo, number = gh.resolve_pr_spec(args.pr, workspace=cfg["repoPath"])
         pr_info = gh.fetch_pr_info(repo, number)
     except (ValueError, gh.GhError) as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -318,6 +319,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"Config:   {config_path}")
         print(f"Session:  {session_dir}")
         print(f"Workspace: {cfg['workspace']}")
+        print(f"Repo:      {cfg['repoPath']}")
         print(f"PR:       {pr_info.repo}#{pr_info.number}")
         print(f"Agents:   {len(agents)}")
         print()
@@ -325,7 +327,9 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(
             "  peanut-review --session "
             f"{shlex.quote(str(session_dir))} init --workspace "
-            f"{shlex.quote(cfg['workspace'])} --gh-pr {pr_info.repo}#{pr_info.number} "
+            f"{shlex.quote(cfg['workspace'])} --repo-relative "
+            f"{shlex.quote(cfg['repoRelative'])} "
+            f"--gh-pr {pr_info.repo}#{pr_info.number} "
             f"--timeout {timeout} --agents {shlex.quote(json.dumps(agents))}"
         )
         print("Fetch comments command:")
@@ -360,6 +364,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         try:
             session_obj, created_dir = sess.create_session(
                 workspace=cfg["workspace"],
+                repo_relative=cfg["repoRelative"],
                 base_ref=args.base if args.base is not None else pr_info.base_sha,
                 topic_ref=args.topic if args.topic is not None else pr_info.head_sha,
                 agents=agents,
@@ -480,7 +485,9 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
             file = args.file
             line = args.line
             end_line = args.end_line
-            file_lines, err = sess.validate_comment_location(s.workspace, file, line)
+            file_lines, err = sess.validate_comment_location(
+                sess.repo_path(s), file, line,
+            )
             if err:
                 print(f"Error: {err}", file=sys.stderr)
                 return 1
@@ -1042,7 +1049,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
     requested_head = args.new_head or "HEAD"
     try:
-        new_head = sess.resolve_git_ref(s.workspace, requested_head)
+        new_head = sess.resolve_git_ref(sess.repo_path(s), requested_head)
         head_changed = new_head != s.current_head
         metadata_changed = sess.retarget_review_head(s, new_head)
     except RuntimeError as e:
@@ -1075,6 +1082,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     if s.original_head != s.current_head:
         print(f"Original: {s.original_head[:12]}")
     print(f"Workspace: {s.workspace}")
+    if s.repo_relative:
+        print(f"Repo:      {sess.repo_path(s)}")
     print()
 
     # Agents
@@ -1202,7 +1211,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
     for c in comments:
         note_data = json.dumps(dataclasses.asdict(c), indent=2)
         subprocess.run(
-            ["git", "-C", s.workspace, "notes", "--ref", ref,
+            ["git", "-C", sess.repo_path(s), "notes", "--ref", ref,
              "append", "-m", note_data, s.original_head],
             capture_output=True, text=True, timeout=10,
         )
@@ -1220,7 +1229,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # init
     sp = sub.add_parser("init", help="Create a new review session")
-    sp.add_argument("--workspace", required=True, help="Repository path")
+    sp.add_argument("--workspace", required=True, help="Agent workspace root")
+    sp.add_argument(
+        "--repo-relative",
+        default=None,
+        help="Git repository path relative to --workspace (default: workspace)",
+    )
     sp.add_argument("--base", default=None,
                     help="Base ref (default: main, or PR baseRefOid with --gh-pr)")
     sp.add_argument("--topic", default=None,

@@ -44,7 +44,8 @@ def test_validate_project_config_normalizes_paths(tmp_path: Path):
 
     assert cfg["reviewRoot"] == str((tmp_path / "reviews").resolve())
     assert cfg["workspaceRoot"] == str((tmp_path / "worktree").resolve())
-    assert cfg["workspace"] == str(workspace.resolve())
+    assert cfg["workspace"] == str((tmp_path / "worktree").resolve())
+    assert cfg["repoPath"] == str(workspace.resolve())
     assert cfg["personasDir"] == str(personas.resolve())
     assert cfg["agents"][0]["runner"] == "cursor"
 

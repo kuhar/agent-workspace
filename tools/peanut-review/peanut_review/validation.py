@@ -133,14 +133,14 @@ def validate_project_config(
             errors.append("repoRelative must be relative")
         if ".." in repo_relative.parts:
             errors.append("repoRelative must stay under workspaceRoot")
-    workspace = (workspace_root / repo_relative).resolve()
+    repo_path = (workspace_root / repo_relative).resolve()
 
     if review_root.exists() and not review_root.is_dir():
         errors.append(f"reviewRoot exists but is not a directory: {review_root}")
     if not workspace_root.is_dir():
         errors.append(f"workspaceRoot does not exist or is not a directory: {workspace_root}")
-    if not workspace.is_dir():
-        errors.append(f"configured workspace does not exist: {workspace}")
+    if not repo_path.is_dir():
+        errors.append(f"configured repository does not exist: {repo_path}")
 
     timeout = data.get("reviewAgentTimeoutSeconds", 1200)
     if not isinstance(timeout, int) or timeout <= 0:
@@ -173,7 +173,8 @@ def validate_project_config(
     cfg["reviewRoot"] = str(review_root)
     cfg["workspaceRoot"] = str(workspace_root)
     cfg["repoRelative"] = str(repo_relative)
-    cfg["workspace"] = str(workspace)
+    cfg["workspace"] = str(workspace_root)
+    cfg["repoPath"] = str(repo_path)
     cfg["reviewAgentTimeoutSeconds"] = timeout
     cfg["agents"] = agents
     if personas_dir is not None:

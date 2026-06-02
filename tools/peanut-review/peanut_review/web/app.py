@@ -23,6 +23,7 @@ from ..session import (
     GLOBAL_FILE,
     load_session,
     refresh_agent_statuses,
+    repo_path,
     retarget_review_head,
     save_session,
     validate_comment_location,
@@ -137,6 +138,8 @@ class SessionRegistry:
                 "github_title": github_title,
                 "created_at": s.created_at,
                 "workspace": s.workspace,
+                "repo_relative": s.repo_relative,
+                "repo_path": repo_path(s),
                 "session_subtitle": session_subtitle,
                 "current_head": (s.current_head or "")[:12],
                 "comment_count": len(live),
@@ -172,7 +175,7 @@ def _auto_migrate_if_shifted(session_dir: Path) -> tuple[bool, str | None, bool]
     metadata was repaired without a new HEAD shift.
     """
     s = load_session(session_dir)
-    live = _git_head(s.workspace)
+    live = _git_head(repo_path(s))
     if not live:
         return False, live, False
     shifted = live != s.current_head
@@ -283,7 +286,7 @@ class _Handler(BaseHTTPRequestHandler):
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
             files = diffmod.parse_diff(
-                session.workspace, session.base_ref, session.topic_ref,
+                repo_path(session), session.base_ref, session.topic_ref,
             )
             transcript = polling.list_transcript(session_dir)
             agent_runtime = {}
@@ -322,6 +325,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "original_head": session.original_head,
                 "current_head": session.current_head,
                 "workspace": session.workspace,
+                "repo_relative": session.repo_relative,
+                "repo_path": repo_path(session),
                 "agents": _agent_payload(session_dir, session),
                 "comment_count": len(live),
                 "note_count": len(notes),
@@ -483,7 +488,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._error(400, "line must be an integer")
                 end_line = data.get("end_line")
                 session = load_session(session_dir)
-                _, err = validate_comment_location(session.workspace, file, line)
+                _, err = validate_comment_location(repo_path(session), file, line)
                 if err:
                     return self._error(400, err)
 

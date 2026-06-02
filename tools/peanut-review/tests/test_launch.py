@@ -37,13 +37,18 @@ def _default_workspace() -> str:
     return str(workspace)
 
 
-def _make_session_dir(agents: list[AgentConfig], workspace: str | None = None) -> str:
+def _make_session_dir(
+    agents: list[AgentConfig],
+    workspace: str | None = None,
+    repo_relative: str | None = None,
+) -> str:
     from peanut_review.session import create_session
 
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-launch-"), "session")
     with patch("peanut_review.session._run_git", side_effect=_mock_git):
         create_session(
             workspace=workspace or _default_workspace(),
+            repo_relative=repo_relative,
             agents=[a.to_dict() for a in agents],
             session_dir=sd,
         )
@@ -106,6 +111,29 @@ def test_launch_dry_run_cursor_agent_cmd():
     cmd = results[0]["cmd"]
     assert cmd[0].endswith("cursor-agent-task.sh")
     assert "--model" in cmd and "opus-4.6-thinking" in cmd
+
+
+def test_launch_uses_workspace_root_for_cursor_and_nested_repo_for_prompt(tmp_path):
+    workspace = tmp_path / "review"
+    repo = workspace / "rocm-systems"
+    repo.mkdir(parents=True)
+    _write_cursor_config(workspace)
+    sd = _make_session_dir(
+        [AgentConfig(name="vera", model="opus", persona="vera.md")],
+        workspace=str(workspace),
+        repo_relative="rocm-systems",
+    )
+
+    results = launch.launch_agents(sd, dry_run=True)
+
+    cmd = results[0]["cmd"]
+    assert cmd[cmd.index("--workspace") + 1] == str(workspace)
+    supervisor_cmd = results[0]["supervisor_cmd"]
+    assert supervisor_cmd[supervisor_cmd.index("--cwd") + 1] == str(workspace)
+    rendered = (Path(sd) / "prompts" / "vera.md").read_text()
+    assert f"Workspace: `{workspace}`" in rendered
+    assert f"Repository: `{repo}`" in rendered
+    assert f"cd {repo} && git diff" in rendered
 
 
 def test_launch_dry_run_opencode_agent_cmd():

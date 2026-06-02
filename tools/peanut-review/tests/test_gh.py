@@ -570,7 +570,9 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
 
     sd = review_root / "foo-feature-add-it"
     s = sess.load_session(sd)
-    assert s.workspace == ws
+    assert s.workspace == str(tmp_path)
+    assert s.repo_relative == "ws"
+    assert sess.repo_path(s) == ws
     assert s.timeout == 77
     assert s.github is not None
     assert s.github.repo == "acme/foo"

@@ -212,7 +212,8 @@ def test_start_validates_cursor_cli_before_resolving_pr(tmp_path: Path):
 
     assert rc == 1
     assert "Cursor CLI config validation failed" in err.getvalue()
-    assert ".cursor/cli.json" in err.getvalue()
+    assert str(tmp_path / ".cursor" / "cli.json") in err.getvalue()
+    assert str(workspace / ".cursor" / "cli.json") not in err.getvalue()
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)

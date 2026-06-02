@@ -6,6 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 
 
 def _now_iso() -> str:
@@ -228,7 +229,10 @@ class Session:
     version: int = 1
     id: str = ""
     created_at: str = field(default_factory=_now_iso)
+    # Agent launch/workspace root. For nested checkouts, repo_relative points
+    # at the Git repository under this directory.
     workspace: str = ""
+    repo_relative: str = ""
     base_ref: str = "main"
     topic_ref: str = "HEAD"
     original_head: str = ""
@@ -239,6 +243,11 @@ class Session:
     state: str = SessionState.INIT.value
     timeout: int = 1200
     github: GitHubPR | None = None
+
+    def repo_path(self) -> str:
+        if not self.repo_relative or self.repo_relative == ".":
+            return self.workspace
+        return str((Path(self.workspace) / self.repo_relative).resolve())
 
     def to_json(self) -> str:
         d = asdict(self)

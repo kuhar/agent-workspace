@@ -58,6 +58,38 @@ def _run_git(workspace: str, *args: str) -> str:
     return result.stdout.strip()
 
 
+def resolve_git_ref(workspace: str, ref: str = "HEAD") -> str:
+    """Resolve `ref` to a commit-ish SHA in `workspace`."""
+    return _run_git(workspace, "rev-parse", ref)
+
+
+def retarget_review_head(session: Session, new_head: str) -> bool:
+    """Move a session's active review diff target to `new_head`.
+
+    `current_head` is the commit agents/comments are associated with, while
+    `topic_ref` and `diff_commands` are what humans and agents use to render
+    the active diff. They must move together during migration.
+    """
+    diff_range = f"{session.base_ref}...{new_head}"
+    diff_command = f"git diff {diff_range}"
+    diff_stat = _run_git(session.workspace, "diff", "--stat", diff_range)
+
+    changed = False
+    if session.current_head != new_head:
+        session.current_head = new_head
+        changed = True
+    if session.topic_ref != new_head:
+        session.topic_ref = new_head
+        changed = True
+    if session.diff_commands != [diff_command]:
+        session.diff_commands = [diff_command]
+        changed = True
+    if session.diff_stat != diff_stat:
+        session.diff_stat = diff_stat
+        changed = True
+    return changed
+
+
 def create_session(
     *,
     workspace: str,

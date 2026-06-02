@@ -1193,6 +1193,11 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
         _, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/session")
         data = json.loads(raw)
         assert data["head_shifted"] is True
+        new_head = _git(repo, "rev-parse", "HEAD").strip()
+        migrated = sess.load_session(session_dir)
+        assert migrated.current_head == new_head
+        assert migrated.topic_ref == new_head
+        assert migrated.diff_commands == [f"git diff {migrated.base_ref}...{new_head}"]
 
         # Comment should now be stale
         comments = store.read_all_comments(session_dir)

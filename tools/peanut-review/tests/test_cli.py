@@ -2,13 +2,14 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
 from peanut_review.cli import main
-from peanut_review import session as sess, models
+from peanut_review import session as sess, models, store
 
 
 def test_default_personas_dir_is_bundled():
@@ -42,6 +43,27 @@ def _make_cursor_workspace() -> str:
         }
     }))
     return str(ws)
+
+
+def _git(cwd: str | Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def _make_git_repo() -> Path:
+    repo = Path(tempfile.mkdtemp(prefix="pr-git-"))
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "foo.py").write_text("x = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "base")
+    return repo
 
 
 def _mock_git(workspace, *args):
@@ -1035,6 +1057,45 @@ def test_edit_command_unknown_comment_errors():
         rc = main(["--session", sd, "edit", "c_missing", "--body", "x"])
     assert rc == 1
     assert "not found" in err.getvalue()
+
+
+def test_migrate_repairs_stale_topic_ref_without_restaling_comments():
+    repo = _make_git_repo()
+    base_sha = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "foo.py").write_text("x = 2\n")
+    _git(repo, "commit", "-q", "-am", "topic")
+    old_head = _git(repo, "rev-parse", "HEAD").strip()
+    session_dir = Path(tempfile.mkdtemp(prefix="pr-test-")) / "session"
+    sess.create_session(
+        workspace=str(repo),
+        base_ref=base_sha,
+        topic_ref=old_head,
+        session_dir=str(session_dir),
+    )
+
+    (repo / "foo.py").write_text("x = 3\n")
+    _git(repo, "commit", "-q", "-am", "new topic")
+    new_head = _git(repo, "rev-parse", "HEAD").strip()
+
+    s = sess.load_session(session_dir)
+    s.current_head = new_head
+    s.topic_ref = old_head
+    s.diff_commands = [f"git diff {base_sha}...{old_head}"]
+    sess.save_session(session_dir, s)
+    c = models.Comment(author="vera", file="foo.py", line=1, body="x")
+    store.append_comment(session_dir, c)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", str(session_dir), "migrate", "--new-head", new_head])
+
+    assert rc == 0
+    assert "Repaired diff target" in out.getvalue()
+    repaired = sess.load_session(session_dir)
+    assert repaired.current_head == new_head
+    assert repaired.topic_ref == new_head
+    assert repaired.diff_commands == [f"git diff {base_sha}...{new_head}"]
+    assert store.read_all_comments(session_dir)[0].stale is False
 
 
 def test_session_with_github_field_round_trips():

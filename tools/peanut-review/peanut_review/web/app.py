@@ -23,6 +23,7 @@ from ..session import (
     GLOBAL_FILE,
     load_session,
     refresh_agent_statuses,
+    retarget_review_head,
     save_session,
     validate_comment_location,
 )
@@ -163,20 +164,27 @@ def _git_head(workspace: str) -> str | None:
     return None
 
 
-def _auto_migrate_if_shifted(session_dir: Path) -> tuple[bool, str | None]:
-    """If the workspace HEAD moved, mark stale + update current_head.
+def _auto_migrate_if_shifted(session_dir: Path) -> tuple[bool, str | None, bool]:
+    """If the workspace HEAD moved, mark stale + update review-head metadata.
 
-    Returns (shifted, new_head). `shifted` is True only when we actually
-    migrated on this call.
+    Returns (shifted, new_head, changed). `shifted` is True only when comments
+    were marked stale on this call. `changed` is also True when stale session
+    metadata was repaired without a new HEAD shift.
     """
     s = load_session(session_dir)
     live = _git_head(s.workspace)
-    if not live or live == s.current_head:
-        return False, live
-    store.mark_stale(session_dir)
-    s.current_head = live
-    save_session(session_dir, s)
-    return True, live
+    if not live:
+        return False, live, False
+    shifted = live != s.current_head
+    try:
+        changed = retarget_review_head(s, live)
+    except RuntimeError:
+        return False, live, False
+    if shifted:
+        store.mark_stale(session_dir)
+    if changed:
+        save_session(session_dir, s)
+    return shifted, live, changed
 
 
 ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
@@ -267,7 +275,9 @@ class _Handler(BaseHTTPRequestHandler):
 
         session = load_session(session_dir)
         refresh_agent_statuses(session_dir, session)
-        shifted, _ = _auto_migrate_if_shifted(session_dir)
+        shifted, _, session_changed = _auto_migrate_if_shifted(session_dir)
+        if session_changed:
+            session = load_session(session_dir)
 
         if tail in ("/", ""):
             comments = store.read_all_comments(session_dir)

@@ -1040,25 +1040,25 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     session_dir = _get_session_dir(args)
     s = sess.load_session(session_dir)
 
-    new_head = args.new_head
-    if not new_head:
-        result = subprocess.run(
-            ["git", "-C", s.workspace, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            print(f"Error: git rev-parse failed: {result.stderr.strip()}", file=sys.stderr)
-            return 1
-        new_head = result.stdout.strip()
+    requested_head = args.new_head or "HEAD"
+    try:
+        new_head = sess.resolve_git_ref(s.workspace, requested_head)
+        head_changed = new_head != s.current_head
+        metadata_changed = sess.retarget_review_head(s, new_head)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
-    if new_head == s.current_head:
+    if not head_changed and not metadata_changed:
         print("HEAD unchanged, nothing to migrate")
         return 0
 
-    count = store.mark_stale(session_dir)
-    s.current_head = new_head
+    count = store.mark_stale(session_dir) if head_changed else 0
     sess.save_session(session_dir, s)
-    print(f"Migrated to {new_head[:12]}, marked {count} comments stale")
+    if head_changed:
+        print(f"Migrated to {new_head[:12]}, marked {count} comments stale")
+    else:
+        print(f"Repaired diff target for {new_head[:12]}")
     return 0
 
 

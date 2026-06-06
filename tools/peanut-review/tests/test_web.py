@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +94,32 @@ def _new_large_file_repo(tmp_path: Path, *, line_count: int) -> Path:
     ))
     _git(wd, "add", ".")
     _git(wd, "commit", "-q", "-m", "add generated")
+    return wd
+
+
+def _dense_large_file_repo(
+    tmp_path: Path,
+    *,
+    line_count: int,
+    change_every: int,
+) -> Path:
+    wd = tmp_path / "dense-large-file-repo"
+    wd.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(wd)], check=True)
+    subprocess.run(["git", "-C", str(wd), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wd), "config", "user.name", "t"], check=True)
+    base_lines = [
+        f"value_{i:04d} = {i}\n"
+        for i in range(1, line_count + 1)
+    ]
+    (wd / "dense.py").write_text("".join(base_lines))
+    _git(wd, "add", ".")
+    _git(wd, "commit", "-q", "-m", "base")
+    changed_lines = list(base_lines)
+    for i in range(change_every, line_count + 1, change_every):
+        changed_lines[i - 1] = f"value_{i:04d} = 'changed'\n"
+    (wd / "dense.py").write_text("".join(changed_lines))
+    _git(wd, "commit", "-q", "-am", "dense change")
     return wd
 
 
@@ -196,6 +223,37 @@ def test_render_page_folds_large_added_files(tmp_path: Path):
     assert "added lines hidden" in html
     assert html.count('class="line added"') < 150
     assert 'data-new-line="1"' in html
+
+
+def test_render_page_caps_dense_large_file_initial_rows(tmp_path: Path):
+    repo = _dense_large_file_repo(tmp_path, line_count=3000, change_every=5)
+    session_dir = _session_for_repo(tmp_path, repo)
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert "dense.py" in html
+    assert html.count('class="line ') < 500
+    assert 'data-fold-start-index=' in html
+    assert 'data-fold-end-index=' in html
+    assert 'class="fold-payload"' not in html
+    assert '<span class="hl-' not in html
+
+
+def test_render_page_keeps_comment_anchor_visible_in_large_file(tmp_path: Path):
+    repo = _dense_large_file_repo(tmp_path, line_count=3000, change_every=5)
+    session_dir = _session_for_repo(tmp_path, repo)
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    c = Comment(author="vera", file="dense.py", line=2500, body="late comment",
+                severity="warning")
+
+    html = render.render_page(s, s.id, files, [c], head_shifted=False)
+
+    assert "late comment" in html
+    assert "value_2500" in html
+    assert 'data-line="2500"' in html
 
 
 def test_render_page_keeps_comment_anchor_visible_when_context_folded(
@@ -768,6 +826,27 @@ def test_server_notes_endpoint_and_render(session_dir: Path):
         assert '<span class="ts mono">2020-01-01T00:00:00+00:00</span>' not in text
         assert "Test Execution" in text
         assert "llvm-lit" in text
+    finally:
+        srv.shutdown()
+
+
+def test_server_diff_fold_endpoint_returns_bounded_slice(tmp_path: Path):
+    repo = _dense_large_file_repo(tmp_path, line_count=3000, change_every=5)
+    session_dir = _session_for_repo(tmp_path, repo)
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        path = urllib.parse.quote("dense.py")
+        code, raw = _get(
+            f"http://127.0.0.1:{port}/{session_id}/api/diff/fold"
+            f"?file={path}&start=320&end=325"
+        )
+        assert code == 200
+        data = json.loads(raw)
+        assert data["file"] == "dense.py"
+        assert data["start"] == 320
+        assert data["end"] == 325
+        assert len(data["lines"]) == 5
+        assert {"kind", "old_lineno", "new_lineno", "content"} <= set(data["lines"][0])
     finally:
         srv.shutdown()
 

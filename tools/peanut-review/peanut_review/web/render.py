@@ -57,6 +57,16 @@ SESSION_STATE_LABELS = {
 DIFF_CONTEXT_LINES = 32
 FOLD_MIN_OMITTED_LINES = 8
 MAX_INITIAL_CHANGED_BLOCK_LINES = 100
+LARGE_FILE_LINE_THRESHOLD = 2_000
+LARGE_FILE_CHANGED_THRESHOLD = 1_500
+LARGE_FILE_CONTEXT_LINES = 8
+MAX_INITIAL_LARGE_FILE_LINES = 320
+MAX_HIGHLIGHT_FILE_LINES = 2_000
+MAX_HIGHLIGHT_CHANGED_LINES = 1_500
+MAX_HIGHLIGHT_RENDERED_LINES = 1_200
+MAX_HIGHLIGHT_RENDERED_BYTES = 200_000
+MAX_EMBEDDED_FOLD_LINES = 300
+MAX_EMBEDDED_FOLD_BYTES = 120_000
 
 
 def _relative_time_label(timestamp: str, *, now: datetime | None = None) -> str:
@@ -481,37 +491,133 @@ def _visible_line_ranges(
     if line_count == 0:
         return []
 
-    anchor_indices = _changed_anchor_indices(fd.lines)
+    changed_anchor_indices = _changed_anchor_indices(fd.lines)
+    anchor_indices = set(changed_anchor_indices)
+    comment_anchor_indices: set[int] = set()
     comment_lines = _thread_anchor_lines(fd.path, threads_at_line)
     if comment_lines:
         for idx, dl in enumerate(fd.lines):
             if dl.new_lineno in comment_lines:
+                comment_anchor_indices.add(idx)
                 anchor_indices.add(idx)
 
     if not anchor_indices:
         return [(0, line_count)]
 
-    windows = sorted(
-        (
-            max(0, idx - DIFF_CONTEXT_LINES),
-            min(line_count, idx + DIFF_CONTEXT_LINES + 1),
+    if _is_large_file_diff(fd):
+        return _large_file_visible_line_ranges(
+            line_count, changed_anchor_indices, comment_anchor_indices,
         )
-        for idx in anchor_indices
+
+    return _ranges_for_anchors(anchor_indices, line_count, DIFF_CONTEXT_LINES)
+
+
+def _is_large_file_diff(fd: FileDiff) -> bool:
+    return (
+        len(fd.lines) > LARGE_FILE_LINE_THRESHOLD
+        or fd.additions + fd.deletions > LARGE_FILE_CHANGED_THRESHOLD
     )
 
+
+def _range_line_count(ranges: list[tuple[int, int]]) -> int:
+    return sum(end - start for start, end in ranges)
+
+
+def _merge_ranges(
+    ranges: list[tuple[int, int]],
+    line_count: int,
+    *,
+    expand_edges: bool,
+) -> list[tuple[int, int]]:
+    if not ranges:
+        return []
+    ranges = sorted((max(0, s), min(line_count, e)) for s, e in ranges if s < e)
+    if not ranges:
+        return []
+
     merged: list[tuple[int, int]] = []
-    for start, end in windows:
+    for start, end in ranges:
         if not merged or start > merged[-1][1] + FOLD_MIN_OMITTED_LINES:
             merged.append((start, end))
             continue
         prev_start, prev_end = merged[-1]
         merged[-1] = (prev_start, max(prev_end, end))
 
-    if merged[0][0] <= FOLD_MIN_OMITTED_LINES:
+    if expand_edges and merged[0][0] <= FOLD_MIN_OMITTED_LINES:
         merged[0] = (0, merged[0][1])
-    if line_count - merged[-1][1] <= FOLD_MIN_OMITTED_LINES:
+    if expand_edges and line_count - merged[-1][1] <= FOLD_MIN_OMITTED_LINES:
         merged[-1] = (merged[-1][0], line_count)
     return merged
+
+
+def _truncate_ranges(
+    ranges: list[tuple[int, int]],
+    max_lines: int | None,
+) -> list[tuple[int, int]]:
+    if max_lines is None:
+        return ranges
+    remaining = max_lines
+    out: list[tuple[int, int]] = []
+    for start, end in ranges:
+        if remaining <= 0:
+            break
+        length = end - start
+        if length <= remaining:
+            out.append((start, end))
+            remaining -= length
+            continue
+        out.append((start, start + remaining))
+        break
+    return out
+
+
+def _ranges_for_anchors(
+    anchor_indices: set[int],
+    line_count: int,
+    context_lines: int,
+    *,
+    max_lines: int | None = None,
+    expand_edges: bool = True,
+) -> list[tuple[int, int]]:
+    windows: list[tuple[int, int]] = []
+    for idx in sorted(anchor_indices):
+        start = max(0, idx - context_lines)
+        end = min(line_count, idx + context_lines + 1)
+        if start < end:
+            windows.append((start, end))
+    ranges = _merge_ranges(windows, line_count, expand_edges=expand_edges)
+    return _truncate_ranges(ranges, max_lines)
+
+
+def _large_file_visible_line_ranges(
+    line_count: int,
+    changed_anchor_indices: set[int],
+    comment_anchor_indices: set[int],
+) -> list[tuple[int, int]]:
+    comment_ranges = _ranges_for_anchors(
+        comment_anchor_indices,
+        line_count,
+        DIFF_CONTEXT_LINES,
+        expand_edges=False,
+    )
+    remaining = max(
+        0, MAX_INITIAL_LARGE_FILE_LINES - _range_line_count(comment_ranges),
+    )
+    changed_ranges = _ranges_for_anchors(
+        changed_anchor_indices,
+        line_count,
+        LARGE_FILE_CONTEXT_LINES,
+        max_lines=remaining,
+        expand_edges=False,
+    )
+    ranges = _merge_ranges(
+        [*comment_ranges, *changed_ranges],
+        line_count,
+        expand_edges=False,
+    )
+    if ranges:
+        return ranges
+    return [(0, min(line_count, MAX_INITIAL_LARGE_FILE_LINES))]
 
 
 def _changed_anchor_indices(lines: list[DiffLine]) -> set[int]:
@@ -555,6 +661,13 @@ def _fold_payload_json(lines: list[DiffLine]) -> str:
     return json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
 
 
+def _should_embed_fold_payload(lines: list[DiffLine]) -> bool:
+    return (
+        len(lines) <= MAX_EMBEDDED_FOLD_LINES
+        and sum(len(dl.content) for dl in lines) <= MAX_EMBEDDED_FOLD_BYTES
+    )
+
+
 def _line_bounds(lines: list[int | None]) -> tuple[int | None, int | None]:
     nums = [n for n in lines if n is not None]
     if not nums:
@@ -562,7 +675,13 @@ def _line_bounds(lines: list[int | None]) -> tuple[int | None, int | None]:
     return nums[0], nums[-1]
 
 
-def _render_fold_gap(lines: list[DiffLine], fold_id: str) -> str:
+def _render_fold_gap(
+    lines: list[DiffLine],
+    fold_id: str,
+    *,
+    file_path: str,
+    start_index: int,
+) -> str:
     count = len(lines)
     if count == 0:
         return ""
@@ -587,15 +706,28 @@ def _render_fold_gap(lines: list[DiffLine], fold_id: str) -> str:
         title_parts.append(f"new {new_span}")
     title = html.escape(" | ".join(title_parts), quote=True)
     fold_id_html = html.escape(fold_id, quote=True)
+    file_html = html.escape(file_path, quote=True)
     label_html = html.escape(label)
-    data_attrs = [f'data-folded-lines="{count}"']
+    end_index = start_index + count
+    data_attrs = [
+        f'data-folded-lines="{count}"',
+        f'data-fold-file="{file_html}"',
+        f'data-fold-start-index="{start_index}"',
+        f'data-fold-end-index="{end_index}"',
+    ]
     if old_start is not None and old_end is not None:
         data_attrs.append(f'data-fold-old-start="{old_start}"')
         data_attrs.append(f'data-fold-old-end="{old_end}"')
     if new_start is not None and new_end is not None:
         data_attrs.append(f'data-fold-new-start="{new_start}"')
         data_attrs.append(f'data-fold-new-end="{new_end}"')
-    payload = _fold_payload_json(lines)
+    payload_html = ""
+    if _should_embed_fold_payload(lines):
+        payload = _fold_payload_json(lines)
+        payload_html = (
+            f'<script type="application/json" id="fold-data-{fold_id_html}" '
+            f'class="fold-payload">{payload}</script>'
+        )
     return (
         f'<div class="line fold-gap" {" ".join(data_attrs)} title="{title}">'
         '<span class="ln old fold-marker">...</span>'
@@ -606,8 +738,16 @@ def _render_fold_gap(lines: list[DiffLine], fold_id: str) -> str:
         f'<span class="fold-count">{label_html}</span>'
         '</span>'
         '</div>'
-        f'<script type="application/json" id="fold-data-{fold_id_html}" '
-        f'class="fold-payload">{payload}</script>'
+        f'{payload_html}'
+    )
+
+
+def _should_highlight_file(fd: FileDiff, final_contents: list[str]) -> bool:
+    return (
+        len(fd.lines) <= MAX_HIGHLIGHT_FILE_LINES
+        and fd.additions + fd.deletions <= MAX_HIGHLIGHT_CHANGED_LINES
+        and len(final_contents) <= MAX_HIGHLIGHT_RENDERED_LINES
+        and sum(len(line) for line in final_contents) <= MAX_HIGHLIGHT_RENDERED_BYTES
     )
 
 
@@ -635,7 +775,11 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
         for idx in visible_indices
         if fd.lines[idx].kind != "deleted"
     ]
-    hl = iter(_highlight_file(fd.path, final_contents))
+    hl = (
+        iter(_highlight_file(fd.path, final_contents))
+        if _should_highlight_file(fd, final_contents)
+        else iter([])
+    )
     rows = []
     rendered_until = 0
     fold_index = 0
@@ -644,6 +788,8 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
             rows.append(_render_fold_gap(
                 fd.lines[rendered_until:start],
                 f"{anchor}-fold-{fold_index}",
+                file_path=fd.path,
+                start_index=rendered_until,
             ))
             fold_index += 1
         for idx in range(start, end):
@@ -688,6 +834,8 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
         rows.append(_render_fold_gap(
             fd.lines[rendered_until:],
             f"{anchor}-fold-{fold_index}",
+            file_path=fd.path,
+            start_index=rendered_until,
         ))
 
     return (

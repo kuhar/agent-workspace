@@ -728,16 +728,26 @@
     return start === end ? String(start) : `${start}-${end}`;
   }
 
-  function foldLabel(count) {
-    return `${count} unchanged line${count === 1 ? "" : "s"} hidden`;
+  function foldLabel(count, kind = "unchanged") {
+    return `${count} ${kind} line${count === 1 ? "" : "s"} hidden`;
   }
 
-  function updateFoldGapMetadata(gap, lines) {
+  function updateFoldGapMetadata(gap, lines, { file = "", startIndex = null } = {}) {
     const count = lines.length;
-    const label = foldLabel(count);
+    const kinds = new Set(lines.map((line) => line.kind || "context"));
+    let kind = "diff";
+    if (kinds.size === 1 && kinds.has("context")) kind = "unchanged";
+    else if (kinds.size === 1 && kinds.has("added")) kind = "added";
+    else if (kinds.size === 1 && kinds.has("deleted")) kind = "deleted";
+    const label = foldLabel(count, kind);
     const [oldStart, oldEnd] = numberedBounds(lines, "old_lineno");
     const [newStart, newEnd] = numberedBounds(lines, "new_lineno");
     gap.dataset.foldedLines = String(count);
+    if (file) gap.dataset.foldFile = file;
+    if (Number.isInteger(startIndex)) {
+      gap.dataset.foldStartIndex = String(startIndex);
+      gap.dataset.foldEndIndex = String(startIndex + count);
+    }
     const attrs = [
       ["foldOldStart", oldStart],
       ["foldOldEnd", oldEnd],
@@ -758,7 +768,7 @@
     if (countEl) countEl.textContent = label;
   }
 
-  function createFoldGapNodes(foldId, lines) {
+  function createFoldGapBase(foldId) {
     const gap = document.createElement("div");
     gap.className = "line fold-gap";
 
@@ -784,7 +794,12 @@
 
     content.append(button, count);
     gap.append(oldMarker, newMarker, content);
-    updateFoldGapMetadata(gap, lines);
+    return gap;
+  }
+
+  function createFoldGapNodes(foldId, lines, options = {}) {
+    const gap = createFoldGapBase(foldId);
+    updateFoldGapMetadata(gap, lines, options);
 
     const payload = document.createElement("script");
     payload.type = "application/json";
@@ -794,11 +809,27 @@
     return [gap, payload];
   }
 
-  function appendFoldGap(fragment, baseId, label, lines) {
+  function appendFoldGap(fragment, baseId, label, lines, options = {}) {
     if (!lines.length) return;
     const foldId = `${baseId}-${label}-${dynamicFoldId++}`;
-    const [gap, payload] = createFoldGapNodes(foldId, lines);
+    const [gap, payload] = createFoldGapNodes(foldId, lines, options);
     fragment.append(gap, payload);
+  }
+
+  function appendLazyFoldGap(fragment, baseId, label, options) {
+    const start = Number(options.startIndex);
+    const end = Number(options.endIndex);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return;
+    const foldId = `${baseId}-${label}-${dynamicFoldId++}`;
+    const gap = createFoldGapBase(foldId);
+    gap.dataset.foldFile = options.file || "";
+    gap.dataset.foldStartIndex = String(start);
+    gap.dataset.foldEndIndex = String(end);
+    gap.dataset.foldedLines = String(end - start);
+    gap.title = foldLabel(end - start, "diff");
+    const countEl = gap.querySelector(".fold-count");
+    if (countEl) countEl.textContent = gap.title;
+    fragment.append(gap);
   }
 
   function chunkStartForFold(lines, lineNo) {
@@ -812,13 +843,93 @@
     );
   }
 
-  function expandFoldGap(gap, { lineNo = null } = {}) {
+  function foldIndex(gap, name) {
+    const value = Number(gap?.dataset?.[name]);
+    return Number.isInteger(value) ? value : null;
+  }
+
+  function foldFile(gap) {
+    return gap?.dataset?.foldFile || gap?.closest(".file")?.dataset?.file || "";
+  }
+
+  async function fetchFoldLines(gap, start, end) {
+    const file = foldFile(gap);
+    if (!file) throw new Error("fold is missing file metadata");
+    const params = new URLSearchParams({
+      file,
+      start: String(start),
+      end: String(end),
+    });
+    return api("GET", `/api/diff/fold?${params.toString()}`);
+  }
+
+  async function expandLazyFoldGap(gap, { lineNo = null } = {}) {
+    const start = foldIndex(gap, "foldStartIndex");
+    const end = foldIndex(gap, "foldEndIndex");
+    if (start == null || end == null || end <= start) return false;
+    const button = gap.querySelector("[data-fold-expand]");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Loading";
+    }
+
+    let fetchStart = start;
+    const newStart = Number(gap.dataset.foldNewStart);
+    const newEnd = Number(gap.dataset.foldNewEnd);
+    if (lineNo != null && Number.isFinite(newStart) && Number.isFinite(newEnd)) {
+      const lo = Math.min(newStart, newEnd);
+      const hi = Math.max(newStart, newEnd);
+      if (lineNo >= lo && lineNo <= hi) {
+        const approxOffset = Math.max(0, Math.min(lineNo - lo, end - start));
+        fetchStart = Math.max(
+          start,
+          Math.min(
+            start + approxOffset - Math.floor(MAX_FOLD_EXPAND_LINES / 2),
+            Math.max(start, end - MAX_FOLD_EXPAND_LINES),
+          ),
+        );
+      }
+    }
+    const fetchEnd = Math.min(end, fetchStart + MAX_FOLD_EXPAND_LINES);
+    const data = await fetchFoldLines(gap, fetchStart, fetchEnd);
+    const lines = data.lines || [];
+    const baseId = gap.querySelector("[data-fold-expand]")?.dataset.foldExpand || "fold";
+    const frag = document.createDocumentFragment();
+    appendLazyFoldGap(frag, baseId, "before", {
+      file: foldFile(gap),
+      startIndex: start,
+      endIndex: fetchStart,
+    });
+    for (const line of lines) frag.appendChild(renderExpandedFoldLine(line));
+    appendLazyFoldGap(frag, baseId, "after", {
+      file: foldFile(gap),
+      startIndex: fetchStart + lines.length,
+      endIndex: end,
+    });
+    gap.before(frag);
+    gap.remove();
+    updateStickyOffsets();
+    return true;
+  }
+
+  function expandFoldGap(gap, { lineNo = null, allowFetch = true } = {}) {
     if (!gap) return false;
     const btn = gap.querySelector("[data-fold-expand]");
     const foldId = btn && btn.dataset.foldExpand;
     if (!foldId) return false;
     const payload = document.getElementById(`fold-data-${foldId}`);
-    if (!payload) return false;
+    if (!payload) {
+      if (!allowFetch) return false;
+      expandLazyFoldGap(gap, { lineNo }).catch((e) => {
+        const retry = gap.querySelector("[data-fold-expand]");
+        if (retry) {
+          retry.disabled = false;
+          retry.textContent = "Expand";
+        }
+        alert("Could not load folded lines: " + e.message);
+      });
+      return true;
+    }
     let lines;
     try {
       lines = JSON.parse(payload.textContent || "[]");
@@ -831,9 +942,17 @@
     const chunk = lines.slice(chunkStart, chunkEnd);
     const after = lines.slice(chunkEnd);
     const frag = document.createDocumentFragment();
-    appendFoldGap(frag, foldId, "before", before);
+    const file = foldFile(gap);
+    const startIndex = foldIndex(gap, "foldStartIndex") || 0;
+    appendFoldGap(frag, foldId, "before", before, {
+      file,
+      startIndex,
+    });
     for (const line of chunk) frag.appendChild(renderExpandedFoldLine(line));
-    appendFoldGap(frag, foldId, "after", after);
+    appendFoldGap(frag, foldId, "after", after, {
+      file,
+      startIndex: startIndex + chunkEnd,
+    });
     gap.before(frag);
     payload.remove();
     gap.remove();
@@ -847,7 +966,7 @@
       const end = Number(gap.dataset.foldNewEnd);
       if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
       if (lineNo >= Math.min(start, end) && lineNo <= Math.max(start, end)) {
-        return expandFoldGap(gap, { lineNo });
+        return expandFoldGap(gap, { lineNo, allowFetch: false });
       }
     }
     return false;

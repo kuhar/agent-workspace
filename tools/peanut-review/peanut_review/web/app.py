@@ -196,6 +196,7 @@ ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
 RESERVED_ROOTS = {"api"}
 VALID_SEVERITIES = {s.value for s in Severity}
 VALID_CATEGORIES = {c.value for c in CommentCategory}
+MAX_DIFF_FOLD_FETCH_LINES = 200
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -375,6 +376,10 @@ class _Handler(BaseHTTPRequestHandler):
                 since=(q.get("since", [None])[0]),
             )
             self._json(200, [_note_to_dict(n) for n in notes])
+            return
+
+        if tail == "/api/diff/fold":
+            self._get_diff_fold(session_dir, url.query)
             return
 
         if tail == "/api/gh/preview":
@@ -654,6 +659,36 @@ class _Handler(BaseHTTPRequestHandler):
             "total": plan.total,
         })
 
+    def _get_diff_fold(self, session_dir: Path, query: str) -> None:
+        q = parse_qs(query)
+        file_path = q.get("file", [""])[0]
+        if not file_path:
+            return self._error(400, "missing file")
+        try:
+            start = int(q.get("start", ["0"])[0])
+            end = int(q.get("end", [str(start + MAX_DIFF_FOLD_FETCH_LINES)])[0])
+        except ValueError:
+            return self._error(400, "start/end must be integers")
+        if start < 0 or end < start:
+            return self._error(400, "invalid start/end range")
+
+        end = min(end, start + MAX_DIFF_FOLD_FETCH_LINES)
+        s = load_session(session_dir)
+        files = diffmod.parse_diff(repo_path(s), s.base_ref, s.topic_ref)
+        fd = next((f for f in files if f.path == file_path), None)
+        if fd is None:
+            return self._error(404, f"diff file not found: {file_path}")
+
+        end = min(end, len(fd.lines))
+        lines = fd.lines[start:end] if start < len(fd.lines) else []
+        self._json(200, {
+            "file": fd.path,
+            "start": start,
+            "end": start + len(lines),
+            "total": len(fd.lines),
+            "lines": [_diff_line_to_dict(dl) for dl in lines],
+        })
+
     def _post_gh_push(self, session_dir: Path, data: dict) -> None:
         """Execute the push. Re-plans server-side from current store so the
         result reflects the actual state at confirmation time, not the
@@ -767,6 +802,15 @@ def _comment_to_dict(c: Comment) -> dict:
         "external_source": c.external_source,
         "external_id": c.external_id,
         "external_url": c.external_url,
+    }
+
+
+def _diff_line_to_dict(dl: diffmod.DiffLine) -> dict:
+    return {
+        "kind": dl.kind,
+        "old_lineno": dl.old_lineno,
+        "new_lineno": dl.new_lineno,
+        "content": dl.content,
     }
 
 

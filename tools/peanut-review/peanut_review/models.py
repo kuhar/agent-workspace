@@ -188,7 +188,7 @@ class AgentConfig:
     pgid: int | None = None
     supervisor_pid: int | None = None
     # Backend runner: "cursor" (cursor-agent), "opencode" (opencode run),
-    # or "codex" (codex exec).
+    # "codex" (codex exec), or "claude" (claude -p).
     runner: str = "cursor"
 
     def to_dict(self) -> dict:

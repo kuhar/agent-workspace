@@ -81,12 +81,13 @@ or repo:
   "reviewAgentTimeoutSeconds": 1200,
   "agents": [
     {"name": "Vera", "model": "gpt-5.5", "persona": "vera.md", "runner": "codex"},
-    {"name": "Irene", "model": "claude-opus-4-7-thinking-medium", "persona": "irene.md", "runner": "cursor"}
+    {"name": "Irene", "model": "claude-opus-4-7-thinking-medium", "persona": "irene.md", "runner": "cursor"},
+    {"name": "Soren", "model": "opus", "persona": "soren.md", "runner": "claude"}
   ]
 }
 ```
 
-Supported runners: `cursor`, `opencode`, `codex`.
+Supported runners: `cursor`, `opencode`, `codex`, `claude`.
 
 Cursor runners need permissions in the reviewed workspace before `launch`:
 
@@ -95,6 +96,13 @@ mkdir -p "$WORKSPACE/.cursor"
 cp "$PEANUT_REVIEW_DIR/peanut_review/templates/cli.sample.json" \
   "$WORKSPACE/.cursor/cli.json"
 ```
+
+The `claude` runner runs `claude -p` headlessly with
+`--dangerously-skip-permissions` (no human is present to approve tool calls)
+and needs no per-workspace permission file. Its `--model` accepts a Claude
+alias (`opus`, `sonnet`, `haiku`) or a full model id; omit it to use claude's
+configured default. Authentication reuses the machine's existing `claude`
+login (`~/.claude`) or `$ANTHROPIC_API_KEY`.
 
 ## Flow: GitHub PR
 

@@ -90,11 +90,19 @@ def test_find_launcher_script_codex():
     assert Path(path).exists()
 
 
+def test_find_launcher_script_claude():
+    path = launch._find_launcher_script("claude")
+    assert path.endswith("claude-agent-task.sh")
+    assert Path(path).parent.name == "runners"
+    assert "ask-the-peanut-gallery" not in path
+    assert Path(path).exists()
+
+
 def test_find_launcher_script_rejects_unknown_runner():
     try:
-        launch._find_launcher_script("claude")
+        launch._find_launcher_script("gemini")
     except ValueError as e:
-        assert "claude" in str(e)
+        assert "gemini" in str(e)
     else:
         raise AssertionError("expected ValueError for unknown runner")
 
@@ -209,6 +217,24 @@ def test_launch_dry_run_codex_agent_cmd():
     assert "--sandbox" in cmd and "danger-full-access" in cmd
     assert "--add-dir" in cmd
     assert sd in cmd
+
+
+def test_launch_dry_run_claude_agent_cmd():
+    sd = _make_session_dir([
+        AgentConfig(name="iris", model="opus", persona="vera.md", runner="claude"),
+    ])
+    results = launch.launch_agents(sd, dry_run=True)
+    assert len(results) == 1
+    cmd = results[0]["cmd"]
+    assert cmd[0].endswith("claude-agent-task.sh")
+    assert "--model" in cmd and "opus" in cmd
+    # Claude reviewers need the out-of-workspace session dir and /tmp granted as
+    # accessible directories (agents write comment bodies under /tmp).
+    assert "--add-dir" in cmd
+    assert sd in cmd
+    assert "/tmp" in cmd
+    # Sandbox is a codex-only concept — claude must not get that flag.
+    assert "--sandbox" not in cmd
 
 
 def test_launch_uses_python_supervisor_for_non_dry_run():
@@ -428,8 +454,9 @@ def test_runner_wrappers_exec_without_shell_timeout():
     cursor = (base / "cursor-agent-task.sh").read_text()
     opencode = (base / "opencode-agent-task.sh").read_text()
     codex = (base / "codex-agent-task.sh").read_text()
+    claude = (base / "claude-agent-task.sh").read_text()
 
-    for text in (cursor, opencode, codex):
+    for text in (cursor, opencode, codex, claude):
         assert '\ntimeout "$timeout_secs"' not in text
 
     assert "exec cursor-agent --print" in cursor
@@ -439,6 +466,11 @@ def test_runner_wrappers_exec_without_shell_timeout():
     assert 'exec "${cmd[@]}" > "$output_file"' in opencode
     assert 'exec "${cmd[@]}" > "$stream_file"' in codex
     assert 'agent: (if $agent == "" then null else $agent end)' in opencode
+    # Claude feeds the prompt on stdin (dodging variadic --add-dir) and runs
+    # fully non-interactively.
+    assert 'exec "${cmd[@]}" > "$output_file" <<<"$prompt"' in claude
+    assert "--dangerously-skip-permissions" in claude
+    assert "--output-format text" in claude
 
 
 def test_agents_use_cli_prompt_template():

@@ -11,7 +11,7 @@ from typing import Any, Sequence
 from . import runtime, session as sess
 
 
-SUPPORTED_RUNNERS = {"cursor", "opencode", "codex"}
+SUPPORTED_RUNNERS = {"cursor", "opencode", "codex", "claude"}
 DEFAULT_KILL_GRACE_SECONDS = 5.0
 
 

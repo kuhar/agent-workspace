@@ -216,14 +216,12 @@ case "$HARNESS" in
         CODEX_HAS_CD=false
         CODEX_HAS_SANDBOX_OVERRIDE=false
         CODEX_HAS_APPROVAL_OVERRIDE=false
-        CODEX_AIRGAP_UNSAFE_OVERRIDE=false
         CODEX_AIRGAP_WEB_TOOL_OVERRIDE=false
         CODEX_EXPECTS_SANDBOX_VALUE=false
         CODEX_EXPECTS_ENABLE_VALUE=false
         CODEX_EXPECTS_CONFIG_VALUE=false
         for arg in "${HARNESS_ARGS[@]}"; do
             if $CODEX_EXPECTS_SANDBOX_VALUE; then
-                [[ "$arg" == "danger-full-access" ]] && CODEX_AIRGAP_UNSAFE_OVERRIDE=true
                 CODEX_EXPECTS_SANDBOX_VALUE=false
                 continue
             fi
@@ -263,7 +261,6 @@ case "$HARNESS" in
                     ;;
                 --sandbox=*)
                     CODEX_HAS_SANDBOX_OVERRIDE=true
-                    [[ "${arg#*=}" == "danger-full-access" ]] && CODEX_AIRGAP_UNSAFE_OVERRIDE=true
                     ;;
                 --full-auto)
                     CODEX_HAS_SANDBOX_OVERRIDE=true
@@ -271,15 +268,10 @@ case "$HARNESS" in
                     ;;
                 --dangerously-bypass-approvals-and-sandbox)
                     CODEX_HAS_SANDBOX_OVERRIDE=true
-                    CODEX_AIRGAP_UNSAFE_OVERRIDE=true
                     ;;
                 --ask-for-approval|--ask-for-approval=*|-a) CODEX_HAS_APPROVAL_OVERRIDE=true ;;
             esac
         done
-        if $AIRGAP && $CODEX_AIRGAP_UNSAFE_OVERRIDE; then
-            echo "Error: codex airgap mode needs Codex's command sandbox; remove danger-full-access/bypass overrides." >&2
-            exit 1
-        fi
         if $AIRGAP && $CODEX_AIRGAP_WEB_TOOL_OVERRIDE; then
             echo "Error: codex airgap mode disables Codex web/search/browser tools; remove --search or blocked feature overrides." >&2
             exit 1
@@ -293,7 +285,7 @@ case "$HARNESS" in
                 CODEX_ARGS+=(--disable "$feature")
             done
             if ! $CODEX_HAS_SANDBOX_OVERRIDE; then
-                CODEX_ARGS+=(--sandbox workspace-write)
+                CODEX_ARGS+=(--sandbox danger-full-access)
             fi
             if ! $CODEX_HAS_APPROVAL_OVERRIDE; then
                 CODEX_ARGS+=(--ask-for-approval never)
@@ -320,7 +312,11 @@ else
 fi
 if $AIRGAP; then
     if [[ "$HARNESS" == "codex" ]]; then
-        echo "  Network: enabled for codex control plane; Codex web tools disabled; shell commands use Codex sandbox"
+        if $CODEX_HAS_SANDBOX_OVERRIDE; then
+            echo "  Network: enabled for codex control plane; Codex web tools disabled; shell commands use caller-provided Codex sandbox"
+        else
+            echo "  Network: enabled for codex control plane and shell commands; Codex web tools disabled; filesystem/devices rely on bwrap"
+        fi
     else
         echo "  Network: disabled"
     fi
@@ -438,9 +434,8 @@ BWRAP_ARGS=(
 )
 
 add_bind_if_exists --ro-bind /opt /opt
-# Codex needs network for its control plane. In airgap mode, keep the parent
-# Codex process online, disable native web tools, and rely on Codex's command
-# sandbox for shell commands.
+# Codex needs network for its control plane. In airgap mode, keep Codex in the
+# outer bwrap sandbox only so ROCm runtime dispatch can open GPU device nodes.
 if $AIRGAP && [[ "$HARNESS" != "codex" ]]; then
     BWRAP_ARGS+=(--unshare-net --tmpfs /tmp)
 else
@@ -463,7 +458,8 @@ for path in \
     "$HOME/.profile" \
     "$HOME/.rustup" \
     "$HOME/.tmux" \
-    "$HOME/go"; do
+    "$HOME/go" \
+    "$HOME/new-the-rock" ; do
     add_bind_if_exists --ro-bind "$path" "$path"
 done
 

@@ -1764,13 +1764,19 @@
   }
 
   function renderNewItem(it) {
-    return `<li class="push-item" data-id="${esc(it.id)}">`
+    const cls = it.promoted_to_global ? "push-item promoted" : "push-item";
+    const ref = it.promoted_to_global ? (it.original_ref || it.ref) : it.ref;
+    const promoted = it.promoted_to_global
+      ? `<span class="warn">promote to global (${esc(it.promotion_reason || "invalid anchor")})</span>`
+      : "";
+    return `<li class="${cls}" data-id="${esc(it.id)}">`
       + `<div class="push-meta">`
       +   renderIncludeControl(it, "new")
       +   `<span class="mono">${esc(it.id)}</span>`
       +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
       +   categoryBadge(it)
-      +   `<span class="ref mono">${esc(it.ref)}</span>`
+      +   `<span class="ref mono">${esc(ref)}</span>`
+      +   promoted
       +   `<span class="muted">by ${esc(it.author || "unknown")}</span>`
       +   renderPushActions(it)
       + `</div>`
@@ -1779,7 +1785,9 @@
   }
   function renderReplyItem(it) {
     let tag;
-    if (it.orphaned) {
+    if (it.parent_promoted_to_global) {
+      tag = `<span class="warn">skipped (parent promoted to global)</span>`;
+    } else if (it.orphaned) {
       tag = `<span class="warn">orphaned (parent not pushed)</span>`;
     } else if (it.parent_pending) {
       tag = `<span class="muted">→ local parent</span>`;
@@ -1852,6 +1860,11 @@
       }
       if (plan.skipped_imported_reviews) {
         html += `<p class="muted">Skipping ${plan.skipped_imported_reviews} imported review${plan.skipped_imported_reviews === 1 ? "" : "s"} (already backed by GitHub review objects).</p>`;
+      }
+      if (plan.anchor_validation_error) {
+        html += `<p class="warn">Anchor validation skipped: ${esc(plan.anchor_validation_error)}</p>`;
+      } else if (plan.promoted) {
+        html += `<p class="warn">${plan.promoted} comment${plan.promoted === 1 ? "" : "s"} outside the GitHub review diff will be promoted to global.</p>`;
       }
       if (orphans) {
         html += `<p class="warn">${orphans} repl${orphans === 1 ? "y is" : "ies are"} orphaned and will be skipped.</p>`;

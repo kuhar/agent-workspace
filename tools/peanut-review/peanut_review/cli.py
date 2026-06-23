@@ -711,7 +711,10 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
     s, ghpr = pair
 
     comments = store.read_all_comments(session_dir)
-    plan = _gh_push.plan_push(comments)
+    anchor_index = _gh_push.build_review_anchor_index(
+        sess.repo_path(s), s.base_ref, s.topic_ref,
+    )
+    plan = _gh_push.plan_push(comments, anchor_index=anchor_index)
 
     if plan.total == 0:
         suffixes = []
@@ -724,12 +727,27 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
         return 0
 
     if args.dry_run:
+        if plan.anchor_validation_error:
+            print(
+                "[dry-run] anchor validation skipped: "
+                f"{plan.anchor_validation_error}"
+            )
         for c in plan.new_top:
-            kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
+            promotion = plan.promoted_anchors.get(c.id)
+            if promotion is not None:
+                kind = f"global (from {promotion.ref})"
+            else:
+                kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
             print(f"[dry-run] {c.id} ({c.severity}, {c.category}) → {kind}")
         for c in plan.new_replies:
-            parent_ext = plan.ext_map.get(c.reply_to)
-            tag = f"reply→gh#{parent_ext}" if parent_ext else "reply→<parent not pushed>"
+            if c.reply_to in plan.promoted_anchors:
+                tag = "reply→<parent promoted to global>"
+            else:
+                parent_ext = plan.ext_map.get(c.reply_to)
+                tag = (
+                    f"reply→gh#{parent_ext}"
+                    if parent_ext else "reply→<parent not pushed>"
+                )
             print(f"[dry-run] {c.id} → {tag}")
         for c in plan.edits:
             print(f"[dry-run] {c.id} EDIT → gh#{c.external_id}")

@@ -1004,6 +1004,50 @@ def test_server_gh_preview_defaults_humans_on_agents_off(session_dir: Path):
         srv.shutdown()
 
 
+def test_server_gh_preview_marks_unreviewable_anchor_for_global_promotion(
+    tmp_path: Path,
+):
+    repo = _long_repo(tmp_path, line_count=160, changed_line=120)
+    sd = tmp_path / "sess"
+    sess.create_session(
+        workspace=str(repo),
+        base_ref="main~1",
+        topic_ref="main",
+        agents=[{"name": "felix", "model": "m", "persona": "felix.md"}],
+        session_dir=str(sd),
+    )
+    _mark_github_backed(sd)
+    parent = Comment(
+        author="jakub", file="long.py", line=5, body="far from hunk",
+        severity="warning",
+    )
+    reply = Comment(
+        author="jakub", file="long.py", line=5, body="reply",
+        reply_to=parent.id,
+    )
+    store.append_comment(sd, parent)
+    store.append_comment(sd, reply)
+
+    srv, session_id, port = _start_server(sd)
+    try:
+        code, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/gh/preview")
+        assert code == 200
+        data = json.loads(raw)
+        item = data["new_top"][0]
+        reply_item = data["new_replies"][0]
+
+        assert data["promoted"] == 1
+        assert item["id"] == parent.id
+        assert item["promoted_to_global"] is True
+        assert item["original_ref"] == "long.py:5"
+        assert item["ref"] == "global"
+        assert item["body"].startswith("Original anchor: `long.py:5`")
+        assert reply_item["parent_promoted_to_global"] is True
+        assert reply_item["orphaned"] is True
+    finally:
+        srv.shutdown()
+
+
 def test_server_gh_push_filters_to_selected_comment_ids(
     session_dir: Path,
     monkeypatch,

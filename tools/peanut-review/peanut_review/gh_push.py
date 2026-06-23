@@ -11,13 +11,54 @@ Two phases so the UI can preview before committing:
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+import re
+import subprocess
 
 from . import gh, models, session as sess, store
 
 
 DEFAULT_REVIEW_BODY = "A few comments"
+DEFAULT_DIFF_CONTEXT = 3
+
+
+@dataclass(frozen=True)
+class AnchorPromotion:
+    """A local inline anchor that cannot be submitted as a GitHub review item."""
+
+    comment_id: str
+    original_file: str
+    original_line: int
+    original_end_line: int | None = None
+    reason: str = "outside GitHub review diff"
+
+    @property
+    def ref(self) -> str:
+        if self.original_end_line and self.original_end_line != self.original_line:
+            lo, hi = sorted((self.original_line, self.original_end_line))
+            return f"{self.original_file}:{lo}-{hi}"
+        return f"{self.original_file}:{self.original_line}"
+
+
+@dataclass(frozen=True)
+class ReviewAnchorIndex:
+    """New-side lines that GitHub can accept as review-comment anchors."""
+
+    lines_by_path: dict[str, set[int]]
+    error: str | None = None
+
+    def can_anchor(self, c: models.Comment) -> bool:
+        if self.error is not None:
+            return True
+        if c.file == sess.GLOBAL_FILE:
+            return True
+        lines = self.lines_by_path.get(c.file)
+        if lines is None:
+            return False
+        end = c.end_line if c.end_line is not None else c.line
+        lo, hi = (c.line, end) if c.line <= end else (end, c.line)
+        return all(line in lines for line in range(lo, hi + 1))
 
 
 @dataclass
@@ -27,6 +68,8 @@ class PushPlan:
     edits: list[models.Comment] = field(default_factory=list)
     skipped_meta: int = 0
     skipped_imported_reviews: int = 0
+    anchor_validation_error: str | None = None
+    promoted_anchors: dict[str, AnchorPromotion] = field(default_factory=dict)
     # local_id → external_id, seeded from already-pushed comments.
     ext_map: dict[str, str] = field(default_factory=dict)
 
@@ -50,11 +93,14 @@ class PushResult:
     pushed: int = 0
     failed: int = 0
     orphaned: int = 0
+    promoted: int = 0
     skipped_meta: int = 0
     skipped_imported_reviews: int = 0
 
     def summary(self) -> str:
         parts = [f"Pushed {self.pushed}"]
+        if self.promoted:
+            parts.append(f"promoted {self.promoted} to global")
         if self.failed:
             parts.append(f"failed {self.failed}")
         if self.orphaned:
@@ -66,7 +112,97 @@ class PushResult:
         return ", ".join(parts) + "."
 
 
-def plan_push(comments: list[models.Comment]) -> PushPlan:
+_HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def build_review_anchor_index(
+    repo_path: str | Path,
+    base_ref: str,
+    topic_ref: str,
+    *,
+    context: int = DEFAULT_DIFF_CONTEXT,
+) -> ReviewAnchorIndex:
+    """Build the GitHub-style new-side review-anchor line set.
+
+    The main renderer intentionally uses full-file context so humans can see
+    local comments anywhere in a changed file. GitHub review comments are more
+    restrictive: anchors must land on new-side lines that appear in the review
+    diff hunk. Use a normal unified diff here so planning catches those anchors
+    before the create-review API rejects the batch.
+    """
+    result = subprocess.run(
+        [
+            "git", "-C", str(repo_path),
+            "diff", f"-U{context}", "--no-color",
+            f"{base_ref}...{topic_ref}",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        if not detail:
+            detail = f"git diff exited {result.returncode}"
+        return ReviewAnchorIndex({}, error=detail)
+
+    lines_by_path: dict[str, set[int]] = {}
+    current_path: str | None = None
+    new_ln = 0
+    for line in result.stdout.splitlines():
+        if line.startswith("diff --git"):
+            current_path = None
+            continue
+        if line.startswith("--- "):
+            continue
+        if line.startswith("+++ "):
+            raw_path = line[4:].strip()
+            if raw_path == "/dev/null":
+                current_path = None
+                continue
+            current_path = raw_path[2:] if raw_path.startswith("b/") else raw_path
+            lines_by_path.setdefault(current_path, set())
+            continue
+        if line.startswith("@@"):
+            m = _HUNK_RE.match(line)
+            if m:
+                new_ln = int(m.group(1))
+            continue
+        if current_path is None:
+            continue
+        if line.startswith("\\"):
+            continue
+        if line.startswith("+"):
+            lines_by_path[current_path].add(new_ln)
+            new_ln += 1
+        elif line.startswith("-"):
+            continue
+        else:
+            lines_by_path[current_path].add(new_ln)
+            new_ln += 1
+
+    return ReviewAnchorIndex(lines_by_path)
+
+
+def _promoted_body(c: models.Comment, promotion: AnchorPromotion) -> str:
+    body = c.body.strip()
+    prefix = f"Original anchor: `{promotion.ref}`"
+    return f"{prefix}\n\n{body}" if body else prefix
+
+
+def _promote_comment(c: models.Comment, promotion: AnchorPromotion) -> models.Comment:
+    return replace(
+        c,
+        file=sess.GLOBAL_FILE,
+        line=0,
+        end_line=None,
+        body=_promoted_body(c, promotion),
+    )
+
+
+def plan_push(
+    comments: list[models.Comment],
+    *,
+    anchor_index: ReviewAnchorIndex | None = None,
+) -> PushPlan:
     """Classify live comments into push buckets.
 
     - external_id is None → new (top-level or reply by reply_to)
@@ -77,6 +213,8 @@ def plan_push(comments: list[models.Comment]) -> PushPlan:
       GitHub review object exists
     """
     plan = PushPlan()
+    if anchor_index is not None:
+        plan.anchor_validation_error = anchor_index.error
     for c in comments:
         c.category = models.normalize_comment_category(c.category)
         if c.deleted:
@@ -91,6 +229,20 @@ def plan_push(comments: list[models.Comment]) -> PushPlan:
             plan.skipped_meta += 1
             continue
         if c.external_id is None:
+            if (
+                anchor_index is not None
+                and not c.reply_to
+                and c.file != sess.GLOBAL_FILE
+                and not anchor_index.can_anchor(c)
+            ):
+                promotion = AnchorPromotion(
+                    comment_id=c.id,
+                    original_file=c.file,
+                    original_line=c.line,
+                    original_end_line=c.end_line,
+                )
+                plan.promoted_anchors[c.id] = promotion
+                c = _promote_comment(c, promotion)
             (plan.new_replies if c.reply_to else plan.new_top).append(c)
         elif c.body != (c.external_synced_body or ""):
             plan.edits.append(c)
@@ -109,6 +261,12 @@ def filter_plan(plan: PushPlan, comment_ids: set[str]) -> PushPlan:
         edits=[c for c in plan.edits if c.id in comment_ids],
         skipped_meta=plan.skipped_meta,
         skipped_imported_reviews=plan.skipped_imported_reviews,
+        anchor_validation_error=plan.anchor_validation_error,
+        promoted_anchors={
+            cid: promotion
+            for cid, promotion in plan.promoted_anchors.items()
+            if cid in comment_ids
+        },
         ext_map=dict(plan.ext_map),
     )
 
@@ -292,6 +450,8 @@ def execute_push(
                         external_id=review_id, external_url=review_url,
                     ))
                     result.pushed += 1
+                    if c.id in plan.promoted_anchors:
+                        result.promoted += 1
                     continue
 
                 raw = created_inline.get(c.id)
@@ -319,6 +479,13 @@ def execute_push(
                 result.pushed += 1
 
     for c in plan.new_replies:
+        if c.reply_to in plan.promoted_anchors:
+            result.items.append(PushItemResult(
+                id=c.id, action="reply",
+                error="parent promoted to global; replies cannot be pushed",
+            ))
+            result.orphaned += 1
+            continue
         parent_ext = ext_map.get(c.reply_to or "")
         if not parent_ext:
             result.items.append(PushItemResult(

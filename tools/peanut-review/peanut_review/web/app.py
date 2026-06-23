@@ -596,10 +596,14 @@ class _Handler(BaseHTTPRequestHandler):
         if s.github is None:
             return self._error(400, "session is not GitHub-backed")
         comments = store.read_all_comments(session_dir)
-        plan = gh_push.plan_push(comments)
+        anchor_index = gh_push.build_review_anchor_index(
+            repo_path(s), s.base_ref, s.topic_ref,
+        )
+        plan = gh_push.plan_push(comments, anchor_index=anchor_index)
         by_id = {c.id: c for c in comments}
         agent_authors = _agent_authors(s)
         new_top_ids = {c.id for c in plan.new_top}
+        promoted_ids = set(plan.promoted_anchors)
         default_push_ids = _default_selected_push_ids(plan, agent_authors)
 
         def _ref(c: Comment) -> str:
@@ -614,17 +618,28 @@ class _Handler(BaseHTTPRequestHandler):
                 "default_included": c.id in default_push_ids,
             }
 
-        new_top = [{
-            "id": c.id, "author": c.author, "severity": c.severity,
-            "category": c.category,
-            "ref": _ref(c), "body": c.body,
-            **_item_defaults(c),
-        } for c in plan.new_top]
+        new_top = []
+        for c in plan.new_top:
+            promotion = plan.promoted_anchors.get(c.id)
+            item = {
+                "id": c.id, "author": c.author, "severity": c.severity,
+                "category": c.category,
+                "ref": _ref(c), "body": c.body,
+                **_item_defaults(c),
+            }
+            if promotion is not None:
+                item.update({
+                    "promoted_to_global": True,
+                    "original_ref": promotion.ref,
+                    "promotion_reason": promotion.reason,
+                })
+            new_top.append(item)
         new_replies = []
         for c in plan.new_replies:
             parent = by_id.get(c.reply_to or "")
             parent_ext = plan.ext_map.get(c.reply_to or "")
-            parent_pending = c.reply_to in new_top_ids
+            parent_promoted = c.reply_to in promoted_ids
+            parent_pending = c.reply_to in new_top_ids and not parent_promoted
             orphaned = parent_ext is None and not parent_pending
             new_replies.append({
                 "id": c.id, "author": c.author,
@@ -632,6 +647,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "parent_id": c.reply_to,
                 "parent_external_id": parent_ext,
                 "parent_pending": parent_pending,
+                "parent_promoted_to_global": parent_promoted,
                 "orphaned": orphaned,
                 "body": c.body,
                 **_item_defaults(c),
@@ -656,6 +672,8 @@ class _Handler(BaseHTTPRequestHandler):
             "edits": edits,
             "skipped_meta": plan.skipped_meta,
             "skipped_imported_reviews": plan.skipped_imported_reviews,
+            "anchor_validation_error": plan.anchor_validation_error,
+            "promoted": len(plan.promoted_anchors),
             "total": plan.total,
         })
 
@@ -697,7 +715,10 @@ class _Handler(BaseHTTPRequestHandler):
         if s.github is None:
             return self._error(400, "session is not GitHub-backed")
         comments = store.read_all_comments(session_dir)
-        plan = gh_push.plan_push(comments)
+        anchor_index = gh_push.build_review_anchor_index(
+            repo_path(s), s.base_ref, s.topic_ref,
+        )
+        plan = gh_push.plan_push(comments, anchor_index=anchor_index)
         try:
             selected_ids = _selected_push_ids(data)
         except ValueError as e:
@@ -719,6 +740,7 @@ class _Handler(BaseHTTPRequestHandler):
             "pushed": result.pushed,
             "failed": result.failed,
             "orphaned": result.orphaned,
+            "promoted": result.promoted,
             "skipped_meta": result.skipped_meta,
             "skipped_imported_reviews": result.skipped_imported_reviews,
             "items": [

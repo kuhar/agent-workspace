@@ -10,6 +10,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import tempfile
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -611,6 +612,50 @@ def _make_gh_session(tmp_path: Path) -> str:
     return str(sd)
 
 
+def _make_gh_git_session(tmp_path: Path) -> str:
+    """Build a GitHub-backed session whose diff has a narrow review hunk."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    src = repo / "src"
+    src.mkdir()
+    lines = [f"value_{i:02d} = {i}\n" for i in range(1, 81)]
+    (src / "x.py").write_text("".join(lines))
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+    base = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    lines[39] = "value_40 = 'changed'\n"
+    (src / "x.py").write_text("".join(lines))
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "topic"], check=True)
+    head = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+
+    sd = tmp_path / "sess"
+    (sd / "comments").mkdir(parents=True)
+    (sd / "signals").mkdir()
+    s = models.Session(
+        id="acme-foo-pr-42",
+        workspace=str(repo),
+        base_ref=base,
+        topic_ref=head,
+        original_head=head,
+        current_head=head,
+        github=models.GitHubPR(
+            repo="acme/foo", number=42, url="u",
+            head_sha=head, base_sha=base, title="t",
+        ),
+    )
+    sess.save_session(sd, s)
+    return str(sd)
+
+
 def _review_post_fixture(review_id: int = 300) -> dict:
     return {
         "match": ["api", "repos/acme/foo/pulls/42/reviews", "-X", "POST"],
@@ -733,6 +778,36 @@ def test_gh_push_concats_global_comments_and_deletes_individuals(gh_shim, tmp_pa
     comments = store.read_all_comments(sd)
     assert [c.deleted for c in comments] == [True, True]
     assert gh_push.plan_push(comments).total == 0
+
+
+def test_gh_push_promotes_unreviewable_anchor_to_global(gh_shim, tmp_path):
+    sd = _make_gh_git_session(tmp_path)
+    store.append_comment(sd, models.Comment(
+        author="vera", file="src/x.py", line=1, body="far from the hunk",
+        severity="warning",
+    ))
+
+    gh_shim.set_fixtures([_review_post_fixture(300)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = main(["--session", sd, "gh-push"])
+    assert rc == 0
+    assert "promoted 1 to global" in out.getvalue()
+
+    [call] = gh_shim.calls()
+    payload = json.loads(call["stdin"])
+    assert payload == {
+        "event": "COMMENT",
+        "body": "Original anchor: `src/x.py:1`\n\nfar from the hunk",
+    }
+
+    [stored] = store.read_all_comments(sd)
+    assert stored.deleted is True
+    assert stored.deleted_by == "github-push"
+    assert stored.external_source == "github-review"
+    assert stored.external_id == "300"
+    assert stored.external_synced_body == payload["body"]
 
 
 def test_gh_push_global_approval_posts_pr_review(gh_shim, tmp_path):

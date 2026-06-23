@@ -117,6 +117,11 @@ def test_launch_uses_workspace_root_for_cursor_and_nested_repo_for_prompt(tmp_pa
     workspace = tmp_path / "review"
     repo = workspace / "rocm-systems"
     repo.mkdir(parents=True)
+    (workspace / "build").mkdir()
+    (workspace / "build" / "compile_commands.json").write_text("[]\n")
+    (workspace / "build-clang-asan").mkdir()
+    (workspace / "venv").mkdir()
+    (workspace / "compile_commands.json").symlink_to(workspace / "build" / "compile_commands.json")
     _write_cursor_config(workspace)
     sd = _make_session_dir(
         [AgentConfig(name="vera", model="opus", persona="vera.md")],
@@ -133,7 +138,14 @@ def test_launch_uses_workspace_root_for_cursor_and_nested_repo_for_prompt(tmp_pa
     rendered = (Path(sd) / "prompts" / "vera.md").read_text()
     assert f"Workspace: `{workspace}`" in rendered
     assert f"Repository: `{repo}`" in rendered
-    assert f"cd {repo} && git diff" in rendered
+    assert "Workspace is the runner/build/tool root" in rendered
+    assert "Do not assume `build/` is inside Repository" in rendered
+    assert f"- `{workspace / 'build'}`" in rendered
+    assert f"- `{workspace / 'build-clang-asan'}`" in rendered
+    assert f"Compilation database: `{workspace / 'compile_commands.json'}` -> `{workspace / 'build' / 'compile_commands.json'}`" in rendered
+    assert f"Python venv: `{workspace / 'venv'}`" in rendered
+    assert f"git -C {repo} diff" in rendered
+    assert f"cd {repo}" not in rendered
 
 
 def test_launch_dry_run_opencode_agent_cmd():

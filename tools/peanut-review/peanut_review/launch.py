@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -47,6 +48,82 @@ def render_prompt(template_path: str | Path, variables: dict[str, str]) -> str:
     return Template(text).safe_substitute(variables)
 
 
+def _format_workspace_layout(workspace: str, repo: str, repo_relative: str) -> str:
+    workspace_path = Path(workspace)
+    repo_path = Path(repo)
+    try:
+        nested_repo = workspace_path.resolve() != repo_path.resolve()
+    except OSError:
+        nested_repo = workspace_path != repo_path
+
+    if not nested_repo:
+        return "Workspace and Repository are the same path; shell commands start there."
+
+    rel = repo_relative or str(repo_path)
+    return "\n".join([
+        "Workspace and Repository are different:",
+        "- Workspace is the runner/build/tool root; shell commands start there.",
+        f"- Repository is the Git/source root under `{rel}`; use `git -C` for Git commands there.",
+        "- Do not assume `build/` is inside Repository; wrapper-level build dirs are under Workspace.",
+    ])
+
+
+def _format_workspace_artifacts(workspace: str) -> str:
+    workspace_path = Path(workspace)
+    lines: list[str] = []
+
+    try:
+        children = sorted(workspace_path.iterdir(), key=lambda p: p.name)
+    except OSError:
+        children = []
+
+    build_dirs = [
+        child
+        for child in children
+        if child.is_dir() and (child.name == "build" or child.name.startswith("build-"))
+    ]
+    if build_dirs:
+        lines.append("Detected build dirs under Workspace:")
+        for build_dir in build_dirs[:8]:
+            lines.append(f"- `{build_dir}`")
+        if len(build_dirs) > 8:
+            lines.append(f"- ... {len(build_dirs) - 8} more")
+
+    compile_commands = workspace_path / "compile_commands.json"
+    if compile_commands.exists():
+        try:
+            resolved = compile_commands.resolve()
+        except OSError:
+            resolved = compile_commands
+        if resolved != compile_commands:
+            lines.append(f"Compilation database: `{compile_commands}` -> `{resolved}`")
+        else:
+            lines.append(f"Compilation database: `{compile_commands}`")
+
+    venv = workspace_path / "venv"
+    if venv.is_dir():
+        lines.append(f"Python venv: `{venv}`")
+
+    if not lines:
+        return (
+            "No build dirs were detected directly under Workspace. "
+            "If you need a build, search from Workspace before assuming an in-source build."
+        )
+    return "\n".join(lines)
+
+
+def _format_git_commands(repo: str, commands: Sequence[str]) -> str:
+    rendered: list[str] = []
+    repo_arg = shlex.quote(repo)
+    for command in commands:
+        stripped = command.strip()
+        if stripped.startswith("git "):
+            rendered.append(f"git -C {repo_arg} {stripped[len('git '):]}")
+        else:
+            rendered.append(stripped)
+    return " && ".join(rendered)
+
+
 def _resolve_template(user_template: str | Path | None, runner: str) -> str:
     """Pick the prompt template for a given runner.
 
@@ -88,9 +165,16 @@ def render_all_prompts(
             "WORKSPACE": session.workspace,
             "REPO_PATH": repo,
             "REPO_RELATIVE": session.repo_relative or ".",
+            "WORKSPACE_LAYOUT": _format_workspace_layout(
+                session.workspace,
+                repo,
+                session.repo_relative or ".",
+            ),
+            "WORKSPACE_ARTIFACTS": _format_workspace_artifacts(session.workspace),
             "AGENT": agent.name,
             "PERSONA": agent.persona,
             "DIFF_COMMANDS": " && ".join(session.diff_commands),
+            "GIT_DIFF_COMMANDS": _format_git_commands(repo, session.diff_commands),
             "BASE_REF": session.base_ref,
             "TOPIC_REF": session.topic_ref,
             "PR_BIN": pr_bin,

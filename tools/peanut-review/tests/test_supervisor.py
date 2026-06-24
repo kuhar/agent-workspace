@@ -134,6 +134,31 @@ def test_supervisor_records_cursor_runtime_metadata(tmp_path):
     assert "mcp_config" not in meta
 
 
+def test_supervisor_detects_claude_runner_from_wrapper_name(tmp_path):
+    sd = _make_session_dir()
+    script = _script(
+        tmp_path,
+        "claude-agent-task.sh",
+        f"""
+        mkdir -p "{sd}/log/vera" "{sd}/signals"
+        date -Iseconds > "{sd}/signals/vera.round-done"
+        exec sh -c 'exit 0'
+        """,
+    )
+
+    rc = supervise_agent(
+        session_dir=sd,
+        agent_name="vera",
+        command=[script],
+        timeout=5,
+        kill_grace=0.1,
+    )
+
+    assert rc == 0
+    meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
+    assert meta["runner"] == "claude"
+
+
 def test_supervisor_records_shell_style_termination_signal(tmp_path):
     sd = _make_session_dir()
     script = _script(

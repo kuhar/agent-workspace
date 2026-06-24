@@ -51,6 +51,8 @@ def _runner_from_command(command: list[str]) -> str | None:
         return "opencode"
     if name == "codex-agent-task.sh":
         return "codex"
+    if name == "claude-agent-task.sh":
+        return "claude"
     return None
 
 

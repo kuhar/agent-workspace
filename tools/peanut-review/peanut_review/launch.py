@@ -25,6 +25,7 @@ _LAUNCHER_SCRIPTS = {
     "cursor": "cursor-agent-task.sh",
     "opencode": "opencode-agent-task.sh",
     "codex": "codex-agent-task.sh",
+    "claude": "claude-agent-task.sh",
 }
 
 
@@ -325,6 +326,14 @@ def _build_agent_cmd(
         # shell commands, so use the unrestricted sandbox for this runner.
         cmd += [
             "--sandbox", "danger-full-access",
+            "--add-dir", str(session_dir),
+            "--add-dir", "/tmp",
+        ]
+    elif agent.runner == "claude":
+        # Claude Code runs in cwd (set by the supervisor) and gates its file
+        # tools by directory. The session dir lives outside the workspace and
+        # agents write comment bodies under /tmp, so grant access to both.
+        cmd += [
             "--add-dir", str(session_dir),
             "--add-dir", "/tmp",
         ]

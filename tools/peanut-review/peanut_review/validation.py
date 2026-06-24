@@ -10,7 +10,7 @@ from typing import Any, Iterable, Sequence
 from .models import AgentConfig
 
 
-SUPPORTED_RUNNERS = {"cursor", "opencode", "codex"}
+SUPPORTED_RUNNERS = {"cursor", "opencode", "codex", "claude"}
 AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 

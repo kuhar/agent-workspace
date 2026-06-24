@@ -61,9 +61,10 @@ def test_kill_agents_dry_run_targets_all_supported_runners(monkeypatch):
         {"name": "vera", "model": "m", "persona": "vera.md", "runner": "cursor"},
         {"name": "petra", "model": "m", "persona": "petra.md", "runner": "opencode"},
         {"name": "cleo", "model": "m", "persona": "cleo.md", "runner": "codex"},
+        {"name": "iris", "model": "m", "persona": "iris.md", "runner": "claude"},
     ])
-    runners = {"vera": "cursor", "petra": "opencode", "cleo": "codex"}
-    for offset, name in enumerate(["vera", "petra", "cleo"], start=1):
+    runners = {"vera": "cursor", "petra": "opencode", "cleo": "codex", "iris": "claude"}
+    for offset, name in enumerate(["vera", "petra", "cleo", "iris"], start=1):
         _record_runtime(
             sd,
             name,
@@ -85,9 +86,9 @@ def test_kill_agents_dry_run_targets_all_supported_runners(monkeypatch):
 
     results = agent_control.kill_agents(sd, dry_run=True)
 
-    assert [r["name"] for r in results] == ["vera", "petra", "cleo"]
-    assert {r["runner"] for r in results} == {"cursor", "opencode", "codex"}
-    assert [r["status"] for r in results] == ["dry-run", "dry-run", "dry-run"]
+    assert [r["name"] for r in results] == ["vera", "petra", "cleo", "iris"]
+    assert {r["runner"] for r in results} == {"cursor", "opencode", "codex", "claude"}
+    assert [r["status"] for r in results] == ["dry-run", "dry-run", "dry-run", "dry-run"]
     assert all(r["signals"][0]["target"] == "pgid" for r in results)
     assert all(r["signals"][0]["signal"] == "SIGTERM" for r in results)
 

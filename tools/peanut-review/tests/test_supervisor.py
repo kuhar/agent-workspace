@@ -74,6 +74,70 @@ def test_supervisor_records_done_when_signal_exists(tmp_path):
     assert loaded.agents[0].supervisor_pid == os.getpid()
 
 
+def test_supervisor_stops_process_after_round_done_signal(tmp_path):
+    sd = _make_session_dir()
+    script = _script(
+        tmp_path,
+        "wait_after_done.sh",
+        f"""
+        mkdir -p "{sd}/signals"
+        date -Iseconds > "{sd}/signals/vera.round-done"
+        sleep 30
+        """,
+    )
+
+    rc = supervise_agent(
+        session_dir=sd,
+        agent_name="vera",
+        command=[script],
+        timeout=5,
+        kill_grace=0.1,
+        round_done_grace=0.1,
+        round_done_poll_interval=0.05,
+    )
+
+    assert rc != 0
+    meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
+    assert meta["timed_out"] is False
+    assert meta["round_done_observed"] is True
+    assert meta["stopped_after_round_done"] is True
+    assert meta["process_state"] == "stopped"
+    assert meta["termination_signal"] in {"SIGTERM", "SIGKILL"}
+    loaded = sess.load_session(sd)
+    assert loaded.agents[0].status == "done"
+
+
+def test_supervisor_ignores_stale_round_done_signal(tmp_path):
+    sd = _make_session_dir()
+    signals = Path(sd) / "signals"
+    signals.mkdir(exist_ok=True)
+    (signals / "vera.round-done").write_text("stale\n")
+    script = _script(
+        tmp_path,
+        "ignore_stale_done.sh",
+        """
+        sleep 30
+        """,
+    )
+
+    rc = supervise_agent(
+        session_dir=sd,
+        agent_name="vera",
+        command=[script],
+        timeout=0.2,
+        kill_grace=0.1,
+        round_done_grace=0.1,
+        round_done_poll_interval=0.05,
+    )
+
+    assert rc != 0
+    meta = json.loads((Path(sd) / "log" / "vera" / "meta.json").read_text())
+    assert meta["timed_out"] is True
+    assert meta["round_done_observed"] is False
+    assert meta["stopped_after_round_done"] is False
+    assert meta["process_state"] == "timeout"
+
+
 def test_supervisor_records_failed_without_signal(tmp_path):
     sd = _make_session_dir()
     script = _script(

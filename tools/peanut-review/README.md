@@ -41,8 +41,8 @@ GitHub PR orchestration:
 Set up peanut-review for <PR URL> under <review-root>. Use the existing
 .peanut-review.json, confirm the exact reviewer lineup and runner/model choices
 before launching, and start with --no-launch so I can build/test the checkout.
-After reviewers signal round-done, kill agents and help me curate feedback for
-the web UI push flow.
+After reviewers signal round-done, help me curate feedback for the web UI push
+flow.
 ```
 
 Local author-owned review:
@@ -122,7 +122,6 @@ SESSION=<printed-session-path>
 "$PR_BIN" --session "$SESSION" launch --dry-run
 "$PR_BIN" --session "$SESSION" launch
 "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
-"$PR_BIN" --session "$SESSION" kill-agents
 ```
 
 Curate in the web UI, then use the UI's GitHub push modal when ready:
@@ -168,7 +167,7 @@ COMMENT_ID=c_1234abcd
 
 "$PR_BIN" --session "$SESSION" resolve "$COMMENT_ID"
 "$PR_BIN" --session "$SESSION" migrate
-"$PR_BIN" --session "$SESSION" signal-all next-round
+"$PR_BIN" --session "$SESSION" rerun --agent Vera --agent Irene
 "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
 "$PR_BIN" --session "$SESSION" verdict --approve --body "All critical issues addressed"
 ```
@@ -187,12 +186,12 @@ gh pr co "$PR"
 "$PR_BIN" --session "$SESSION" comments --since "$LAST_COMMENT_ID"
 ```
 
-Relaunch agents only for substantial changes:
+Rerun agents only for substantial changes. Use `rerun`, not `launch`, so stale
+round signals are cleared before the selected reviewers start:
 
 ```bash
-"$PR_BIN" --session "$SESSION" launch
+"$PR_BIN" --session "$SESSION" rerun --agent Vera --agent Irene
 "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
-"$PR_BIN" --session "$SESSION" kill-agents
 ```
 
 ## Common Commands

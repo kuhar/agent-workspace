@@ -62,7 +62,39 @@ View the diff you are reviewing:
 ${GIT_DIFF_COMMANDS}
 ```
 
-# Round 1 — Review the diff
+# Review pass
+
+Start by checking whether this is an initial pass or a later rebuttal pass:
+
+```
+${PR_BIN} --session ${SESSION} comments --format json
+```
+
+If there are no prior actionable review comments for this session, review the
+target diff normally.
+
+If the orchestrator reran you after fixes or rebuttals, read all prior context
+before forming opinions:
+
+1. **All prior comments** (yours and other reviewers').
+2. **Orchestrator decisions** — comments resolved by the orchestrator were
+   applied; replies on prior comments are the orchestrator's rebuttals for
+   findings they chose not to fix.
+3. **Fix diff** (what the orchestrator changed in response to prior findings):
+   `git -C ${REPO_PATH} log --oneline -5` to find the fix commit, then
+   `git -C ${REPO_PATH} diff <original-head>..<fix-commit>` to see the actual fixes.
+
+For each rebutted finding, assess whether you agree with the rebuttal. If you
+disagree, post a reply to the original comment so the discussion stays threaded:
+
+```
+${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
+    --severity <...> --body "Why the rebuttal doesn't hold: ..."
+```
+
+`<c_id>` is the original comment ID. The reply inherits its file/line from
+the parent. For brand-new findings in the fix diff, use a regular
+`add-comment` or `add-global-comment`.
 
 IMPORTANT: `--line <N>` is the line number in the SOURCE FILE, not the diff
 output. Diff output shows lines like `@@ -10,5 +12,7 @@` and prefixes lines
@@ -105,11 +137,6 @@ will command-substitute them and silently eat the content. Use `--body-file`
 instead: write the body to a temp file with your Write tool, then pass the
 path. Example: `--body-file /tmp/c42.md` instead of `--body "…\`foo\`…"`.
 
-When done with all findings, signal completion:
-```
-${PR_BIN} --session ${SESSION} signal round-done
-```
-
 For non-review activity such as tests you ran, commands that failed without
 blocking review, or assumptions you made, use `note` instead of a comment:
 ```
@@ -117,49 +144,23 @@ ${PR_BIN} --session ${SESSION} note --message "Ran targeted tests; passed."
 ${PR_BIN} --session ${SESSION} note --file /tmp/test-report.md
 ```
 
-# Wait for the next round
-
-```
-${PR_BIN} --session ${SESSION} wait next-round --timeout 600
-```
-
-# Round 2 — Post-triage rebuttal
-
-Read ALL prior context before forming opinions:
-
-1. **All prior comments** (yours and other reviewers'):
-   `${PR_BIN} --session ${SESSION} comments --format json`
-
-2. **Orchestrator decisions** — comments resolved by the orchestrator were
-   applied; replies on Round 1 comments are the orchestrator's rebuttals
-   for findings they chose not to fix.
-
-3. **Fix diff** (what the orchestrator changed in response to Round 1):
-   `git -C ${REPO_PATH} log --oneline -5` to find the fix commit, then
-   `git -C ${REPO_PATH} diff <original-head>..<fix-commit>` to see the actual fixes.
-
-Now assess: for each rebutted finding, do you agree with the rebuttal? If
-you disagree, post a Round 2 comment as a **reply** to the original Round 1
-comment so the discussion stays threaded:
-
-```
-${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
-    --severity <...> --body "Why the rebuttal doesn't hold: ..."
-```
-
-`<c_id>` is the original Round 1 comment ID. The reply inherits its
-file/line from the parent. For brand-new findings you spot in the fix diff
-(not tied to a Round 1 comment), use a regular `add-comment` or
-`add-global-comment`.
-
-Then signal: `${PR_BIN} --session ${SESSION} signal round-done`
-
 # Test execution (mandatory)
 
 Run relevant tests and report:
 ```
 ${PR_BIN} --session ${SESSION} note --message "## Test Execution: <what you ran and results>"
 ```
+
+# Finish this pass
+
+When done with findings and notes, signal completion and exit immediately:
+
+```
+${PR_BIN} --session ${SESSION} signal round-done
+```
+
+Do not wait for another round. If another pass is needed, the orchestrator will
+relaunch you with `peanut-review rerun`.
 
 # If blocked
 

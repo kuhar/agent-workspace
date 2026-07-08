@@ -79,8 +79,8 @@ Mode-specific checklist:
 
 - [ ] GitHub PR: prefer `start --no-launch`, build/test, then `launch`, unless
       the user says the checkout is already built.
-- [ ] GitHub PR: after all reviewers signal `round-done`, run `kill-agents`
-      before curating feedback.
+- [ ] GitHub PR: after all reviewers signal `round-done`, proceed to curation;
+      use `kill-agents` only for stale live processes or explicit aborts.
 - [ ] GitHub PR: curate feedback; do not fix code, resolve imported GitHub
       threads, or force rebuttal loops unless the user asks.
 - [ ] Local review: own the patch; apply fixes, `migrate`, run rebuttal passes,
@@ -168,13 +168,11 @@ approve/request-changes decision back to GitHub.
 2. Build/test the checkout with the project workflow. If reviewers need
    non-obvious tool paths, record them in a session note before launch.
 
-3. Launch reviewers, wait for the first pass, then stop idle reviewer
-   processes:
+3. Launch reviewers and wait for the first pass:
 
    ```bash
    "$PR_BIN" --session "$SESSION" launch
    "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
-   "$PR_BIN" --session "$SESSION" kill-agents
    ```
 
 4. Curate findings. Delete duplicate/noisy local comments with `delete <c_id>`.
@@ -207,8 +205,8 @@ approve/request-changes decision back to GitHub.
    ```
 
 After author updates, refresh the checkout with the project PR-update flow,
-then run `gh-pull` and `migrate`. Launch a fresh reviewer pass only for
-substantial updates or a human request.
+then run `gh-pull` and `migrate`. Rerun reviewers only for substantial updates
+or a human request.
 
 ```bash
 "$PR_BIN" --session "$SESSION" gh-pull
@@ -247,10 +245,10 @@ Use this when the orchestrator can modify the patch under review.
    "$PR_BIN" --session "$SESSION" migrate
    ```
 
-5. Run a rebuttal pass:
+5. Run a rebuttal pass by rerunning selected reviewers:
 
    ```bash
-   "$PR_BIN" --session "$SESSION" signal-all next-round
+   "$PR_BIN" --session "$SESSION" rerun --agent Vera --agent Irene
    "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 600
    "$PR_BIN" --session "$SESSION" comments --since "$LAST_COMMENT_ID"
    ```
@@ -269,7 +267,7 @@ Use this when the orchestrator can modify the patch under review.
 ## Shared Review Mechanics
 
 After any launch, monitor, answer questions, rerun failed reviewers, and stop
-processes through the CLI:
+stale processes through the CLI:
 
 ```bash
 "$PR_BIN" --session "$SESSION" status
@@ -287,9 +285,10 @@ Use `status` for a compact view, but treat signal files, comments, inbox, logs,
 and live processes as the real health checks. `process=...` is supervisor-owned
 runtime state; `review=done` means the agent posted `round-done`.
 
-After all reviewers signal `round-done`, agents may still be live waiting for a
-possible next round. For GitHub PR reviews, run `kill-agents` immediately. For
-local reviews, keep them alive only when you are about to send `next-round`.
+Current reviewer prompts tell agents to signal `round-done` and exit. The
+supervisor should stop a lingering process shortly after observing that signal.
+Use `kill-agents` only when `status` shows stale live processes, a launch needs
+to be aborted, or the user explicitly asks.
 
 ## Reviewer Selection
 

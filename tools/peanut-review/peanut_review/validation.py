@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .models import AgentConfig
+from .models import AgentConfig, AgentRole
 
 
 SUPPORTED_RUNNERS = {"cursor", "opencode", "codex"}
@@ -71,8 +71,23 @@ def _validate_agent_configs(
                 errors.append(f"duplicate agent name: {name}")
             seen.add(name)
 
+        role = agent.get("role", AgentRole.REVIEWER.value)
+        valid_roles = {role.value for role in AgentRole}
+        if not isinstance(role, str) or not role.strip():
+            errors.append(f"{label}.role must be a non-empty string")
+        elif role not in valid_roles:
+            errors.append(
+                f"{label}.role {role!r} is unsupported "
+                f"(expected one of {', '.join(sorted(valid_roles))})"
+            )
+
         _as_non_empty_string(agent.get("model"), f"{label}.model", errors)
-        persona = _as_non_empty_string(agent.get("persona"), f"{label}.persona", errors)
+        persona_raw = agent.get("persona")
+        persona = ""
+        if role == AgentRole.CURATOR.value and not persona_raw:
+            pass
+        else:
+            persona = _as_non_empty_string(persona_raw, f"{label}.persona", errors)
         if persona:
             persona_path = Path(persona)
             if persona_path.is_absolute() or ".." in persona_path.parts:

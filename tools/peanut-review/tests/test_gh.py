@@ -446,6 +446,10 @@ def test_init_with_gh_pr_stamps_metadata_and_uses_pr_shas(gh_shim, tmp_path):
         "--session", sd, "init",
         "--workspace", ws,
         "--gh-pr", "acme/foo#42",
+        "--agents", json.dumps([
+            {"name": "vera", "model": "opus", "persona": "vera.md"},
+            {"name": "Curator", "model": "gpt-5.5-high", "role": "curator"},
+        ]),
     ])
     assert rc == 0
 
@@ -459,6 +463,9 @@ def test_init_with_gh_pr_stamps_metadata_and_uses_pr_shas(gh_shim, tmp_path):
     assert s.github.head_ref_name == "feature/add-it"
     assert s.base_ref == base   # defaulted from PR
     assert s.topic_ref == head  # defaulted from PR
+    assert [(a.name, a.model, a.role) for a in sess.curator_agents(s)] == [
+        ("Curator", "gpt-5.5-high", "curator"),
+    ]
 
 
 def test_init_id_overrides_auto_default(gh_shim, tmp_path):
@@ -483,6 +490,10 @@ def test_init_id_overrides_auto_default(gh_shim, tmp_path):
         "--session", sd, "init",
         "--workspace", ws,
         "--gh-pr", "acme/foo#42",
+        "--agents", json.dumps([
+            {"name": "vera", "model": "opus", "persona": "vera.md"},
+            {"name": "Curator", "model": "gpt-5.5-high", "role": "curator"},
+        ]),
         "--id", "my-review",
     ])
     assert rc == 0
@@ -524,6 +535,10 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
         "agents": [
             {"name": "vera", "model": "opus", "persona": "vera.md"},
             {"name": "irene", "model": "gpt", "persona": "irene.md", "runner": "opencode"},
+            {
+                "name": "Curator", "model": "gpt-5.5-high",
+                "role": "curator",
+            },
         ],
     }))
 
@@ -578,8 +593,11 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
     assert s.github is not None
     assert s.github.repo == "acme/foo"
     assert s.github.number == 42
-    assert [a.name for a in s.agents] == ["vera", "irene"]
+    assert [a.name for a in sess.reviewer_agents(s)] == ["vera", "irene"]
     assert s.agents[1].runner == "opencode"
+    assert [(a.name, a.role, a.model, a.runner) for a in sess.curator_agents(s)] == [
+        ("Curator", "curator", "gpt-5.5-high", "cursor"),
+    ]
 
     comments = {c.external_id: c for c in store.read_all_comments(sd)}
     assert set(comments) == {"100", "200"}
@@ -588,6 +606,26 @@ def test_start_from_project_config_with_bare_pr_number(gh_shim, tmp_path):
     assert comments["100"].line == 2
     assert comments["200"].author == "gh:ghost"
     assert comments["200"].file == ""
+
+
+def test_start_requires_curator_agent_in_project_config(tmp_path):
+    _stage_workspace(tmp_path)
+    config_path = tmp_path / ".peanut-review.json"
+    config_path.write_text(json.dumps({
+        "reviewRoot": str(tmp_path / "reviews"),
+        "workspaceRoot": str(tmp_path),
+        "repoRelative": "ws",
+        "agents": [
+            {"name": "vera", "model": "opus", "persona": "vera.md"},
+        ],
+    }))
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["start", "42", "--config", str(config_path), "--no-launch"])
+
+    assert rc == 1
+    assert "curator agent is not configured" in err.getvalue()
 
 
 # ---------------- gh-push ----------------

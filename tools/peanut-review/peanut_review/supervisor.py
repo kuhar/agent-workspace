@@ -11,13 +11,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import runtime
+from . import curator, runtime
 from .models import AgentStatus
-from .session import update_agent_status
+from .session import _session_lock, load_session, update_agent_status
 
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 ROUND_DONE_POLL_INTERVAL_SECONDS = 1.0
 ROUND_DONE_GRACE_SECONDS = 5.0
+CURATOR_AUTO_LAUNCH_EVENT = "auto-launching"
 
 
 def _now_iso() -> str:
@@ -83,6 +84,10 @@ def _round_done_signal_mtime_ns(session_dir: Path, agent_name: str) -> int | Non
         return None
 
 
+def _curator_auto_launch_marker(session_dir: Path, curator_name: str) -> Path:
+    return session_dir / "signals" / f"{curator_name}.{CURATOR_AUTO_LAUNCH_EVENT}"
+
+
 def _has_new_round_done_signal(
     session_dir: Path,
     agent_name: str,
@@ -133,6 +138,78 @@ def _final_status(session_dir: str | Path, agent_name: str) -> str:
         if agent.name == agent_name:
             return runtime.derive_agent_status(session_dir, agent)
     return AgentStatus.FAILED.value
+
+
+def _maybe_auto_launch_curator(session_dir: Path, agent_name: str) -> None:
+    """Start the configured curator once all GitHub reviewers are round-done."""
+    marker: Path | None = None
+    with _session_lock(session_dir):
+        session = load_session(session_dir)
+        if session.github is None:
+            return
+
+        current = next((a for a in session.agents if a.name == agent_name), None)
+        if current is None or curator.is_curator(current):
+            return
+
+        curators = curator.curators(session.agents)
+        if not curators:
+            runtime.update_agent_meta(
+                session_dir,
+                agent_name,
+                {
+                    "curator_auto_launch_error": (
+                        "curator agent is not configured"
+                    ),
+                    "curator_auto_launch_checked_at": _now_iso(),
+                },
+            )
+            return
+        curator_agent = curators[0]
+        if _round_done_signal_mtime_ns(session_dir, curator_agent.name) is not None:
+            return
+
+        reviewers = curator.reviewers(session.agents)
+        if not reviewers:
+            return
+        if not all(
+            _round_done_signal_mtime_ns(session_dir, reviewer.name) is not None
+            for reviewer in reviewers
+        ):
+            return
+
+        marker = _curator_auto_launch_marker(session_dir, curator_agent.name)
+        if marker.exists():
+            return
+        marker.write_text(f"{_now_iso()} {os.getpid()} {agent_name}\n")
+
+    from . import launch
+
+    try:
+        launch.launch_curator(session_dir)
+    except Exception as e:  # pragma: no cover - defensive runtime reporting.
+        if marker is not None:
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
+        runtime.update_agent_meta(
+            session_dir,
+            agent_name,
+            {
+                "curator_auto_launch_error": str(e),
+                "curator_auto_launch_checked_at": _now_iso(),
+            },
+        )
+    else:
+        runtime.update_agent_meta(
+            session_dir,
+            agent_name,
+            {
+                "curator_auto_launch": "started",
+                "curator_auto_launch_checked_at": _now_iso(),
+            },
+        )
 
 
 def _postprocess_codex_output(session_dir: str | Path, agent_name: str) -> None:
@@ -373,6 +450,7 @@ def supervise_agent(
         pgid=pgid,
         supervisor_pid=os.getpid(),
     )
+    _maybe_auto_launch_curator(sdir, agent_name)
     return return_code
 
 

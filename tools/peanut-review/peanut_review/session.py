@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import AgentConfig, AgentStatus, GitHubPR, Session, SessionState, _now_iso
+from . import curator
 
 META_FILE = "__meta__"
 # Sentinel for "high-level / global" comments not tied to any file or line.
@@ -122,6 +123,7 @@ def create_session(
     session_dir: str | None = None,
     session_id: str | None = None,
     github: GitHubPR | None = None,
+    include_curator: bool = False,
 ) -> tuple[Session, str]:
     """Create a new review session directory and session.json. Returns (session, session_dir).
 
@@ -165,6 +167,8 @@ def create_session(
     if agents:
         for a in agents:
             agent_configs.append(AgentConfig.from_dict(a))
+    if include_curator:
+        curator.ensure_curator_agent(agent_configs)
 
     session = Session(
         id=sid,
@@ -185,6 +189,18 @@ def create_session(
 
     save_session(sdir, session)
     return session, str(sdir)
+
+
+def reviewer_agents(session: Session) -> list[AgentConfig]:
+    return curator.reviewers(session.agents)
+
+
+def curator_agents(session: Session) -> list[AgentConfig]:
+    return curator.curators(session.agents)
+
+
+def ensure_curator(session: Session) -> AgentConfig:
+    return curator.ensure_curator_agent(session.agents)
 
 
 def save_session(session_dir: str | Path, session: Session) -> None:

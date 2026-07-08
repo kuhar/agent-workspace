@@ -8,8 +8,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from peanut_review import launch
-from peanut_review.models import AgentConfig
+from peanut_review.models import AgentConfig, AgentRole, Comment
 
 
 def _mock_git(workspace, *args):
@@ -193,6 +195,38 @@ def test_launch_dry_run_can_target_single_agent():
     assert not (Path(sd) / "prompts" / "vera.md").exists()
 
 
+def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_path):
+    workspace = _workspace_with_cursor_config(tmp_path)
+    sd = _make_session_dir([
+        AgentConfig(name="vera", model="opus", persona="vera.md"),
+        AgentConfig(
+            name="Curator", model="opus",
+            role=AgentRole.CURATOR.value,
+        ),
+    ], workspace=workspace)
+
+    reviewer_results = launch.launch_agents(sd, dry_run=True)
+    curator_results = launch.launch_curator(sd, dry_run=True)
+
+    assert [r["name"] for r in reviewer_results] == ["vera"]
+    assert [r["name"] for r in curator_results] == ["Curator"]
+    reviewer_prompt = (Path(sd) / "prompts" / "vera.md").read_text()
+    curator_prompt = (Path(sd) / "prompts" / "Curator.md").read_text()
+    assert "Read your persona" in reviewer_prompt
+    assert "comment curator" in curator_prompt
+    assert "Reviewer agents: `vera`" in curator_prompt
+    assert "Read your persona" not in curator_prompt
+
+
+def test_launch_curator_requires_configured_curator():
+    sd = _make_session_dir([
+        AgentConfig(name="vera", model="opus", persona="vera.md"),
+    ])
+
+    with pytest.raises(ValueError, match="curator agent is not configured"):
+        launch.launch_curator(sd, dry_run=True)
+
+
 def test_launch_rejects_unknown_target_agent():
     sd = _make_session_dir([
         AgentConfig(name="vera", model="opus-4.6-thinking", persona="vera.md"),
@@ -205,6 +239,40 @@ def test_launch_rejects_unknown_target_agent():
         assert "vera" in str(e)
     else:
         raise AssertionError("expected ValueError for unknown agent")
+
+
+def test_reviewer_launch_records_curation_baseline_and_resets_curator(tmp_path):
+    from peanut_review import polling, runtime, session as sess, store
+
+    workspace = _workspace_with_cursor_config(tmp_path)
+    sd = _make_session_dir([
+        AgentConfig(name="vera", model="opus", persona="vera.md"),
+        AgentConfig(
+            name="Curator", model="opus",
+            role=AgentRole.CURATOR.value,
+        ),
+    ], workspace=workspace)
+    existing = Comment(author="gh:alice", body="already imported")
+    store.append_comment(sd, existing)
+    polling.write_signal(sd, "Curator", "round-done")
+    (Path(sd) / "signals" / "Curator.auto-launching").write_text("old\n")
+    runtime.update_agent_meta(sd, "Curator", {
+        "process_state": "exited",
+        "exit_code": 0,
+        "pid": 999999,
+    })
+
+    with patch("peanut_review.launch.subprocess.Popen", return_value=DummyProc()):
+        results = launch.launch_agents(sd)
+
+    assert [r["name"] for r in results] == ["vera"]
+    stored = sess.load_session(sd)
+    assert stored.curation_since_comment_id == existing.id
+    assert not (Path(sd) / "signals" / "Curator.round-done").exists()
+    assert not (Path(sd) / "signals" / "Curator.auto-launching").exists()
+    curator_agent = next(a for a in stored.agents if a.name == "Curator")
+    assert curator_agent.status == "pending"
+    assert curator_agent.pid is None
 
 
 def test_launch_dry_run_codex_agent_cmd():

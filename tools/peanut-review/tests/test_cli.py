@@ -139,6 +139,32 @@ def test_launch_agent_option_reports_unknown_agent():
     assert "vera" in err.getvalue()
 
 
+def test_curate_cli_launches_curator():
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=_make_cursor_workspace(), agents=[
+        {"name": "vera", "model": "opus", "persona": "vera.md"},
+        {
+            "name": "Curator", "model": "gpt-5.5-high",
+            "role": "curator",
+        },
+    ])
+
+    def fake_launch_curator(session_dir, **kwargs):
+        assert session_dir == sd
+        assert kwargs["dry_run"] is True
+        return [{"name": "Curator", "supervisor_pid": None}]
+
+    out = io.StringIO()
+    with (
+        patch("peanut_review.launch.launch_curator", side_effect=fake_launch_curator),
+        redirect_stdout(out),
+    ):
+        rc = main(["--session", sd, "curate", "--dry-run"])
+
+    assert rc == 0
+    assert "Curator: dry-run" in out.getvalue()
+
+
 def test_rerun_dry_run_targets_agent_without_clearing_signals():
     from peanut_review import polling
 
@@ -156,6 +182,97 @@ def test_rerun_dry_run_targets_agent_without_clearing_signals():
     assert rc == 0
     assert "irene: dry-run" in out.getvalue()
     assert (Path(sd) / "signals" / "irene.round-done").exists()
+
+
+def test_wait_all_github_round_done_auto_launches_curator():
+    from peanut_review import polling
+
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    with patch("peanut_review.session._run_git", side_effect=_mock_git):
+        sess.create_session(
+            workspace=_make_cursor_workspace(),
+            agents=[
+                {"name": "vera", "model": "opus", "persona": "vera.md"},
+                {
+                    "name": "Curator", "model": "gpt-5.5-high",
+                    "role": "curator",
+                },
+            ],
+            session_dir=sd,
+            github=models.GitHubPR(repo="acme/repo", number=42),
+            include_curator=True,
+        )
+    polling.write_signal(sd, "vera", "round-done")
+
+    def fake_launch_curator(session_dir, **_kwargs):
+        assert session_dir == sd
+        polling.write_signal(sd, "Curator", "round-done")
+        return [{"name": "Curator", "supervisor_pid": 12345}]
+
+    out = io.StringIO()
+    with (
+        patch("peanut_review.launch.launch_curator", side_effect=fake_launch_curator) as mocked,
+        redirect_stdout(out),
+    ):
+        rc = main(["--session", sd, "wait-all", "round-done", "--timeout", "1", "--poll", "0.01"])
+
+    assert rc == 0
+    mocked.assert_called_once_with(sd)
+    text = out.getvalue()
+    assert "All reviewers signaled round-done" in text
+    assert "Curator: supervisor=12345" in text
+    assert "Curator signaled round-done" in text
+
+
+def test_wait_all_github_round_done_errors_without_configured_curator():
+    from peanut_review import polling
+
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    with patch("peanut_review.session._run_git", side_effect=_mock_git):
+        sess.create_session(
+            workspace=_make_cursor_workspace(),
+            agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}],
+            session_dir=sd,
+            github=models.GitHubPR(repo="acme/repo", number=42),
+        )
+    polling.write_signal(sd, "vera", "round-done")
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "wait-all", "round-done", "--timeout", "1", "--poll", "0.01"])
+
+    assert rc == 1
+    assert "curator agent is not configured" in err.getvalue()
+
+
+def test_wait_all_no_curate_skips_github_curator():
+    from peanut_review import polling
+
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    with patch("peanut_review.session._run_git", side_effect=_mock_git):
+        sess.create_session(
+            workspace=_make_cursor_workspace(),
+            agents=[
+                {"name": "vera", "model": "opus", "persona": "vera.md"},
+                {
+                    "name": "Curator", "model": "gpt-5.5-high",
+                    "role": "curator",
+                },
+            ],
+            session_dir=sd,
+            github=models.GitHubPR(repo="acme/repo", number=42),
+            include_curator=True,
+        )
+    polling.write_signal(sd, "vera", "round-done")
+
+    with patch("peanut_review.launch.launch_curator") as mocked:
+        rc = main([
+            "--session", sd, "wait-all", "round-done",
+            "--timeout", "1", "--poll", "0.01", "--no-curate",
+        ])
+
+    assert rc == 0
+    mocked.assert_not_called()
 
 
 def test_kill_agents_cli_prints_results():
@@ -203,6 +320,7 @@ def test_start_validates_cursor_cli_before_resolving_pr(tmp_path: Path):
         "repoRelative": "repo",
         "agents": [
             {"name": "vera", "model": "opus", "persona": "vera.md"},
+            {"name": "Curator", "model": "gpt-5.5-high", "role": "curator"},
         ],
     }))
 

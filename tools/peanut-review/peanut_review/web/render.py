@@ -971,6 +971,14 @@ def _render_sidebar(
             '</li>'
         )
     kill_all_hidden = "" if any_killable else " hidden"
+    curator_button = (
+        '<button id="curator-run-btn" type="button" class="agent-curate" '
+        'title="Run comment curator">curate</button>'
+    )
+    rerun_all_button = (
+        '<button id="rerun-all-agents-btn" type="button" '
+        'class="agent-rerun-all" title="Rerun all reviewer agents">rerun all</button>'
+    )
     deleted_row = (
         f'<li data-k="deleted"><span>deleted</span><span class="v">{deleted}</span></li>'
         if deleted else ""
@@ -1044,10 +1052,14 @@ def _render_sidebar(
         f'<li data-k="critical"><span>critical</span><span class="v">{crit}</span></li>'
         f'{deleted_row}'
         '</ul>'
-        '<div class="sidebar-heading">'
+        '<div class="sidebar-heading agents-heading">'
         '<h3>Agents</h3>'
+        '<span class="agent-heading-actions">'
+        f'{curator_button}'
+        f'{rerun_all_button}'
         '<button id="kill-all-agents-btn" type="button" class="agent-kill-all" '
         f'title="Stop all agents"{kill_all_hidden}>kill all</button>'
+        '</span>'
         '</div>'
         f'<ul id="agent-list" class="agent-list">{agent_rows or "<li>(none)</li>"}</ul>'
         '<h3>Navigation</h3>'

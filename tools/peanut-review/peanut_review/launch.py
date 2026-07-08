@@ -10,6 +10,7 @@ from pathlib import Path
 from string import Template
 from typing import Sequence
 
+from . import curator, store
 from .models import AgentStatus, SessionState
 from .session import (
     load_session,
@@ -124,18 +125,23 @@ def _format_git_commands(repo: str, commands: Sequence[str]) -> str:
     return " && ".join(rendered)
 
 
-def _resolve_template(user_template: str | Path | None, runner: str) -> str:
+def _resolve_template(user_template: str | Path | None, agent) -> str:
     """Pick the prompt template for a given runner.
 
     Explicit --template always wins. Otherwise all runners use the CLI prompt.
     """
     if user_template:
         return str(user_template)
-    default = Path(__file__).resolve().parent / "templates" / "agent-prompt.md"
+    template_name = (
+        "curator-prompt.md"
+        if curator.is_curator(agent)
+        else "agent-prompt.md"
+    )
+    default = Path(__file__).resolve().parent / "templates" / template_name
     if default.exists():
         return str(default)
     raise FileNotFoundError(
-        f"no prompt template found for runner={runner!r} (looked at {default})"
+        f"no prompt template found for agent={agent.name!r} (looked at {default})"
     )
 
 
@@ -159,6 +165,27 @@ def render_all_prompts(
 
     result = {}
     repo = repo_path(session)
+    reviewer_names = ", ".join(a.name for a in curator.reviewers(session.agents))
+    if not reviewer_names:
+        reviewer_names = "<none>"
+    curation_since = session.curation_since_comment_id or ""
+    if curation_since:
+        curation_scope = (
+            "Focus on reviewer comments after "
+            f"`{curation_since}`; still inspect all visible and deleted "
+            "comments when deduplicating."
+        )
+        curation_since_command = (
+            f"{pr_bin} --session {sdir} comments --since {curation_since} --format json"
+        )
+    else:
+        curation_scope = (
+            "No comment baseline is recorded; inspect the current visible "
+            "and deleted comments and curate the local reviewer-authored set."
+        )
+        curation_since_command = (
+            f"{pr_bin} --session {sdir} comments --format json"
+        )
     for agent in agents:
         variables = {
             "SESSION": str(sdir),
@@ -173,13 +200,17 @@ def render_all_prompts(
             "WORKSPACE_ARTIFACTS": _format_workspace_artifacts(session.workspace),
             "AGENT": agent.name,
             "PERSONA": agent.persona,
+            "REVIEWER_AGENTS": reviewer_names,
+            "CURATION_SINCE_COMMENT_ID": curation_since,
+            "CURATION_SCOPE": curation_scope,
+            "CURATION_SINCE_COMMAND": curation_since_command,
             "DIFF_COMMANDS": " && ".join(session.diff_commands),
             "GIT_DIFF_COMMANDS": _format_git_commands(repo, session.diff_commands),
             "BASE_REF": session.base_ref,
             "TOPIC_REF": session.topic_ref,
             "PR_BIN": pr_bin,
         }
-        tpl = _resolve_template(template_path, agent.runner)
+        tpl = _resolve_template(template_path, agent)
         rendered = render_prompt(tpl, variables)
         prompt_path = prompts_dir / f"{agent.name}.md"
         prompt_path.write_text(rendered)
@@ -240,7 +271,7 @@ def _normalize_agent_names(agent_names: Sequence[str] | None) -> list[str] | Non
 def _select_agents(agents, agent_names: Sequence[str] | None):
     requested = _normalize_agent_names(agent_names)
     if requested is None:
-        return list(agents)
+        return curator.reviewers(agents)
 
     available = {agent.name for agent in agents}
     unknown = [name for name in requested if name not in available]
@@ -253,6 +284,11 @@ def _select_agents(agents, agent_names: Sequence[str] | None):
 
     requested_set = set(requested)
     return [agent for agent in agents if agent.name in requested_set]
+
+
+def _latest_comment_id(session_dir: Path) -> str | None:
+    comments = store.read_all_comments(session_dir)
+    return comments[-1].id if comments else None
 
 
 def _round_signal_path(session_dir: Path, agent_name: str, event: str) -> Path:
@@ -274,6 +310,30 @@ def _clear_agent_round_state(session_dir: Path, agent_names: Sequence[str]) -> N
         except FileNotFoundError:
             pass
     reset_agent_runtime(session_dir, list(agent_names))
+
+
+def _clear_curator_auto_launch_markers(session_dir: Path, agents) -> None:
+    for agent in agents:
+        try:
+            (session_dir / "signals" / f"{agent.name}.auto-launching").unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _prepare_curation_baseline(session_dir: Path, session, agents) -> None:
+    if not agents or any(curator.is_curator(agent) for agent in agents):
+        return
+    session.curation_since_comment_id = _latest_comment_id(session_dir)
+    curators = curator.curators(session.agents)
+    if curators:
+        _clear_curator_auto_launch_markers(session_dir, curators)
+        _clear_agent_round_state(session_dir, [agent.name for agent in curators])
+        refreshed = load_session(session_dir)
+        refreshed_by_name = {agent.name: agent for agent in refreshed.agents}
+        for index, agent in enumerate(session.agents):
+            replacement = refreshed_by_name.get(agent.name)
+            if replacement is not None:
+                session.agents[index] = replacement
 
 
 def _ensure_agents_not_live(session_dir: Path, agents) -> None:
@@ -380,6 +440,8 @@ def launch_agents(
     prompts = render_all_prompts(session_dir, template_path, agent_names=agent_names)
 
     session.state = SessionState.ROUND.value
+    if not dry_run:
+        _prepare_curation_baseline(sdir, session, agents)
     save_session(sdir, session)
 
     results = []
@@ -487,4 +549,36 @@ def rerun_agents(
         dry_run=dry_run,
         cli_json=cli_json,
         agent_names=selected_names,
+    )
+
+
+def ensure_curator_agent(session_dir: str | Path) -> str:
+    sdir = Path(session_dir)
+    session = load_session(sdir)
+    agent = curator.ensure_curator_agent(session.agents)
+    save_session(sdir, session)
+    return agent.name
+
+
+def launch_curator(
+    session_dir: str | Path,
+    *,
+    template_path: str | Path | None = None,
+    dry_run: bool = False,
+    cli_json: str | None = None,
+) -> list[dict]:
+    """Reset and launch the dedicated comment curator agent."""
+    sdir = Path(session_dir)
+    curator_name = ensure_curator_agent(sdir)
+    session = load_session(sdir)
+    agents = _select_agents(session.agents, [curator_name])
+    if not dry_run:
+        _ensure_agents_not_live(sdir, agents)
+        _clear_agent_round_state(sdir, [curator_name])
+    return launch_agents(
+        sdir,
+        template_path=template_path,
+        dry_run=dry_run,
+        cli_json=cli_json,
+        agent_names=[curator_name],
     )

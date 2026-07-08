@@ -15,7 +15,8 @@ Codex skills do not have a separate subcommand registry. Treat the first word
 after `/peanut-review` as a routing hint when present:
 
 - `/peanut-review curate <session-or-pr-context>`: clean up an existing review
-  session's comments. This is not a new reviewer pass.
+  session's comments, using the dedicated curator agent when appropriate.
+  This is not a new reviewer pass.
 - `/peanut-review pr <PR URL>`: run the GitHub PR review lifecycle below.
 - `/peanut-review local <base-ref>`: run the author-owned local review
   lifecycle below.
@@ -51,7 +52,9 @@ author-facing comment set:
   the original `file:line`, then delete the stale anchored copy.
 
 Do not launch or rerun reviewers, patch source, or push to GitHub during
-`curate` unless the user explicitly asks.
+`curate` unless the user explicitly asks. Launching the dedicated curator
+agent is allowed when the user asks for curation or when a GitHub review
+lifecycle reaches the automatic curation step.
 
 ## Operator Checklist
 
@@ -79,12 +82,15 @@ Mode-specific checklist:
 
 - [ ] GitHub PR: prefer `start --no-launch`, build/test, then `launch`, unless
       the user says the checkout is already built.
-- [ ] GitHub PR: after all reviewers signal `round-done`, proceed to curation;
-      use `kill-agents` only for stale live processes or explicit aborts.
-- [ ] GitHub PR: curate feedback; do not fix code, resolve imported GitHub
-      threads, or force rebuttal loops unless the user asks.
+- [ ] GitHub PR: after all reviewers signal `round-done`, let `wait-all`
+      launch and wait for the `Curator` agent by default; use `--no-curate`
+      only when you intentionally want to skip this.
+- [ ] GitHub PR: inspect the curated feedback; do not fix code, resolve
+      imported GitHub threads, or force rebuttal loops unless the user asks.
 - [ ] Local review: own the patch; apply fixes, `migrate`, run rebuttal passes,
-      and record a final verdict.
+      and record a final verdict. Use the web UI's curator button or
+      `curate` only when comment cleanup is explicitly useful; use the web
+      UI's rerun-all button only when a fresh full reviewer pass is useful.
 
 ## Ask Before Guessing
 
@@ -120,6 +126,14 @@ parent and defines `reviewRoot`, `workspaceRoot`, `repoRelative`,
 `reviewAgentTimeoutSeconds`, and the exact `agents` lineup. Point the web UI at
 the same `reviewRoot`. If no config exists, ask before choosing persistent
 roots, repo layout, reviewers, runners, or models.
+
+For GitHub PR sessions, the config must include a dedicated curator agent in
+`agents`, for example `{"name":"Curator","model":"gpt-5.5-high",
+"runner":"cursor","role":"curator"}`. The curator uses a dedicated prompt, so
+do not invent a `curator.md` persona. Do not rely on a Python default for the
+curator model; missing curator config should fail before launch. Add the same
+entry for local sessions when the web UI curator button or `curate` command
+should be available.
 
 Do not blur roots. `reviewRoot` is session storage/web UI state;
 `workspaceRoot` + `repoRelative` identify the checkout under review. If build
@@ -168,17 +182,18 @@ approve/request-changes decision back to GitHub.
 2. Build/test the checkout with the project workflow. If reviewers need
    non-obvious tool paths, record them in a session note before launch.
 
-3. Launch reviewers and wait for the first pass:
+3. Launch reviewers and wait for the first pass plus automatic curation:
 
    ```bash
    "$PR_BIN" --session "$SESSION" launch
    "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
    ```
 
-4. Curate findings. Delete duplicate/noisy local comments with `delete <c_id>`.
-   Add replies only when they clarify a finding for the PR author. Do not
-   resolve imported GitHub comments unless the GitHub discussion was actually
-   resolved or the user asks you to manage it.
+4. Inspect the curator's result. Delete duplicate/noisy local comments with
+   `delete <c_id>` if anything remains. Add replies only when they clarify a
+   finding for the PR author. Do not resolve imported GitHub comments unless
+   the GitHub discussion was actually resolved or the user asks you to manage
+   it.
 
    ```bash
    "$PR_BIN" --session "$SESSION" gh-pull
@@ -233,6 +248,11 @@ Use this when the orchestrator can modify the patch under review.
 
 3. Triage every finding. Apply real fixes in code and resolve fixed comments;
    reply with a concrete rebuttal for findings that are intentionally not fixed.
+   If the local comment set is too noisy, run the web UI's curator button or:
+
+   ```bash
+   "$PR_BIN" --session "$SESSION" curate
+   ```
 
    ```bash
    "$PR_BIN" --session "$SESSION" resolve <c_id>
@@ -299,7 +319,7 @@ or three breadth reviewers such as Felix, Petra, or Soren. Map `tier: expert`
 personas to the strongest available model and
 `tier: standard` to a balanced/fast model. Discover models with
 `cursor-agent --list-models` or `opencode models`; common Codex ids are
-`gpt-5.5`, `gpt-5.4`, and `gpt-5.3-codex`.
+`gpt-5.5-high`, `gpt-5.5`, `gpt-5.4`, and `gpt-5.3-codex`.
 
 Use display-case agent names in config, e.g. `Vera`, while keeping persona
 filenames lowercase, e.g. `vera.md`. The web UI shows the configured agent

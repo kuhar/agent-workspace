@@ -10,11 +10,12 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from peanut_review import session as sess, store
-from peanut_review.models import AgentConfig, Comment, GitHubPR, Note
+from peanut_review.models import AgentConfig, AgentRole, Comment, GitHubPR, Note
 from peanut_review.web import app as web_app
 from peanut_review.web import diff as diffmod
 from peanut_review.web import render
@@ -476,6 +477,34 @@ def test_render_sidebar_agents_show_kill_controls_when_running(
     assert '<span class="agent-state-label">review</span> <span class="agent-state-value">pending</span>' in html
 
 
+def test_render_sidebar_local_sessions_show_curator_button(
+    session_dir: Path,
+    repo: Path,
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert 'id="curator-run-btn"' in html
+    assert 'title="Run comment curator"' in html
+    assert 'id="rerun-all-agents-btn"' in html
+    assert 'title="Rerun all reviewer agents"' in html
+    assert 'class="sidebar-heading agents-heading"' in html
+    assert 'class="agent-heading-actions"' in html
+
+
+def test_render_sidebar_github_sessions_show_manual_curator_button(
+    session_dir: Path,
+    repo: Path,
+):
+    s = sess.load_session(session_dir)
+    s.github = GitHubPR(repo="acme/foo", number=42)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert 'id="curator-run-btn"' in html
+
+
 def test_render_sidebar_action_shortcuts_use_namespaced_bindings(
     session_dir: Path,
     repo: Path,
@@ -840,6 +869,72 @@ def test_server_notes_endpoint_and_render(session_dir: Path):
         assert '<span class="ts mono">2020-01-01T00:00:00+00:00</span>' not in text
         assert "Test Execution" in text
         assert "llvm-lit" in text
+    finally:
+        srv.shutdown()
+
+
+def test_server_curator_launch_endpoint_returns_updated_agents(session_dir: Path):
+    def fake_launch_curator(session_path):
+        s = sess.load_session(session_path)
+        s.agents.append(AgentConfig(
+            name="Curator",
+            model="m",
+            persona="curator.md",
+            role=AgentRole.CURATOR.value,
+            runner="cursor",
+        ))
+        sess.save_session(session_path, s)
+        return [{"name": "Curator", "supervisor_pid": 2468}]
+
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        with patch("peanut_review.web.app.launch.launch_curator",
+                   side_effect=fake_launch_curator):
+            code, data = _post(
+                f"http://127.0.0.1:{port}/{session_id}/api/curator/launch",
+                {},
+            )
+        assert code == 202
+        assert data["results"][0]["name"] == "Curator"
+        curator = next(agent for agent in data["agents"] if agent["name"] == "Curator")
+        assert curator["role"] == "curator"
+    finally:
+        srv.shutdown()
+
+
+def test_server_agents_rerun_endpoint_targets_reviewer_agents_only(session_dir: Path):
+    s = sess.load_session(session_dir)
+    s.agents.append(AgentConfig(
+        name="Curator",
+        model="m",
+        persona="curator.md",
+        role=AgentRole.CURATOR.value,
+        runner="cursor",
+    ))
+    sess.save_session(session_dir, s)
+
+    def fake_rerun_agents(session_path, **kwargs):
+        assert session_path == session_dir
+        assert kwargs["agent_names"] == ["felix"]
+        stored = sess.load_session(session_path)
+        stored.agents[0].status = "running"
+        sess.save_session(session_path, stored)
+        return [{"name": "felix", "supervisor_pid": 1357}]
+
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        with patch("peanut_review.web.app.launch.rerun_agents",
+                   side_effect=fake_rerun_agents):
+            code, data = _post(
+                f"http://127.0.0.1:{port}/{session_id}/api/agents/rerun",
+                {},
+            )
+        assert code == 202
+        assert data["results"][0]["name"] == "felix"
+        assert {agent["name"]: agent["role"] for agent in data["agents"]} == {
+            "felix": "reviewer",
+            "Curator": "curator",
+        }
     finally:
         srv.shutdown()
 

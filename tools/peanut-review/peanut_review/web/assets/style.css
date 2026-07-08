@@ -723,6 +723,16 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   margin: 0 0 8px 0;
 }
 #sidebar .sidebar-heading h3 { margin: 0; }
+#sidebar .agents-heading h3 {
+  flex: 0 0 auto;
+}
+#sidebar .agent-heading-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
 #sidebar .files-heading .file-total-stats {
   flex: 0 0 auto;
   display: inline-flex;
@@ -794,7 +804,9 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   color: var(--fg);
 }
 #sidebar .agent-kill,
-#sidebar .agent-kill-all {
+#sidebar .agent-kill-all,
+#sidebar .agent-curate,
+#sidebar .agent-rerun-all {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--muted);
@@ -810,8 +822,16 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   border-color: var(--critical);
   background: var(--danger-hover-bg);
 }
+#sidebar .agent-curate:hover,
+#sidebar .agent-rerun-all:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--line-add-bg);
+}
 #sidebar .agent-kill:disabled,
-#sidebar .agent-kill-all:disabled {
+#sidebar .agent-kill-all:disabled,
+#sidebar .agent-curate:disabled,
+#sidebar .agent-rerun-all:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }

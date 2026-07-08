@@ -17,13 +17,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import agent_control, gh, gh_pull, gh_push, polling, runtime, store
+from .. import agent_control, gh, gh_pull, gh_push, launch, polling, runtime, store
 from ..models import Comment, CommentCategory, Note, Severity, normalize_comment_category
 from ..session import (
     GLOBAL_FILE,
     load_session,
     refresh_agent_statuses,
     repo_path,
+    reviewer_agents,
     retarget_review_head,
     save_session,
     validate_comment_location,
@@ -432,6 +433,12 @@ class _Handler(BaseHTTPRequestHandler):
         if tail == "/api/agents/kill":
             self._post_agents_kill(session_dir, data)
             return
+        if tail == "/api/agents/rerun":
+            self._post_agents_rerun(session_dir)
+            return
+        if tail == "/api/curator/launch":
+            self._post_curator_launch(session_dir)
+            return
         self._error(404, f"no route for {tail}")
 
     # -------- endpoints --------
@@ -797,6 +804,35 @@ class _Handler(BaseHTTPRequestHandler):
             "agents": _agent_payload(session_dir, session),
         })
 
+    def _post_agents_rerun(self, session_dir: Path) -> None:
+        session = load_session(session_dir)
+        agent_names = [agent.name for agent in reviewer_agents(session)]
+        if not agent_names:
+            return self._error(400, "no reviewer agents configured")
+
+        try:
+            results = launch.rerun_agents(session_dir, agent_names=agent_names)
+        except (FileNotFoundError, ValueError) as e:
+            return self._error(400, str(e))
+
+        session = load_session(session_dir)
+        self._json(202, {
+            "results": results,
+            "agents": _agent_payload(session_dir, session),
+        })
+
+    def _post_curator_launch(self, session_dir: Path) -> None:
+        try:
+            results = launch.launch_curator(session_dir)
+        except (FileNotFoundError, ValueError) as e:
+            return self._error(400, str(e))
+
+        session = load_session(session_dir)
+        self._json(202, {
+            "results": results,
+            "agents": _agent_payload(session_dir, session),
+        })
+
 
 def _comment_to_dict(c: Comment) -> dict:
     return {
@@ -879,6 +915,7 @@ def _agent_payload(session_dir: Path, session) -> list[dict]:
         payload.append({
             "name": agent.name,
             "model": agent.model,
+            "role": agent.role,
             "status": runtime.derive_status_from_snapshot(agent, snapshot),
             "process_status": snapshot["process_state"],
             "protocol_status": snapshot["protocol_status"],

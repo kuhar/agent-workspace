@@ -1617,6 +1617,10 @@
     return process === "launching" || process === "running";
   }
 
+  function isReviewerAgent(agent) {
+    return String(agent.role || "reviewer") !== "curator";
+  }
+
   function renderAgentRow(agent) {
     const name = String(agent.name || "");
     const model = String(agent.model || "");
@@ -1662,6 +1666,22 @@
       const anyKillable = agents.some(agentCanKill);
       killAll.hidden = !anyKillable;
       killAll.disabled = !anyKillable;
+    }
+    const rerunAll = document.getElementById("rerun-all-agents-btn");
+    if (rerunAll) {
+      const reviewers = agents.filter(isReviewerAgent);
+      rerunAll.disabled = reviewers.length === 0 || reviewers.some(agentCanKill);
+      rerunAll.title = reviewers.some(agentCanKill)
+        ? "Wait for live reviewer agents to finish before rerunning"
+        : "Rerun all reviewer agents";
+    }
+    const curatorRun = document.getElementById("curator-run-btn");
+    if (curatorRun) {
+      const curator = agents.find((agent) => !isReviewerAgent(agent));
+      curatorRun.disabled = curator ? agentCanKill(curator) : false;
+      curatorRun.title = curatorRun.disabled
+        ? "Wait for the live curator to finish before rerunning"
+        : "Run comment curator";
     }
   }
 
@@ -1710,6 +1730,52 @@
   const killAllAgentsBtn = document.getElementById("kill-all-agents-btn");
   if (killAllAgentsBtn) {
     killAllAgentsBtn.addEventListener("click", () => killAgents(null));
+  }
+
+  async function rerunAllAgents() {
+    const btn = document.getElementById("rerun-all-agents-btn");
+    if (!confirm("Rerun all reviewer agents?")) return;
+    document.querySelectorAll(".agent-kill, #kill-all-agents-btn, #rerun-all-agents-btn").forEach((b) => {
+      b.disabled = true;
+    });
+    try {
+      const res = await api("POST", "/api/agents/rerun", {});
+      updateAgentList(res.agents || []);
+      const names = (res.results || []).map((r) => r.name).filter(Boolean);
+      flashToast(names.length ? `Rerun: ${names.join(", ")}` : "Rerun started");
+    } catch (e) {
+      alert("Rerun failed: " + e.message);
+    } finally {
+      await refreshSidebar();
+    }
+  }
+
+  const rerunAllAgentsBtn = document.getElementById("rerun-all-agents-btn");
+  if (rerunAllAgentsBtn) {
+    rerunAllAgentsBtn.addEventListener("click", rerunAllAgents);
+  }
+
+  async function launchCurator() {
+    const btn = document.getElementById("curator-run-btn");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await api("POST", "/api/curator/launch", {});
+      updateAgentList(res.agents || []);
+      const first = (res.results || [])[0];
+      const detail = first && first.supervisor_pid
+        ? `supervisor=${first.supervisor_pid}`
+        : "started";
+      flashToast(`Curator ${detail}`);
+    } catch (e) {
+      alert("Curator launch failed: " + e.message);
+    } finally {
+      await refreshSidebar();
+    }
+  }
+
+  const curatorRunBtn = document.getElementById("curator-run-btn");
+  if (curatorRunBtn) {
+    curatorRunBtn.addEventListener("click", launchCurator);
   }
 
   // --- Periodic session refresh (for state/signals) ---

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from peanut_review import session as sess
+from peanut_review.models import GitHubPR
 from peanut_review.supervisor import supervise_agent
 
 
@@ -20,14 +21,23 @@ def _mock_git(workspace, *args):
     return ""
 
 
-def _make_session_dir() -> str:
+def _make_session_dir(
+    *,
+    agents: list[dict] | None = None,
+    github: GitHubPR | None = None,
+    include_curator: bool = False,
+) -> str:
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-supervisor-"), "session")
     with patch("peanut_review.session._run_git", side_effect=_mock_git):
         sess.create_session(
             workspace=tempfile.mkdtemp(prefix="pr-workspace-"),
-            agents=[{"name": "vera", "model": "test-model", "persona": "vera.md"}],
+            agents=agents or [
+                {"name": "vera", "model": "test-model", "persona": "vera.md"},
+            ],
             session_dir=sd,
             timeout=30,
+            github=github,
+            include_curator=include_curator,
         )
     return sd
 
@@ -72,6 +82,79 @@ def test_supervisor_records_done_when_signal_exists(tmp_path):
     assert loaded.agents[0].pid is not None
     assert loaded.agents[0].pgid is not None
     assert loaded.agents[0].supervisor_pid == os.getpid()
+
+
+def test_supervisor_auto_launches_curator_when_github_reviewers_done(tmp_path):
+    sd = _make_session_dir(
+        agents=[
+            {"name": "vera", "model": "test-model", "persona": "vera.md"},
+            {"name": "Curator", "model": "gpt-5.5-high", "role": "curator"},
+        ],
+        github=GitHubPR(repo="acme/foo", number=42),
+        include_curator=True,
+    )
+    script = _script(
+        tmp_path,
+        "ok.sh",
+        f"""
+        mkdir -p "{sd}/signals"
+        date -Iseconds > "{sd}/signals/vera.round-done"
+        exec sh -c 'exit 0'
+        """,
+    )
+
+    launched = []
+
+    def fake_launch_curator(session_dir):
+        launched.append(str(session_dir))
+        return [{"name": "Curator", "supervisor_pid": 12345}]
+
+    with patch("peanut_review.launch.launch_curator", side_effect=fake_launch_curator):
+        rc = supervise_agent(
+            session_dir=sd,
+            agent_name="vera",
+            command=[script],
+            timeout=5,
+            kill_grace=0.1,
+        )
+
+    assert rc == 0
+    assert launched == [sd]
+    assert (Path(sd) / "signals" / "Curator.auto-launching").exists()
+
+
+def test_supervisor_auto_launches_curator_only_once(tmp_path):
+    sd = _make_session_dir(
+        agents=[
+            {"name": "vera", "model": "test-model", "persona": "vera.md"},
+            {"name": "Curator", "model": "gpt-5.5-high", "role": "curator"},
+        ],
+        github=GitHubPR(repo="acme/foo", number=42),
+        include_curator=True,
+    )
+    signals = Path(sd) / "signals"
+    signals.mkdir(exist_ok=True)
+    (signals / "Curator.auto-launching").write_text("already launching\n")
+    script = _script(
+        tmp_path,
+        "ok.sh",
+        f"""
+        date -Iseconds > "{sd}/signals/vera.round-done"
+        exec sh -c 'exit 0'
+        """,
+    )
+
+    with patch("peanut_review.launch.launch_curator") as mocked:
+        rc = supervise_agent(
+            session_dir=sd,
+            agent_name="vera",
+            command=[script],
+            timeout=5,
+            kill_grace=0.1,
+        )
+
+    assert rc == 0
+    mocked.assert_not_called()
 
 
 def test_supervisor_stops_process_after_round_done_signal(tmp_path):

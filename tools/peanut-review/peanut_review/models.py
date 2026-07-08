@@ -85,6 +85,11 @@ class AgentStatus(str, Enum):
     TIMEOUT = "timeout"
 
 
+class AgentRole(str, Enum):
+    REVIEWER = "reviewer"
+    CURATOR = "curator"
+
+
 @dataclass
 class Comment:
     id: str = field(default_factory=lambda: _short_id("c"))
@@ -179,6 +184,7 @@ class AgentConfig:
     name: str = ""
     model: str = ""
     persona: str = ""
+    role: str = AgentRole.REVIEWER.value
     status: str = AgentStatus.PENDING.value
     # Runtime identity. `pid` is the top-level reviewer process PID after the
     # runner wrapper has exec'd the real agent command. `pgid` is the process
@@ -193,7 +199,12 @@ class AgentConfig:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        return {k: v for k, v in d.items() if v is not None}
+        return {
+            k: v
+            for k, v in d.items()
+            if v is not None
+            and not (k == "role" and v == AgentRole.REVIEWER.value)
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> AgentConfig:
@@ -243,6 +254,9 @@ class Session:
     state: str = SessionState.INIT.value
     timeout: int = 1200
     github: GitHubPR | None = None
+    # Comment id used as the lower bound for the next curator run. Reviewer
+    # launch/rerun updates this so the curator can focus on fresh findings.
+    curation_since_comment_id: str | None = None
 
     def repo_path(self) -> str:
         if not self.repo_relative or self.repo_relative == ".":

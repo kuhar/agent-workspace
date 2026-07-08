@@ -1,6 +1,6 @@
 ---
 name: peanut-review
-description: Orchestrate structured multi-agent code review for local changes or GitHub PRs using peanut-review CLI
+description: Orchestrate structured multi-agent code review for local changes or GitHub PRs using the peanut-review CLI, and curate existing peanut-review sessions. Use when starting or managing review sessions, or when asked to deduplicate, shorten, validate, dismiss, filter, or decide whether agent review comments are worth pushing.
 ---
 
 # Peanut Review
@@ -8,6 +8,50 @@ description: Orchestrate structured multi-agent code review for local changes or
 You are the orchestrator for a structured multi-agent review. Drive the review
 lifecycle with `tools/peanut-review/bin/peanut-review`; it sets `PYTHONPATH`
 for the local checkout, so no install step is needed.
+
+## Subcommands
+
+Codex skills do not have a separate subcommand registry. Treat the first word
+after `/peanut-review` as a routing hint when present:
+
+- `/peanut-review curate <session-or-pr-context>`: clean up an existing review
+  session's comments. This is not a new reviewer pass.
+- `/peanut-review pr <PR URL>`: run the GitHub PR review lifecycle below.
+- `/peanut-review local <base-ref>`: run the author-owned local review
+  lifecycle below.
+- `/peanut-review status <session-path>`: inspect or recover a session without
+  changing comments unless asked.
+
+For `curate`, start from the live session state and produce a push-ready,
+author-facing comment set:
+
+- Resolve the live session path and source checkout. If the current directory
+  is a wrapper, read `.peanut-review.json` first and keep `reviewRoot`,
+  `workspaceRoot`, and `repoRelative` separate.
+- Inspect `comments --format json` before editing. Also inspect
+  `comments --include-deleted --format json` when duplicate cleanup, prior
+  deletions, or mistaken cleanup might matter.
+- Bucket local agent comments into keep/rewrite, merge, delete, or undelete.
+  Leave imported GitHub comments alone unless the discussion is actually
+  resolved or the user asks you to manage it.
+- Validate likely survivors against exact files, generated artifacts, or the
+  smallest useful repro/test. Spend verification time on comments that might
+  survive, not on likely deletes.
+- Rewrite kept comments as concise PR feedback. Start with the requested change
+  or scoped question, include only compact evidence, and align severity with
+  confidence. Avoid internal triage wording such as "confirmed" or "partly
+  confirmed".
+- Delete duplicate, incorrect, stale, nitpicky, speculative, praise-only,
+  overly broad, or low-ROI comments. When merging duplicates, edit the kept
+  comment first so it absorbs any useful detail, then delete the redundant
+  copy.
+- For GitHub-backed sessions, finish with `gh-push --dry-run`. Treat it as
+  authoritative for what will surface and whether anchors are pushable. If an
+  anchor is out of range, recreate the finding as a global comment preserving
+  the original `file:line`, then delete the stale anchored copy.
+
+Do not launch or rerun reviewers, patch source, or push to GitHub during
+`curate` unless the user explicitly asks.
 
 ## Operator Checklist
 

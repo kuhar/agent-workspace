@@ -69,6 +69,23 @@ Rewrite kept comments as concise author-facing review feedback:
 - start with the requested change or scoped question
 - include only compact evidence
 - align severity with confidence
+- use a friendly, conversational reviewer voice; prefer collaborative phrasing
+  over terse commands
+- choose the opening shape from the finding's confidence and purpose:
+  - clear fix: "We should ...", "I think we should ...", "I think it would
+    help to ...", "It would be good to ...", "It would be useful to ...",
+    "Should we ..."
+  - safety or maintenance risk: "This would be safer if ...", "This might be
+    easier to maintain if ...", "The risk here is that ...", "The issue I am
+    worried about is ..."
+  - conditional or uncertain read: "If this is intended to ..., we should ...",
+    "If I am reading this right, ...", "Does this also need to handle ...?",
+    "Should this also ...?", "I'm not sure if this works when ..."
+  - simplification or scale concern: "Can we simplify this by ...?",
+    "Can we make this ...?", "I wonder if this will still work when ..."
+- vary sentence openings across the final comment set; do not repeatedly start
+  comments with the same phrase, and do not use question form as the default
+  marker of friendliness
 - avoid internal triage words like "confirmed", "partly confirmed", "keep",
   "delete", or "curation"
 

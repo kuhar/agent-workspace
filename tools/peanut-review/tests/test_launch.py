@@ -220,6 +220,15 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert curator_prompt.index("Optimize for a small") < curator_prompt.index(
         "Classify reviewer comments as"
     )
+    assert "friendly, conversational reviewer voice" in curator_prompt
+    assert "choose the opening shape from the finding's confidence" in curator_prompt
+    assert "We should ..." in curator_prompt
+    assert "Should we ..." in curator_prompt
+    assert "The risk here is that ..." in curator_prompt
+    assert "If I am reading this right, ..." in curator_prompt
+    assert "I'm not sure if this works when ..." in curator_prompt
+    assert "Can we make this ...?" in curator_prompt
+    assert "do not use question form as the default" in curator_prompt
     assert "Record one brief summary in agent activity" in curator_prompt
     assert "note --message" in curator_prompt
     assert "Read your persona" not in curator_prompt

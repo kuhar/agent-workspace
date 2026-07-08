@@ -224,6 +224,12 @@ header {
 header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 header h1 a { color: inherit; text-decoration: none; }
 header h1 a:hover { text-decoration: underline; }
+header .session-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
 header .meta { color: var(--muted); font-size: 12px; }
 header .meta.change-title {
   min-width: 0;
@@ -253,6 +259,26 @@ header .badge {
 header .badge.state-complete { background: var(--state-complete-bg); color: var(--badge-fg); }
 header .badge.state-round { background: var(--state-round-bg); color: var(--badge-fg); }
 header .badge.head-shifted { background: var(--head-shifted-bg); color: var(--badge-fg); }
+header .copy-session-id {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 0;
+  width: 22px;
+  min-width: 22px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+}
+header .copy-session-id:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+header .copy-session-id.copied {
+  color: var(--approve);
+  border-color: var(--approve);
+}
 
 main {
   padding: 20px;

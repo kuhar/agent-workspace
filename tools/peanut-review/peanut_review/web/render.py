@@ -1347,7 +1347,12 @@ def render_page(
 <body>
   <header>
     <h1><a href="{index_href}">🥜 peanut-review</a></h1>
-    <span class="meta mono">{html.escape(session_id)}</span>
+    <span class="session-title">
+      <span class="meta mono">{html.escape(session_id)}</span>
+      <button id="copy-session-id" class="copy-session-id" type="button"
+              data-session-id="{html.escape(session_id, quote=True)}"
+              title="Copy session name" aria-label="Copy session name">▣</button>
+    </span>
     <span class="meta change-title" title="{change_label_html}">{change_label_html}</span>
     {gh_link_html}
     <span class="spacer"></span>

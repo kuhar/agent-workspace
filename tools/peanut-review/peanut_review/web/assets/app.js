@@ -11,6 +11,7 @@
     { value: "dark-plus", label: "Dark+" },
     { value: "light", label: "light" },
   ];
+  const COPY_SESSION_ICON = "▣";
 
   // --- Utilities ---
   function esc(s) {
@@ -82,6 +83,57 @@
   }
   applyTheme(storedTheme());
   document.getElementById("theme-toggle")?.addEventListener("click", cycleTheme);
+
+  function fallbackCopyText(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      if (!document.execCommand("copy")) {
+        throw new Error("copy command failed");
+      }
+    } finally {
+      ta.remove();
+    }
+  }
+
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch { /* fall back below */ }
+    }
+    fallbackCopyText(text);
+  }
+
+  async function copySessionId() {
+    const btn = document.getElementById("copy-session-id");
+    if (!btn) return;
+    const value = btn.dataset.sessionId || sessionId || "";
+    if (!value) return;
+    try {
+      await copyTextToClipboard(value);
+      btn.classList.add("copied");
+      btn.textContent = COPY_SESSION_ICON;
+      btn.title = "Session name copied";
+      flashToast("Session name copied", 1200);
+      setTimeout(() => {
+        btn.classList.remove("copied");
+        btn.textContent = COPY_SESSION_ICON;
+        btn.title = "Copy session name";
+      }, 1600);
+    } catch {
+      flashToast("Could not copy session name", 1800);
+    }
+  }
+  document.getElementById("copy-session-id")?.addEventListener("click", copySessionId);
+
   function api(method, path, body) {
     const opts = { method, headers: { "Content-Type": "application/json" } };
     if (body !== undefined) opts.body = JSON.stringify(body);

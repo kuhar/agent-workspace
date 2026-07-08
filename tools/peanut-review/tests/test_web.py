@@ -308,6 +308,20 @@ def test_render_page_labels_round_state_as_in_review(
     assert ">round</span>" not in header
 
 
+def test_render_page_has_copy_session_name_button(session_dir: Path, repo: Path):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+    header = html[html.index("<header>"):html.index("</header>")]
+
+    assert 'id="copy-session-id"' in header
+    assert 'class="copy-session-id"' in header
+    assert f'data-session-id="{s.id}"' in header
+    assert 'title="Copy session name"' in header
+    assert ">▣</button>" in header
+    assert "copyTextToClipboard" in html
+
+
 def test_render_page_uses_github_title_for_change_label(
     session_dir: Path, repo: Path
 ):

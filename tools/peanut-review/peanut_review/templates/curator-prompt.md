@@ -80,8 +80,10 @@ copy.
 
 # Finish
 
-Record one brief note summarizing how many comments you kept/rewrote/deleted
-and any validation command you ran.
+Record one brief summary in agent activity before signaling completion. Use
+`note`, not a review comment:
+
+`${PR_BIN} --session ${SESSION} note --message "Curated comments: kept/rewrote <n>, deleted <n>, merged <n>. Validation: <commands run or none>."`
 
 Then signal completion and exit immediately:
 

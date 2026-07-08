@@ -215,6 +215,8 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "Read your persona" in reviewer_prompt
     assert "comment curator" in curator_prompt
     assert "Reviewer agents: `vera`" in curator_prompt
+    assert "Record one brief summary in agent activity" in curator_prompt
+    assert "note --message" in curator_prompt
     assert "Read your persona" not in curator_prompt
 
 

@@ -215,6 +215,11 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "Read your persona" in reviewer_prompt
     assert "comment curator" in curator_prompt
     assert "Reviewer agents: `vera`" in curator_prompt
+    assert "Optimize for a small, high-signal final comment set" in curator_prompt
+    assert "collapse similar low-level findings into one concise global comment" in curator_prompt
+    assert curator_prompt.index("Optimize for a small") < curator_prompt.index(
+        "Classify reviewer comments as"
+    )
     assert "Record one brief summary in agent activity" in curator_prompt
     assert "note --message" in curator_prompt
     assert "Read your persona" not in curator_prompt

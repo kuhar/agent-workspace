@@ -40,6 +40,17 @@ Curate only local reviewer comments from the configured reviewer agents. Do
 not edit, delete, resolve, or reply to imported GitHub comments unless a human
 explicitly requested that in session comments or notes.
 
+Optimize for a small, high-signal final comment set:
+
+- prefer fewer total comments when the author can act on the same information
+  from one comment
+- collapse similar low-level findings into one concise global comment when the
+  shared pattern matters more than each individual anchor
+- include representative `file:line` examples in the grouped global comment,
+  then delete the redundant anchored copies
+- keep separate comments only for distinct blocking issues, findings that need
+  different owners/actions, or anchors where inline context is essential
+
 Classify reviewer comments as:
 
 - keep/rewrite: actionable, correct, and worth showing to the PR author

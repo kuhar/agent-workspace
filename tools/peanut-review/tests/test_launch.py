@@ -225,6 +225,9 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "We should ..." in curator_prompt
     assert "Should we ..." in curator_prompt
     assert "The risk here is that ..." in curator_prompt
+    assert "We shouldn't be ..." in curator_prompt
+    assert "I don't understand why ..." in curator_prompt
+    assert "It's not obvious to me why ..." in curator_prompt
     assert "If I am reading this right, ..." in curator_prompt
     assert "I'm not sure if this works when ..." in curator_prompt
     assert "Can we make this ...?" in curator_prompt

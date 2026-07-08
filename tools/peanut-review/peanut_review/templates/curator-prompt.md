@@ -78,6 +78,9 @@ Rewrite kept comments as concise author-facing review feedback:
   - safety or maintenance risk: "This would be safer if ...", "This might be
     easier to maintain if ...", "The risk here is that ...", "The issue I am
     worried about is ..."
+  - critical or surprising finding: "We shouldn't be ...",
+    "I don't understand why ...", "It's not obvious to me why ...",
+    "It's not obvious to me how ..."
   - conditional or uncertain read: "If this is intended to ..., we should ...",
     "If I am reading this right, ...", "Does this also need to handle ...?",
     "Should this also ...?", "I'm not sure if this works when ..."

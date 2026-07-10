@@ -217,6 +217,11 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "Reviewer agents: `vera`" in curator_prompt
     assert "Optimize for a small, high-signal final comment set" in curator_prompt
     assert "collapse similar low-level findings into one concise global comment" in curator_prompt
+    assert "visible, resolved, deleted, and imported GitHub comments" in curator_prompt
+    assert "Prefer existing threads over new duplicate comments" in curator_prompt
+    assert "add-comment --reply-to <comment-id>" in curator_prompt
+    assert "unresolve <comment-id>" in curator_prompt
+    assert "use one global comment when the global framing is more useful" in curator_prompt
     assert curator_prompt.index("Optimize for a small") < curator_prompt.index(
         "Classify reviewer comments as"
     )
@@ -244,6 +249,26 @@ def test_launch_curator_requires_configured_curator():
 
     with pytest.raises(ValueError, match="curator agent is not configured"):
         launch.launch_curator(sd, dry_run=True)
+
+
+def test_launch_curator_clears_stale_auto_launch_marker(tmp_path):
+    workspace = _workspace_with_cursor_config(tmp_path)
+    sd = _make_session_dir([
+        AgentConfig(name="vera", model="opus", persona="vera.md"),
+        AgentConfig(
+            name="Curator", model="opus",
+            role=AgentRole.CURATOR.value,
+        ),
+    ], workspace=workspace)
+    marker = Path(sd) / "signals" / "Curator.auto-launching"
+    marker.parent.mkdir(exist_ok=True)
+    marker.write_text("stale\n")
+
+    with patch("peanut_review.launch.subprocess.Popen", return_value=DummyProc()):
+        results = launch.launch_curator(sd)
+
+    assert [r["name"] for r in results] == ["Curator"]
+    assert not marker.exists()
 
 
 def test_launch_rejects_unknown_target_agent():
@@ -296,13 +321,20 @@ def test_reviewer_launch_records_curation_baseline_and_resets_curator(tmp_path):
 
 def test_launch_dry_run_codex_agent_cmd():
     sd = _make_session_dir([
-        AgentConfig(name="cleo", model="gpt-5.5", persona="vera.md", runner="codex"),
+        AgentConfig(
+            name="cleo",
+            model="gpt-5.5",
+            reasoning_effort="high",
+            persona="vera.md",
+            runner="codex",
+        ),
     ])
     results = launch.launch_agents(sd, dry_run=True)
     assert len(results) == 1
     cmd = results[0]["cmd"]
     assert cmd[0].endswith("codex-agent-task.sh")
     assert "--model" in cmd and "gpt-5.5" in cmd
+    assert "--reasoning-effort" in cmd and "high" in cmd
     # Codex needs unrestricted writes because workspace-write + --add-dir is
     # still read-only for the out-of-workspace session dir in current Codex.
     assert "--sandbox" in cmd and "danger-full-access" in cmd

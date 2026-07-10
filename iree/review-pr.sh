@@ -259,7 +259,14 @@ if [[ "$NO_LAUNCH" == 1 ]]; then
 else
   echo "== Launch =="
   if [[ "$SESSION_EXISTED" == 1 ]]; then
-    mapfile -t AGENTS < <(jq -r '.agents[].name' "$SESSION/session.json")
+    mapfile -t AGENTS < <(
+      jq -r '.agents[] | select((.role // "reviewer") != "curator") | .name' \
+        "$SESSION/session.json"
+    )
+    if ((${#AGENTS[@]} == 0)); then
+      echo "no reviewer agents configured in $SESSION/session.json" >&2
+      exit 1
+    fi
     RERUN_ARGS=()
     for agent in "${AGENTS[@]}"; do
       RERUN_ARGS+=(--agent "$agent")

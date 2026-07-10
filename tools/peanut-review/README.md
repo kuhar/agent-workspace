@@ -80,7 +80,7 @@ or repo:
   "repoRelative": "my-repo",
   "reviewAgentTimeoutSeconds": 1200,
   "agents": [
-    {"name": "Vera", "model": "gpt-5.5", "persona": "vera.md", "runner": "codex"},
+    {"name": "Vera", "model": "gpt-5.5", "reasoningEffort": "high", "persona": "vera.md", "runner": "codex"},
     {"name": "Irene", "model": "claude-opus-4-7-thinking-medium", "persona": "irene.md", "runner": "cursor"},
     {"name": "Curator", "model": "gpt-5.5-high", "runner": "cursor", "role": "curator"}
   ]

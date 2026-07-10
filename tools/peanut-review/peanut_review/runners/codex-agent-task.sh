@@ -12,6 +12,8 @@ full event stream is captured in stream.jsonl for debugging.
 Options:
   --model MODEL          Codex model id (e.g. gpt-5.5). Defaults to
                          codex's configured default if omitted.
+  --reasoning-effort EFFORT
+                         Override Codex model_reasoning_effort for this run.
   --workspace DIR        Workspace directory (required)
   --output-dir DIR       Output directory (default: <workspace>/.codex/tasks)
   --name NAME            Task name for the output subdirectory (default: timestamp)
@@ -32,6 +34,7 @@ EOF
 }
 
 model=""
+reasoning_effort=""
 workspace=""
 output_dir=""
 task_name=""
@@ -45,6 +48,7 @@ add_dirs=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model)       model="$2"; shift 2 ;;
+        --reasoning-effort) reasoning_effort="$2"; shift 2 ;;
         --workspace)   workspace="$2"; shift 2 ;;
         --output-dir)  output_dir="$2"; shift 2 ;;
         --name)        task_name="$2"; shift 2 ;;
@@ -115,6 +119,7 @@ pgid="$(ps -o pgid= -p "$$" | tr -d ' ' || true)"
 if command -v jq >/dev/null; then
     jq -n \
         --arg model "$model" \
+        --arg reasoning_effort "$reasoning_effort" \
         --arg workspace "$workspace" \
         --arg prompt "$prompt" \
         --arg start "$start_time" \
@@ -123,7 +128,8 @@ if command -v jq >/dev/null; then
         --arg pid "$$" \
         --arg pgid "$pgid" \
         --arg supervisor_pid "${PEANUT_SUPERVISOR_PID:-}" \
-        '{runner: "codex", model: $model, workspace: $workspace, prompt: $prompt,
+        '{runner: "codex", model: $model, reasoning_effort: $reasoning_effort,
+          workspace: $workspace, prompt: $prompt,
           start: $start, timeout: ($timeout | tonumber), sandbox: $sandbox,
           pid: ($pid | tonumber),
           pgid: (if $pgid == "" then null else ($pgid | tonumber) end),
@@ -134,6 +140,7 @@ fi
 echo "codex-task" >&2
 echo "  Runner:    codex (codex exec)" >&2
 echo "  Model:     ${model:-<codex default>}" >&2
+echo "  Reasoning: ${reasoning_effort:-<codex default>}" >&2
 echo "  Workspace: $workspace" >&2
 echo "  Sandbox:   $sandbox_mode" >&2
 echo "  Output:    $output_file" >&2
@@ -152,6 +159,9 @@ cmd=(codex exec
 
 if [[ -n "$model" ]]; then
     cmd+=(--model "$model")
+fi
+if [[ -n "$reasoning_effort" ]]; then
+    cmd+=(-c "model_reasoning_effort=\"$reasoning_effort\"")
 fi
 
 for d in "${add_dirs[@]}"; do

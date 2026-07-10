@@ -84,7 +84,7 @@ def test_supervisor_records_done_when_signal_exists(tmp_path):
     assert loaded.agents[0].supervisor_pid == os.getpid()
 
 
-def test_supervisor_auto_launches_curator_when_github_reviewers_done(tmp_path):
+def test_supervisor_does_not_auto_launch_curator_when_github_reviewers_done(tmp_path):
     sd = _make_session_dir(
         agents=[
             {"name": "vera", "model": "test-model", "persona": "vera.md"},
@@ -103,13 +103,7 @@ def test_supervisor_auto_launches_curator_when_github_reviewers_done(tmp_path):
         """,
     )
 
-    launched = []
-
-    def fake_launch_curator(session_dir):
-        launched.append(str(session_dir))
-        return [{"name": "Curator", "supervisor_pid": 12345}]
-
-    with patch("peanut_review.launch.launch_curator", side_effect=fake_launch_curator):
+    with patch("peanut_review.launch.launch_curator") as mocked:
         rc = supervise_agent(
             session_dir=sd,
             agent_name="vera",
@@ -119,11 +113,11 @@ def test_supervisor_auto_launches_curator_when_github_reviewers_done(tmp_path):
         )
 
     assert rc == 0
-    assert launched == [sd]
-    assert (Path(sd) / "signals" / "Curator.auto-launching").exists()
+    mocked.assert_not_called()
+    assert not (Path(sd) / "signals" / "Curator.auto-launching").exists()
 
 
-def test_supervisor_auto_launches_curator_only_once(tmp_path):
+def test_supervisor_leaves_curator_launch_to_wait_all_even_with_marker(tmp_path):
     sd = _make_session_dir(
         agents=[
             {"name": "vera", "model": "test-model", "persona": "vera.md"},

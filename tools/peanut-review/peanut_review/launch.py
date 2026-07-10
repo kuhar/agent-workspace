@@ -388,6 +388,8 @@ def _build_agent_cmd(
             "--add-dir", str(session_dir),
             "--add-dir", "/tmp",
         ]
+        if agent.reasoning_effort:
+            cmd += ["--reasoning-effort", agent.reasoning_effort]
     return cmd
 
 
@@ -574,6 +576,7 @@ def launch_curator(
     agents = _select_agents(session.agents, [curator_name])
     if not dry_run:
         _ensure_agents_not_live(sdir, agents)
+        _clear_curator_auto_launch_markers(sdir, agents)
         _clear_agent_round_state(sdir, [curator_name])
     return launch_agents(
         sdir,

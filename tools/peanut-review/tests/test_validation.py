@@ -36,7 +36,14 @@ def test_validate_project_config_normalizes_paths(tmp_path: Path):
             "repoRelative": "repo",
             "personasDir": "personas",
             "agents": [
-                {"name": "vera", "model": "opus", "persona": "vera.md"},
+                {
+                    "name": "vera",
+                    "model": "gpt-5.6-sol",
+                    "reasoningEffort": "high",
+                    "persona": "vera.md",
+                    "runner": "codex",
+                },
+                {"name": "irene", "model": "opus", "persona": "vera.md"},
             ],
         },
         config_path=config_path,
@@ -47,7 +54,9 @@ def test_validate_project_config_normalizes_paths(tmp_path: Path):
     assert cfg["workspace"] == str((tmp_path / "worktree").resolve())
     assert cfg["repoPath"] == str(workspace.resolve())
     assert cfg["personasDir"] == str(personas.resolve())
-    assert cfg["agents"][0]["runner"] == "cursor"
+    assert cfg["agents"][0]["runner"] == "codex"
+    assert cfg["agents"][0]["reasoningEffort"] == "high"
+    assert cfg["agents"][1]["runner"] == "cursor"
 
 
 def test_validate_project_config_reports_actionable_errors(tmp_path: Path):

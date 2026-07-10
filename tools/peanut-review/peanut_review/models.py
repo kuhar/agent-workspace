@@ -183,6 +183,7 @@ class Note:
 class AgentConfig:
     name: str = ""
     model: str = ""
+    reasoning_effort: str = ""
     persona: str = ""
     role: str = AgentRole.REVIEWER.value
     status: str = AgentStatus.PENDING.value
@@ -199,16 +200,20 @@ class AgentConfig:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        reasoning_effort = d.pop("reasoning_effort")
         return {
             k: v
             for k, v in d.items()
             if v is not None
             and not (k == "role" and v == AgentRole.REVIEWER.value)
-        }
+        } | ({"reasoningEffort": reasoning_effort} if reasoning_effort else {})
 
     @classmethod
     def from_dict(cls, d: dict) -> AgentConfig:
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        raw = dict(d)
+        if "reasoningEffort" in raw:
+            raw.setdefault("reasoning_effort", raw.pop("reasoningEffort"))
+        return cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass

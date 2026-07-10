@@ -104,6 +104,13 @@ def _validate_agent_configs(
                 f"(expected one of {', '.join(sorted(SUPPORTED_RUNNERS))})"
             )
 
+        reasoning_effort = agent.get("reasoningEffort", agent.get("reasoning_effort", ""))
+        if reasoning_effort:
+            if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
+                errors.append(f"{label}.reasoningEffort must be a non-empty string")
+            elif runner != "codex":
+                errors.append(f"{label}.reasoningEffort is only supported with runner 'codex'")
+
         try:
             agents.append(AgentConfig.from_dict(agent).to_dict())
         except TypeError as e:

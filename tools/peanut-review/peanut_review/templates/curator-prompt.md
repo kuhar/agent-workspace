@@ -36,9 +36,15 @@ If the session is GitHub-backed, also run:
 
 # Curation rules
 
-Curate only local reviewer comments from the configured reviewer agents. Do
-not edit, delete, resolve, or reply to imported GitHub comments unless a human
-explicitly requested that in session comments or notes.
+Curate local reviewer comments from the configured reviewer agents. Treat
+visible, resolved, deleted, and imported GitHub comments as duplicate history
+before deciding to keep any new finding.
+
+Do not edit or delete imported GitHub comments. If a new local reviewer finding
+duplicates an imported GitHub thread that is still the right place to discuss
+the issue, use that existing thread instead: run `unresolve <comment-id>` if
+needed, use `add-comment --reply-to <comment-id>` with the current evidence or
+remaining concern, then delete the new duplicate local comment.
 
 Optimize for a small, high-signal final comment set:
 
@@ -50,6 +56,20 @@ Optimize for a small, high-signal final comment set:
   then delete the redundant anchored copies
 - keep separate comments only for distinct blocking issues, findings that need
   different owners/actions, or anchors where inline context is essential
+
+Prefer existing threads over new duplicate comments:
+
+- if an unresolved thread already covers the same root issue, edit or reply to
+  that thread with any useful new detail using `add-comment --reply-to`, then
+  delete the duplicate new comment
+- if a resolved thread covers an issue that still applies, use `unresolve` and
+  `add-comment --reply-to` to explain what remains true on the current diff
+- if several old or new line comments are all examples of one broader pattern,
+  use one global comment when the global framing is more useful than another
+  inline thread, include representative `file:line` examples, and delete the
+  redundant local copies
+- do not reopen old threads for loosely related findings; only reuse a thread
+  when the author action and underlying bug/risk are the same
 
 Classify reviewer comments as:
 

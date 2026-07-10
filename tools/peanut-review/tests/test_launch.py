@@ -238,7 +238,12 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "I'm not sure if this works when ..." in curator_prompt
     assert "Can we make this ...?" in curator_prompt
     assert "do not use question form as the default" in curator_prompt
-    assert "Record one brief summary in agent activity" in curator_prompt
+    assert "Record one concise summary in agent activity" in curator_prompt
+    assert "deletion ledger with one entry" in curator_prompt
+    assert "including comments deleted after" in curator_prompt
+    assert "its original `file:line` anchor (or `global`)" in curator_prompt
+    assert "Do not group multiple deleted comments" in curator_prompt
+    assert "Deleted comments: none" in curator_prompt
     assert "note --message" in curator_prompt
     assert "Read your persona" not in curator_prompt
 

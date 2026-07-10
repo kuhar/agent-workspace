@@ -136,10 +136,15 @@ copy.
 
 # Finish
 
-Record one brief summary in agent activity before signaling completion. Use
-`note`, not a review comment:
+Record one concise summary in agent activity before signaling completion. Use
+`note`, not a review comment. Include a deletion ledger with one entry for
+every comment you deleted during this run, including comments deleted after
+merging their useful detail elsewhere. Each entry must name the comment ID,
+its original `file:line` anchor (or `global`), and a distinct brief
+justification. Do not group multiple deleted comments under one generic reason.
+If you deleted nothing, write `Deleted comments: none`.
 
-`${PR_BIN} --session ${SESSION} note --message "Curated comments: kept/rewrote <n>, deleted <n>, merged <n>. Validation: <commands run or none>."`
+`${PR_BIN} --session ${SESSION} note --message "Curated comments: kept/rewrote <n>, deleted <n>, merged <n>. Deleted comments: <comment-id> (<file:line or global>): <brief justification>; <comment-id> (<file:line or global>): <brief justification>. Validation: <commands run or none>."`
 
 Then signal completion and exit immediately:
 

@@ -300,12 +300,15 @@
     `;
   }
 
-  function renderThreadActions(parentId, resolved) {
+  function renderThreadActions(parentId, resolved, allowReply) {
     const toggle = resolved
       ? `<button data-unresolve="${esc(parentId)}">Unresolve</button>`
       : `<button data-resolve="${esc(parentId)}">Resolve</button>`;
+    const reply = allowReply
+      ? `<button class="reply-btn" data-reply-to="${esc(parentId)}">Reply</button>`
+      : "";
     return `<div class="thread-actions">
-      <button class="reply-btn" data-reply-to="${esc(parentId)}">Reply</button>
+      ${reply}
       ${toggle}
     </div>`;
   }
@@ -322,7 +325,7 @@
       <div class="${cls.join(" ")}" data-thread-id="${esc(parent.id)}" data-default-collapsed="${defaultCollapsed}">
         ${renderComment(parent)}
         <div class="thread-collapsed-summary" data-collapse-summary>${collapseSummary(0)}</div>
-        ${renderThreadActions(parent.id, parent.resolved)}
+        ${renderThreadActions(parent.id, parent.resolved, parent.file !== "")}
       </div>
     `;
   }
@@ -1903,7 +1906,9 @@
   }
   function renderReplyItem(it) {
     let tag;
-    if (it.parent_promoted_to_global) {
+    if (it.unsupported_reason) {
+      tag = `<span class="warn">${esc(it.unsupported_reason)}</span>`;
+    } else if (it.parent_promoted_to_global) {
       tag = `<span class="warn">skipped (parent promoted to global)</span>`;
     } else if (it.orphaned) {
       tag = `<span class="warn">orphaned (parent not pushed)</span>`;

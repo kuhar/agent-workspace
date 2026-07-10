@@ -38,7 +38,9 @@ def _agent_note_file(session_dir: str | Path, agent: str) -> Path:
     return _notes_dir(session_dir) / f"{agent}.jsonl"
 
 
-def _validate_comment_category(comment: Comment) -> None:
+def _validate_comment(comment: Comment) -> None:
+    if comment.reply_to and comment.file == "" and comment.line == 0:
+        raise ValueError("replies to global comments are not supported")
     comment.category = normalize_comment_category(comment.category)
     if category_is_review_decision(comment.category) and (
         comment.file != "" or comment.line != 0 or comment.reply_to
@@ -51,7 +53,7 @@ def _validate_comment_category(comment: Comment) -> None:
 
 def append_comment(session_dir: str | Path, comment: Comment) -> Comment:
     """Append a comment to the agent's JSONL file. Returns the comment."""
-    _validate_comment_category(comment)
+    _validate_comment(comment)
     path = _agent_file(session_dir, comment.author)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = comment.to_json() + "\n"
@@ -318,7 +320,7 @@ def edit_comment(
             c.severity = severity
         if normalized_category is not None:
             c.category = normalized_category
-        _validate_comment_category(c)
+        _validate_comment(c)
         c.edited_at = _now_iso()
         c.edited_by = edited_by
     return _mutate_comment(session_dir, comment_id, _apply)
@@ -430,7 +432,7 @@ def update_comment_external(
             c.timestamp = timestamp
         if category is not None:
             c.category = normalize_comment_category(category)
-            _validate_comment_category(c)
+            _validate_comment(c)
         if external_source is not None:
             c.external_source = external_source
         if external_id is not None:

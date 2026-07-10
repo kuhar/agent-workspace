@@ -116,9 +116,10 @@ class Comment:
     deleted: bool = False
     deleted_by: str | None = None
     deleted_at: str | None = None
-    # Threading — replies point at a top-level comment id. Replies do not
-    # nest: setting reply_to on a reply silently re-roots to its parent's
-    # parent, so trees are at most one level deep (GitHub-style).
+    # Threading — replies point at a top-level anchored comment id. Global
+    # comments cannot have replies because GitHub does not support them.
+    # Replies do not nest: setting reply_to on a reply silently re-roots to
+    # its parent's parent, so trees are at most one level deep (GitHub-style).
     reply_to: str | None = None
     # External provenance — set when imported from or pushed to a remote
     # provider (currently only "github"). external_synced_body holds the body

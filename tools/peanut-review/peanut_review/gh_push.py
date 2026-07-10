@@ -479,6 +479,14 @@ def execute_push(
                 result.pushed += 1
 
     for c in plan.new_replies:
+        if c.file == sess.GLOBAL_FILE:
+            result.items.append(PushItemResult(
+                id=c.id,
+                action="reply",
+                error="GitHub does not support replies to global comments",
+            ))
+            result.failed += 1
+            continue
         if c.reply_to in plan.promoted_anchors:
             result.items.append(PushItemResult(
                 id=c.id, action="reply",

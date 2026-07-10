@@ -445,9 +445,13 @@ def _render_thread(thread: list[Comment]) -> str:
         toggle_btn = f'<button data-unresolve="{pid}">Unresolve</button>'
     else:
         toggle_btn = f'<button data-resolve="{pid}">Resolve</button>'
+    reply_btn = (
+        "" if parent.file == GLOBAL_FILE
+        else f'<button class="reply-btn" data-reply-to="{pid}">Reply</button>'
+    )
     actions = (
         f'<div class="thread-actions">'
-        f'<button class="reply-btn" data-reply-to="{pid}">Reply</button>'
+        f'{reply_btn}'
         f'{toggle_btn}'
         f'</div>'
     )

@@ -474,6 +474,10 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
         parent = next(c for c in all_comments if c.id == reply_to)
+        if parent.file == sess.GLOBAL_FILE:
+            print("Error: replies to global comments are not supported",
+                  file=sys.stderr)
+            return 1
         file = parent.file
         line = parent.line
         end_line = None
@@ -758,7 +762,9 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
                 kind = "global" if c.file == sess.GLOBAL_FILE else f"{c.file}:{c.line}"
             print(f"[dry-run] {c.id} ({c.severity}, {c.category}) → {kind}")
         for c in plan.new_replies:
-            if c.reply_to in plan.promoted_anchors:
+            if c.file == sess.GLOBAL_FILE:
+                tag = "reply→<unsupported global comment>"
+            elif c.reply_to in plan.promoted_anchors:
                 tag = "reply→<parent promoted to global>"
             else:
                 parent_ext = plan.ext_map.get(c.reply_to)

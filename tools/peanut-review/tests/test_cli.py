@@ -925,6 +925,25 @@ def test_add_comment_reply_to_inherits_parent_location():
     assert reply.line == 2
 
 
+def test_add_comment_reply_to_global_comment_errors():
+    ws = _make_workspace({"foo.py": "alpha\n"})
+    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
+    _init_session(sd, workspace=ws)
+
+    main(["--session", sd, "add-global-comment", "--body", "scope concern",
+          "--author", "vera"])
+    from peanut_review.store import read_all_comments
+    parent_id = read_all_comments(sd)[0].id
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = main(["--session", sd, "add-comment", "--reply-to", parent_id,
+                   "--body", "agreed", "--author", "felix"])
+    assert rc == 1
+    assert "replies to global comments are not supported" in err.getvalue()
+    assert len(read_all_comments(sd)) == 1
+
+
 def test_add_comment_reply_to_unknown_id_errors():
     ws = _make_workspace({"foo.py": "a\n"})
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")

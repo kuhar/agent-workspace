@@ -85,7 +85,8 @@ before forming opinions:
    `git -C ${REPO_PATH} diff <original-head>..<fix-commit>` to see the actual fixes.
 
 For each rebutted finding, assess whether you agree with the rebuttal. If you
-disagree, post a reply to the original comment so the discussion stays threaded:
+disagree and the original comment is anchored to a file, post a reply so the
+discussion stays threaded:
 
 ```
 ${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
@@ -93,8 +94,10 @@ ${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
 ```
 
 `<c_id>` is the original comment ID. The reply inherits its file/line from
-the parent. For brand-new findings in the fix diff, use a regular
-`add-comment` or `add-global-comment`.
+the parent. GitHub does not support replies to global comments, so use a new
+`add-global-comment` instead when the original has no file/line anchor. For
+brand-new findings in the fix diff, use a regular `add-comment` or
+`add-global-comment`.
 
 IMPORTANT: `--line <N>` is the line number in the SOURCE FILE, not the diff
 output. Diff output shows lines like `@@ -10,5 +12,7 @@` and prefixes lines
@@ -173,5 +176,5 @@ ${PR_BIN} --session ${SESSION} ask "your question"
 ```
 
 This is the babysitting channel for being stuck. **Do not** use it for
-review discussion — for that, post a regular comment (or reply to an
-existing one with `--reply-to`).
+review discussion — for that, post a regular comment (or reply to an existing
+anchored one with `--reply-to`).

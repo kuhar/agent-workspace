@@ -471,6 +471,10 @@ class _Handler(BaseHTTPRequestHandler):
                     "approve/request-changes categories cannot be used on replies",
                 )
             parent = next(c for c in all_comments if c.id == reply_to)
+            if parent.file == GLOBAL_FILE:
+                return self._error(
+                    400, "replies to global comments are not supported"
+                )
             file = parent.file
             line = parent.line
             end_line = None
@@ -647,7 +651,13 @@ class _Handler(BaseHTTPRequestHandler):
             parent_ext = plan.ext_map.get(c.reply_to or "")
             parent_promoted = c.reply_to in promoted_ids
             parent_pending = c.reply_to in new_top_ids and not parent_promoted
-            orphaned = parent_ext is None and not parent_pending
+            unsupported_reason = (
+                "GitHub does not support replies to global comments"
+                if c.file == GLOBAL_FILE else None
+            )
+            orphaned = bool(unsupported_reason) or (
+                parent_ext is None and not parent_pending
+            )
             new_replies.append({
                 "id": c.id, "author": c.author,
                 "ref": _ref(parent) if parent else "?",
@@ -656,6 +666,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "parent_pending": parent_pending,
                 "parent_promoted_to_global": parent_promoted,
                 "orphaned": orphaned,
+                "unsupported_reason": unsupported_reason,
                 "body": c.body,
                 **_item_defaults(c),
             })
@@ -892,6 +903,8 @@ def _default_selected_push_ids(plan: gh_push.PushPlan, agent_authors: set[str]) 
     }
     for c in plan.new_replies:
         if c.author.lower() in agent_authors:
+            continue
+        if c.file == GLOBAL_FILE:
             continue
         parent_id = c.reply_to or ""
         if plan.ext_map.get(parent_id) or parent_id in selected:

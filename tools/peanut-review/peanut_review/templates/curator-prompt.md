@@ -41,10 +41,14 @@ visible, resolved, deleted, and imported GitHub comments as duplicate history
 before deciding to keep any new finding.
 
 Do not edit or delete imported GitHub comments. If a new local reviewer finding
-duplicates an imported GitHub thread that is still the right place to discuss
-the issue, use that existing thread instead: run `unresolve <comment-id>` if
-needed, use `add-comment --reply-to <comment-id>` with the current evidence or
-remaining concern, then delete the new duplicate local comment.
+duplicates an imported anchored GitHub thread that is still the right place to
+discuss the issue, use that existing thread instead: run
+`unresolve <comment-id>` if needed, use `add-comment --reply-to <comment-id>`
+with the current evidence or remaining concern, then delete the new duplicate
+local comment. GitHub does not support replies to global comments, so never use
+a global comment ID with `--reply-to`. If the imported global comment already
+covers the finding, delete the local duplicate; if material new evidence is
+needed, keep one concise top-level global comment.
 
 Optimize for a small, high-signal final comment set:
 
@@ -59,11 +63,12 @@ Optimize for a small, high-signal final comment set:
 
 Prefer existing threads over new duplicate comments:
 
-- if an unresolved thread already covers the same root issue, edit or reply to
-  that thread with any useful new detail using `add-comment --reply-to`, then
-  delete the duplicate new comment
-- if a resolved thread covers an issue that still applies, use `unresolve` and
-  `add-comment --reply-to` to explain what remains true on the current diff
+- if an unresolved anchored thread already covers the same root issue, edit or
+  reply to that thread with any useful new detail using
+  `add-comment --reply-to`, then delete the duplicate new comment
+- if a resolved anchored thread covers an issue that still applies, use
+  `unresolve` and `add-comment --reply-to` to explain what remains true on the
+  current diff
 - if several old or new line comments are all examples of one broader pattern,
   use one global comment when the global framing is more useful than another
   inline thread, include representative `file:line` examples, and delete the

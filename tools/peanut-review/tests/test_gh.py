@@ -1078,6 +1078,30 @@ def test_gh_push_pushes_reply_after_parent(gh_shim, tmp_path):
     assert by_body["reply"].external_in_reply_to == "200"
 
 
+def test_gh_push_rejects_legacy_global_reply_without_api_call(gh_shim, tmp_path):
+    sd = _make_gh_session(tmp_path)
+    parent = models.Comment(
+        author="gh:octocat", file="", line=0, body="global",
+        external_source="github", external_id="100",
+        external_synced_body="global",
+    )
+    reply = models.Comment(
+        author="felix", file="", line=0, body="reply",
+        reply_to=parent.id,
+    )
+    plan = gh_push.plan_push([parent, reply])
+    session = sess.load_session(sd)
+    assert session.github is not None
+
+    result = gh_push.execute_push(sd, session, session.github, plan)
+
+    assert result.failed == 1
+    assert result.items[0].error == (
+        "GitHub does not support replies to global comments"
+    )
+    assert gh_shim.calls() == []
+
+
 def test_gh_push_skips_orphan_replies(gh_shim, tmp_path):
     """If a reply's parent has no external_id (e.g. parent was deleted or
     filtered out), the reply is skipped with an 'orphaned' counter."""

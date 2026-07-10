@@ -320,6 +320,19 @@ def test_global_comment_stores_with_empty_file_and_zero_line():
     assert cs[0].line == 0
 
 
+def test_reply_to_global_comment_is_rejected():
+    sd = _make_session()
+    parent = append_comment(sd, Comment(
+        author="vera", file="", line=0, body="scope concern",
+    ))
+    import pytest
+    with pytest.raises(ValueError, match="replies to global comments"):
+        append_comment(sd, Comment(
+            author="felix", file="", line=0, body="agreed",
+            reply_to=parent.id,
+        ))
+
+
 def test_edit_rewrites_body_and_records_prior_version():
     sd = _make_session()
     c = Comment(author="vera", file="a.py", line=1, body="v1", severity="nit")

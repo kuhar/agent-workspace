@@ -222,6 +222,7 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "add-comment --reply-to <comment-id>" in curator_prompt
     assert "unresolve <comment-id>" in curator_prompt
     assert "use one global comment when the global framing is more useful" in curator_prompt
+    assert "global comment ID with `--reply-to`" in curator_prompt
     assert curator_prompt.index("Optimize for a small") < curator_prompt.index(
         "Classify reviewer comments as"
     )

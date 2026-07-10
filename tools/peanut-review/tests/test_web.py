@@ -542,6 +542,7 @@ def test_render_global_section_appears_above_files(session_dir: Path, repo: Path
     g_idx = html.index('id="global-comments"')
     g_close = html.index("</section>", g_idx)
     assert "scope concern" in html[g_idx:g_close]
+    assert f'data-reply-to="{g.id}"' not in html[g_idx:g_close]
     # Anchored comment is still in its file thread, not the global section.
     assert "anchored" in html
     assert "anchored" not in html[g_idx:g_close]
@@ -784,6 +785,23 @@ def test_server_post_reply_and_unresolve(session_dir: Path):
         cs = store.read_all_comments(session_dir)
         parent_stored = next(c for c in cs if c.id == parent["id"])
         assert parent_stored.resolved is False
+    finally:
+        srv.shutdown()
+
+
+def test_server_rejects_reply_to_global_comment(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        _, parent = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"scope": "global", "body": "scope concern", "author": "vera"},
+        )
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/comments",
+            {"reply_to": parent["id"], "body": "agreed", "author": "felix"},
+        )
+        assert code == 400
+        assert data["error"] == "replies to global comments are not supported"
     finally:
         srv.shutdown()
 
@@ -1844,6 +1862,16 @@ def test_client_comment_renderer_includes_relative_time():
     assert "function commentTime" in block
     assert '"comment-time"' in block
     assert "${commentTime(c)}" in block
+
+
+def test_client_comment_renderer_hides_global_reply_action():
+    text = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
+    start = text.index("function renderThreadActions")
+    end = text.index("const THREAD_COLLAPSE_KEY", start)
+    block = text[start:end]
+
+    assert "allowReply" in block
+    assert 'parent.file !== ""' in block
 
 
 def test_client_comment_renderer_supports_thread_collapse():

@@ -111,6 +111,13 @@ def _validate_agent_configs(
             elif runner != "codex":
                 errors.append(f"{label}.reasoningEffort is only supported with runner 'codex'")
 
+        fast_mode = agent.get("fastMode", agent.get("fast_mode"))
+        if fast_mode is not None:
+            if not isinstance(fast_mode, bool):
+                errors.append(f"{label}.fastMode must be a boolean")
+            elif runner != "codex":
+                errors.append(f"{label}.fastMode is only supported with runner 'codex'")
+
         try:
             agents.append(AgentConfig.from_dict(agent).to_dict())
         except TypeError as e:

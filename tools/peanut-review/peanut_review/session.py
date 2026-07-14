@@ -143,7 +143,7 @@ def create_session(
     sdir = Path(session_dir)
 
     # Create directory structure
-    for subdir in ["comments", "notes", "signals", "messages", "prompts", "log"]:
+    for subdir in ["comments", "notes", "signals", "prompts", "log"]:
         (sdir / subdir).mkdir(parents=True, exist_ok=True)
 
     # Copy personas

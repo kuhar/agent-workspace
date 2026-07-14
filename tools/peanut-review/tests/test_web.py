@@ -819,44 +819,6 @@ def test_server_post_reply_unknown_parent_returns_404(session_dir: Path):
         srv.shutdown()
 
 
-def test_server_inbox_endpoint_and_render(session_dir: Path, tmp_path: Path):
-    """Posting an ask + reply via polling.write_question/write_reply lands
-    in /api/inbox and in the rendered transcript section."""
-    from peanut_review import polling
-    polling.write_question(session_dir, "vera", "python isn't on PATH")
-    polling.write_reply(session_dir, "vera", "q_001",
-                        "source .venv/bin/activate first")
-
-    srv, session_id, port = _start_server(session_dir)
-    try:
-        code, data = _get(f"http://127.0.0.1:{port}/{session_id}/api/inbox")
-        assert code == 200
-        entries = json.loads(data)
-        assert len(entries) == 1
-        e = entries[0]
-        assert e["agent"] == "vera"
-        assert e["id"] == "q_001"
-        assert e["question"].startswith("python isn't")
-        assert e["reply"] is not None
-        assert e["reply"]["answer"].startswith("source .venv")
-        qts = e["timestamp"]
-        ats = e["reply"]["timestamp"]
-
-        # Page render must include the inbox section + a data-key per entry.
-        code, body = _get(f"http://127.0.0.1:{port}/{session_id}")
-        assert code == 200
-        text = body.decode("utf-8")
-        assert 'id="inbox"' in text
-        assert 'Agent help inbox' in text
-        assert 'data-key="vera/q_001"' in text
-        assert 'data-replied="1"' in text
-        assert f'<time class="comment-time ix-time" datetime="{qts}" title="{qts}">' in text
-        assert f'<time class="comment-time ix-time" datetime="{ats}" title="{ats}">' in text
-        assert f'<span class="ts mono">{qts}</span>' not in text
-    finally:
-        srv.shutdown()
-
-
 def test_server_notes_endpoint_and_render(session_dir: Path):
     store.append_note(session_dir, Note(
         author="petra",
@@ -873,11 +835,17 @@ def test_server_notes_endpoint_and_render(session_dir: Path):
         assert notes[0]["author"] == "petra"
         assert notes[0]["body"].startswith("## Test Execution")
 
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(f"http://127.0.0.1:{port}/{session_id}/api/inbox")
+        assert exc.value.code == 404
+
         code, body = _get(f"http://127.0.0.1:{port}/{session_id}")
         assert code == 200
         text = body.decode("utf-8")
-        assert 'id="inbox"' in text
-        assert "Agent activity" in text
+        assert 'id="reports"' in text
+        assert "Agent reports" in text
+        assert "comment curation" in text
+        assert 'id="inbox"' not in text
         assert 'data-key="note/' in text
         assert (
             '<time class="comment-time ix-time" datetime="2020-01-01T00:00:00+00:00" '
@@ -1070,6 +1038,7 @@ def test_server_session_api(session_dir: Path):
         assert data["agents"][0]["model"] == "m"
         assert data["agents"][0]["process_status"] == "pending"
         assert data["agents"][0]["protocol_status"] == "pending"
+        assert "unanswered" not in data["agents"][0]
     finally:
         srv.shutdown()
 
@@ -1953,15 +1922,13 @@ def test_client_theme_toggle_cycles_between_system_dark_plus_and_light():
         assert 'setStoredTheme(THEMES[(idx + 1) % THEMES.length].value)' in text
 
 
-def test_client_agent_activity_renderer_uses_relative_time():
+def test_client_agent_report_renderer_uses_relative_time():
     text = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
-    start = text.index("function renderNoteEntry")
-    end = text.index("function activityEntry", start)
+    start = text.index("function renderReportEntry")
+    end = text.index("function reportKey", start)
     block = text[start:end]
 
     assert "activityTime(note.timestamp" in block
-    assert "activityTime(entry.timestamp" in block
-    assert "activityTime(entry.reply.timestamp" in block
     assert "ix-time" in text
     assert 'class="ts mono"' not in block
 

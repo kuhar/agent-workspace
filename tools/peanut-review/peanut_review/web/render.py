@@ -228,81 +228,32 @@ def _render_note_entry(note: Note) -> str:
     ts = _time_tag(note.timestamp, extra_class="ix-time")
     body = html.escape(note.body)
     return (
-        f'<div class="activity-entry note-entry" data-note-id="{nid}" '
-        f'data-key="note/{nid}" data-kind="note">'
+        f'<div class="report-entry note-entry" data-note-id="{nid}" '
+        f'data-key="note/{nid}" data-kind="report">'
         f'<div class="ix-q"><span class="ix-meta">'
         f'<span class="agent">{agent}</span>'
         f'<span class="qid mono">{nid}</span>'
-        f'<span class="kind">note</span>'
+        f'<span class="kind">report</span>'
         f'{ts}'
         f'</span><pre class="ix-body note-body">{body}</pre></div>'
         f'</div>'
     )
 
 
-def _render_inbox_entry(entry: dict) -> str:
-    agent = html.escape(entry.get("agent", ""))
-    qid = html.escape(entry.get("id", ""))
-    qts = _time_tag(entry.get("timestamp", ""), extra_class="ix-time")
-    qtext = html.escape(entry.get("question", ""))
-    reply = entry.get("reply")
-    row = [
-        f'<div class="activity-entry ix-entry" data-qid="{qid}" '
-        f'data-key="{agent}/{qid}" '
-        f'data-kind="question" data-replied="{1 if reply else 0}">',
-        f'<div class="ix-q"><span class="ix-meta">'
-        f'<span class="agent">{agent}</span>'
-        f'<span class="qid mono">{qid}</span>'
-        f'<span class="kind">question</span>'
-        f'{qts}'
-        f'</span><pre class="ix-body">{qtext}</pre></div>',
-    ]
-    if reply:
-        ats = _time_tag(reply.get("timestamp", ""), extra_class="ix-time")
-        aby = html.escape(reply.get("answered_by", "orchestrator"))
-        atext = html.escape(reply.get("answer", ""))
-        row.append(
-            f'<div class="ix-r"><span class="ix-meta">'
-            f'<span class="agent">↳ {aby}</span>'
-            f'{ats}'
-            f'</span><pre class="ix-body">{atext}</pre></div>'
-        )
-    else:
-        row.append('<div class="ix-r pending"><span class="ix-meta">'
-                   '<span class="agent">↳ awaiting reply…</span>'
-                   '</span></div>')
-    row.append('</div>')
-    return "".join(row)
-
-
-def render_inbox_section(transcript: list[dict], notes: list[Note] | None = None) -> str:
-    """Bottom-of-page section showing agent activity.
-
-    Notes are read-only free-form activity; questions still use the existing
-    ask/reply blocking flow. The browser polls both streams and reconciles
-    this list in place.
-    """
-    notes = notes or []
-    rows: list[tuple[str, str]] = []
-    rows.extend((n.timestamp, _render_note_entry(n)) for n in notes)
-    rows.extend((entry.get("timestamp", ""), _render_inbox_entry(entry))
-                for entry in transcript)
-    rows.sort(key=lambda pair: pair[0])
-
-    if not rows:
-        body = (
-            '<p class="muted">No agent activity yet. Agent notes and '
-            '<code>peanut-review ask</code> questions appear here.</p>'
-        )
-    else:
-        body = "".join(row for _, row in rows)
+def render_report_section(notes: list[Note] | None = None) -> str:
+    """Bottom-of-page section showing non-review agent reports."""
+    notes = sorted(notes or [], key=lambda note: note.timestamp)
+    body = (
+        "".join(_render_note_entry(note) for note in notes)
+        if notes
+        else '<p class="muted empty-reports">No agent reports yet.</p>'
+    )
     return (
-        '<section class="inbox-section" id="inbox">'
-        '<h2>Agent activity</h2>'
-        '<p class="hint muted">Free-form agent notes plus the Agent help inbox '
-        'for blocked agents (<code>peanut-review note</code>, '
-        '<code>ask</code> / <code>reply</code>). Read-only here.</p>'
-        f'<div class="ix-list" id="inbox-list">{body}</div>'
+        '<section class="report-section" id="reports">'
+        '<h2>Agent reports</h2>'
+        '<p class="hint muted">Non-review reports such as test execution and '
+        'comment curation (<code>peanut-review note</code>). Read-only here.</p>'
+        f'<div class="ix-list" id="report-list">{body}</div>'
         '</section>'
     )
 
@@ -861,7 +812,6 @@ def _render_sidebar(
     session: Session,
     comments: list[Comment],
     files: list[FileDiff],
-    inbox_transcript: list[dict] | None = None,
     notes: list[Note] | None = None,
     agent_runtime: dict[str, dict[str, str]] | None = None,
 ) -> str:
@@ -939,7 +889,7 @@ def _render_sidebar(
         if review:
             detail_fields.append(
                 '<span class="agent-state-field" '
-                'title="Review protocol state: pending, asking, or done">'
+                'title="Review protocol state: pending or done">'
                 '<span class="agent-state-label">review</span> '
                 f'<span class="agent-state-value">{html.escape(review)}</span>'
                 '</span>'
@@ -1010,30 +960,21 @@ def _render_sidebar(
         '</span>'
     )
 
-    # Activity jump row: same shape as global-row so it shares the file-row
-    # layout/CSS. Pending = unanswered agent questions; total = notes plus
-    # all ask/reply transcript entries.
-    transcript = inbox_transcript or []
-    note_count = len(notes or [])
-    inbox_total = len(transcript) + note_count
-    inbox_pending = sum(1 for e in transcript if not e.get("reply"))
-    if inbox_pending > 0:
-        inbox_counts_html = (
-            f'<span class="count open">{inbox_pending}</span>'
-            f'<span class="count muted">/{inbox_total}</span>'
-        )
-    elif inbox_total > 0:
-        inbox_counts_html = f'<span class="count muted">{inbox_total}</span>'
-    else:
-        inbox_counts_html = '<span class="count empty">—</span>'
-    inbox_row = (
-        '<li class="file-row inbox-row" data-inbox="1" '
-        'title="Jump to agent activity">'
-        '<a href="#inbox" class="path-link">'
+    # Reports jump row: same shape as global-row so it shares the file-row
+    # layout/CSS. Reports are non-review notes from reviewers and curators.
+    report_count = len(notes or [])
+    report_counts_html = (
+        f'<span class="count muted">{report_count}</span>'
+        if report_count else '<span class="count empty">—</span>'
+    )
+    report_row = (
+        '<li class="file-row report-row" data-reports="1" '
+        'title="Jump to agent reports">'
+        '<a href="#reports" class="path-link">'
         '<div class="top-row">'
-        '<span class="status s-A">A</span>'
-        '<span class="name">Agent activity</span>'
-        f'<span class="counts" id="inbox-counts" data-counts>{inbox_counts_html}</span>'
+        '<span class="status s-R">R</span>'
+        '<span class="name">Agent reports</span>'
+        f'<span class="counts" id="report-counts" data-counts>{report_counts_html}</span>'
         '</div>'
         '</a>'
         '</li>'
@@ -1045,7 +986,7 @@ def _render_sidebar(
         f'<h3>Files ({len(files)})</h3>'
         f'{file_totals}'
         '</div>'
-        f'<ul class="files">{global_row}{file_rows}{inbox_row}</ul>'
+        f'<ul class="files">{global_row}{file_rows}{report_row}</ul>'
         '<h3>Session</h3>'
         '<ul>'
         f'<li data-k="state"><span>state</span><span class="v">{html.escape(session.state)}</span></li>'
@@ -1275,25 +1216,22 @@ def render_page(
     notes: list[Note] | None = None,
     head_shifted: bool = False,
     base_url: str = "",
-    inbox_transcript: list[dict] | None = None,
     agent_runtime: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """Build the full HTML page for a session.
 
     `base_url` is the path prefix the app is mounted under (empty → root).
-    `notes` and `inbox_transcript` are the agent activity streams rendered at
-    the bottom; None falls back to empty so tests/non-server callers don't
-    have to pass them.
+    `notes` are non-review agent reports rendered at the bottom; None falls
+    back to empty so tests/non-server callers do not have to pass them.
     """
     threads_at = _group_threads_by_anchor(comments)
-    transcript = inbox_transcript or []
     note_items = notes or []
     file_html = "".join(_render_file(fd, threads_at) for fd in files)
     global_html = _render_global_section(comments)
-    inbox_html = render_inbox_section(transcript, note_items)
+    report_html = render_report_section(note_items)
     sidebar = _render_sidebar(
         session, comments, files,
-        inbox_transcript=transcript, notes=note_items,
+        notes=note_items,
         agent_runtime=agent_runtime,
     )
 
@@ -1382,7 +1320,7 @@ def render_page(
     {sidebar}
     {global_html}
     {file_html}
-    {inbox_html}
+    {report_html}
   </main>
   <div id="gh-push-modal" class="modal" hidden>
     <div class="modal-backdrop" data-modal-close></div>

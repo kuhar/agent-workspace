@@ -47,8 +47,9 @@ def test_create_session(mock_git):
 
     # Directory structure created
     assert (Path(session_dir) / "comments").is_dir()
+    assert (Path(session_dir) / "notes").is_dir()
     assert (Path(session_dir) / "signals").is_dir()
-    assert (Path(session_dir) / "messages").is_dir()
+    assert not (Path(session_dir) / "messages").exists()
     assert (Path(session_dir) / "prompts").is_dir()
     assert (Path(session_dir) / "log").is_dir()
     assert (Path(session_dir) / "session.json").is_file()

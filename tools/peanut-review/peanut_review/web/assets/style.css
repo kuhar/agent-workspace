@@ -203,7 +203,7 @@ body {
   line-height: 1.5;
 }
 /* Sticky headers would otherwise overlap anchor jump targets. */
-.inbox-section, .global-section, .file {
+.report-section, .global-section, .file {
   scroll-margin-top: calc(var(--sticky-app-header-height) + 10px);
 }
 code, pre, .mono {
@@ -297,7 +297,7 @@ main {
   }
 }
 
-.inbox-section {
+.report-section {
   border: 1px solid var(--border);
   border-left: 3px solid var(--muted);
   border-radius: 6px;
@@ -305,7 +305,7 @@ main {
   padding: 12px 16px;
   background: var(--surface);
 }
-.inbox-section h2 {
+.report-section h2 {
   margin: 0 0 4px 0;
   font-size: 13px;
   font-weight: 500;
@@ -313,29 +313,27 @@ main {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.inbox-section .hint { margin: 0 0 10px 0; font-size: 11px; }
-.inbox-section .hint code {
+.report-section .hint { margin: 0 0 10px 0; font-size: 11px; }
+.report-section .hint code {
   background: var(--code-bg); padding: 1px 4px; border-radius: 2px;
   font-size: 11px; color: var(--fg);
 }
-.inbox-section .activity-entry {
+.report-section .report-entry {
   border-top: 1px solid var(--border);
   padding: 8px 0;
 }
-.inbox-section .activity-entry:first-child { border-top: 0; }
-.inbox-section .ix-q, .inbox-section .ix-r { margin: 4px 0; }
-.inbox-section .ix-r { margin-left: 20px; }
-.inbox-section .ix-r.pending .agent { color: var(--warning); }
-.inbox-section .ix-meta {
+.report-section .report-entry:first-child { border-top: 0; }
+.report-section .ix-q { margin: 4px 0; }
+.report-section .ix-meta {
   display: flex;
   gap: 10px;
   font-size: 11px;
   color: var(--muted);
   margin-bottom: 2px;
 }
-.inbox-section .ix-meta .agent { color: var(--fg); font-weight: 600; }
-.inbox-section .ix-meta .kind { color: var(--accent); }
-.inbox-section .ix-body {
+.report-section .ix-meta .agent { color: var(--fg); font-weight: 600; }
+.report-section .ix-meta .kind { color: var(--accent); }
+.report-section .ix-body {
   margin: 0;
   padding: 6px 10px;
   background: var(--code-bg);
@@ -346,8 +344,7 @@ main {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.inbox-section .ix-r .ix-body { border-left-color: var(--accent); }
-.inbox-section .note-body { border-left-color: var(--suggestion); }
+.report-section .note-body { border-left-color: var(--suggestion); }
 
 .global-section {
   border: 1px solid var(--border);
@@ -395,12 +392,12 @@ main {
 #sidebar ul.files .file-row.global-row .status.s-G {
   color: var(--accent);
 }
-#sidebar ul.files .file-row.inbox-row {
+#sidebar ul.files .file-row.report-row {
   border-top: 1px dashed var(--border);
   margin-top: 4px;
   padding-top: 6px;
 }
-#sidebar ul.files .file-row.inbox-row .status.s-A {
+#sidebar ul.files .file-row.report-row .status.s-R {
   color: var(--accent);
 }
 

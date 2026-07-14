@@ -1367,9 +1367,9 @@
       if (!c.resolved) open.set(c.file, (open.get(c.file) || 0) + 1);
     }
     for (const li of document.querySelectorAll('#sidebar ul.files li.file-row')) {
-      // The inbox-row also lives in this list but its counts are owned by
-      // refreshInbox — don't clobber them with comment-count data.
-      if (li.dataset.inbox) continue;
+      // The report row also lives in this list but its count is owned by
+      // refreshReports — don't clobber it with comment-count data.
+      if (li.dataset.reports) continue;
       const cell = li.querySelector('[data-counts]');
       if (!cell) continue;
       if (li.dataset.global) {
@@ -1455,21 +1455,20 @@
   }
   setInterval(refreshComments, 3000);
 
-  // --- Agent activity: notes plus ask/reply transcript ---
-  // Read-only. Polled on the same 3s cadence as comments so a reviewer
-  // watching the page sees test notes, blocking questions, and replies land
-  // without manual refresh.
-  function renderNoteEntry(note) {
+  // --- Agent reports ---
+  // Read-only notes for non-review output such as test execution and comment
+  // curation. Polled on the same 3s cadence as comments.
+  function renderReportEntry(note) {
     const id = esc(note.id || "");
     const agent = esc(note.author || "unknown");
     const ts = activityTime(note.timestamp || "");
     const body = esc(note.body || "");
-    return `<div class="activity-entry note-entry" data-note-id="${id}" data-key="note/${id}" data-kind="note">
+    return `<div class="report-entry note-entry" data-note-id="${id}" data-key="note/${id}" data-kind="report">
         <div class="ix-q">
           <span class="ix-meta">
             <span class="agent">${agent}</span>
             <span class="qid mono">${id}</span>
-            <span class="kind">note</span>
+            <span class="kind">report</span>
             ${ts}
           </span>
           <pre class="ix-body note-body">${body}</pre>
@@ -1477,134 +1476,68 @@
       </div>`;
   }
 
-  function renderInboxEntry(entry) {
-    const agent = esc(entry.agent || "");
-    const qid = esc(entry.id || "");
-    const qts = activityTime(entry.timestamp || "");
-    const qtext = esc(entry.question || "");
-    let replyHtml;
-    if (entry.reply) {
-      const ats = activityTime(entry.reply.timestamp || "");
-      const aby = esc(entry.reply.answered_by || "orchestrator");
-      const atext = esc(entry.reply.answer || "");
-      replyHtml = `<div class="ix-r">
-          <span class="ix-meta">
-            <span class="agent">↳ ${aby}</span>
-            ${ats}
-          </span>
-          <pre class="ix-body">${atext}</pre>
-        </div>`;
-    } else {
-      replyHtml = `<div class="ix-r pending">
-          <span class="ix-meta"><span class="agent">↳ awaiting reply…</span></span>
-        </div>`;
-    }
-    return `<div class="activity-entry ix-entry" data-qid="${qid}" data-key="${agent}/${qid}" data-kind="question" data-replied="${entry.reply ? "1" : "0"}">
-        <div class="ix-q">
-          <span class="ix-meta">
-            <span class="agent">${agent}</span>
-            <span class="qid mono">${qid}</span>
-            <span class="kind">question</span>
-            ${qts}
-          </span>
-          <pre class="ix-body">${qtext}</pre>
-        </div>
-        ${replyHtml}
-      </div>`;
+  function reportKey(note) {
+    return `note/${note.id}`;
   }
 
-  function activityEntry(entry) {
-    return entry.kind === "note" ? renderNoteEntry(entry) : renderInboxEntry(entry);
-  }
-
-  function activityKey(entry) {
-    if (entry.kind === "note") return `note/${entry.id}`;
-    // Question id is unique only within an agent — combine with agent name.
-    return `${entry.agent}/${entry.id}`;
-  }
-
-  function entryReplied(entry) {
-    return entry.kind !== "note" && entry.reply ? 1 : 0;
-  }
-
-  function updateInboxCounts(fetched) {
-    const el = document.getElementById("inbox-counts");
+  function updateReportCounts(fetched) {
+    const el = document.getElementById("report-counts");
     if (!el) return;
     const total = fetched.length;
-    const pending = fetched.reduce(
-      (n, e) => n + (e.kind === "note" || e.reply ? 0 : 1), 0
-    );
-    let html;
-    if (pending > 0) {
-      html = `<span class="count open">${pending}</span>`
-           + `<span class="count muted">/${total}</span>`;
-    } else if (total > 0) {
-      html = `<span class="count muted">${total}</span>`;
-    } else {
-      html = '<span class="count empty">—</span>';
-    }
+    const html = total > 0
+      ? `<span class="count muted">${total}</span>`
+      : '<span class="count empty">—</span>';
     if (el.innerHTML !== html) el.innerHTML = html;
   }
 
-  async function refreshInbox() {
-    const list = document.getElementById("inbox-list");
+  async function refreshReports() {
+    const list = document.getElementById("report-list");
     if (!list) return;
-    let transcript, notes;
+    let fetched;
     try {
-      const [inboxResp, notesResp] = await Promise.all([
-        fetch(sessionUrl + "/api/inbox"),
-        fetch(sessionUrl + "/api/notes"),
-      ]);
-      if (!inboxResp.ok || !notesResp.ok) return;
-      transcript = await inboxResp.json();
-      notes = await notesResp.json();
+      const response = await fetch(sessionUrl + "/api/notes");
+      if (!response.ok) return;
+      fetched = await response.json();
     } catch { return; }
-    const fetched = [
-      ...notes.map((n) => ({ ...n, kind: "note" })),
-      ...transcript.map((e) => ({ ...e, kind: "question" })),
-    ].sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
-    updateInboxCounts(fetched);
+    fetched.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+    updateReportCounts(fetched);
 
-    // Snapshot current DOM state keyed by qid + reply-flag so we can detect:
+    // Snapshot current DOM state keyed by note id so we can detect:
     //   - new entries (insert)
     //   - vanished entries (remove — rare, only via manual file deletion)
-    //   - reply landed on a previously-pending entry (replace that node)
     const fetchedByKey = new Map();
-    for (const e of fetched) fetchedByKey.set(activityKey(e), e);
+    for (const note of fetched) fetchedByKey.set(reportKey(note), note);
     const domByKey = new Map();
-    for (const el of list.querySelectorAll(".activity-entry")) {
-      const key = el.dataset.key || el.dataset.qid;
-      domByKey.set(key, el);
+    for (const el of list.querySelectorAll(".report-entry")) {
+      domByKey.set(el.dataset.key, el);
     }
 
     // Cheap no-op short-circuit.
     let dirty = fetched.length !== domByKey.size;
     if (!dirty) {
-      for (const [key, e] of fetchedByKey) {
-        const el = domByKey.get(key);
-        if (!el) { dirty = true; break; }
-        const had = el.dataset.replied === "1";
-        if (had !== !!entryReplied(e)) { dirty = true; break; }
+      for (const key of fetchedByKey.keys()) {
+        if (!domByKey.has(key)) { dirty = true; break; }
       }
     }
     if (!dirty) return;
 
     withStableScroll(() => {
-      // Rebuild the list in fetched order. Cheap because the count is
-      // small (one entry per agent question). Stable-scroll handles the
-      // reflow so reviewers reading mid-page don't jump.
+      // Rebuild the list in fetched order. Stable-scroll handles the reflow
+      // so reviewers reading mid-page do not jump.
       list.innerHTML = "";
-      for (const e of fetched) {
+      for (const note of fetched) {
         const wrap = document.createElement("div");
-        wrap.innerHTML = activityEntry(e);
+        wrap.innerHTML = renderReportEntry(note);
         const node = wrap.firstElementChild;
-        node.dataset.key = activityKey(e);
-        node.dataset.replied = entryReplied(e) ? "1" : "0";
+        node.dataset.key = reportKey(note);
         list.appendChild(node);
+      }
+      if (!fetched.length) {
+        list.innerHTML = '<p class="muted empty-reports">No agent reports yet.</p>';
       }
     });
   }
-  setInterval(refreshInbox, 3000);
+  setInterval(refreshReports, 3000);
 
   function agentStateField(label, value, title, extraClass = "") {
     if (!value) return "";
@@ -1637,7 +1570,7 @@
     );
     const detailRow = [
       agentStateField("process", process, "Local reviewer process lifecycle"),
-      agentStateField("review", protocol, "Review protocol state: pending, asking, or done"),
+      agentStateField("review", protocol, "Review protocol state: pending or done"),
     ].join("");
     const killButton = agentCanKill(agent)
       ? `<button type="button" class="agent-kill" data-agent-kill="${attrEsc(name)}" title="Stop ${attrEsc(name)}">kill</button>`

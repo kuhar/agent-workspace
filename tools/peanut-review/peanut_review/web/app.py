@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import agent_control, gh, gh_pull, gh_push, launch, polling, runtime, store
+from .. import agent_control, gh, gh_pull, gh_push, launch, runtime, store
 from ..models import Comment, CommentCategory, Note, Severity, normalize_comment_category
 from ..session import (
     GLOBAL_FILE,
@@ -290,7 +290,6 @@ class _Handler(BaseHTTPRequestHandler):
             files = diffmod.parse_diff(
                 repo_path(session), session.base_ref, session.topic_ref,
             )
-            transcript = polling.list_transcript(session_dir)
             agent_runtime = {}
             for agent in session.agents:
                 snapshot = runtime.inspect_agent_runtime(session_dir, agent)
@@ -301,7 +300,7 @@ class _Handler(BaseHTTPRequestHandler):
             html_out = render_page(
                 load_session(session_dir), session_id, files, comments,
                 notes=notes, head_shifted=shifted, base_url=self.base_url,
-                inbox_transcript=transcript, agent_runtime=agent_runtime,
+                agent_runtime=agent_runtime,
             )
             self._html(200, html_out)
             return
@@ -363,10 +362,6 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self._error(400, str(e))
             self._json(200, [_comment_to_dict(c) for c in filtered])
-            return
-
-        if tail == "/api/inbox":
-            self._json(200, polling.list_transcript(session_dir))
             return
 
         if tail == "/api/notes":
@@ -938,7 +933,6 @@ def _agent_payload(session_dir: Path, session) -> list[dict]:
             "supervisor_pid": snapshot["supervisor_pid"],
             "signal": snapshot["signal"],
             "comments": snapshot["comments"],
-            "unanswered": snapshot["unanswered"],
             "exit_code": snapshot["exit_code"],
             "timed_out": snapshot["timed_out"],
             "termination_signal": snapshot["termination_signal"],

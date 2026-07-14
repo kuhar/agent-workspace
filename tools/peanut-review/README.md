@@ -80,7 +80,7 @@ or repo:
   "repoRelative": "my-repo",
   "reviewAgentTimeoutSeconds": 1200,
   "agents": [
-    {"name": "Vera", "model": "gpt-5.5", "reasoningEffort": "high", "persona": "vera.md", "runner": "codex"},
+    {"name": "Vera", "model": "gpt-5.5", "reasoningEffort": "high", "fastMode": false, "persona": "vera.md", "runner": "codex"},
     {"name": "Irene", "model": "claude-opus-4-7-thinking-medium", "persona": "irene.md", "runner": "cursor"},
     {"name": "Curator", "model": "gpt-5.5-high", "runner": "cursor", "role": "curator"}
   ]
@@ -88,6 +88,8 @@ or repo:
 ```
 
 Supported runners: `cursor`, `opencode`, `codex`.
+Codex agents accept an optional per-agent `fastMode` boolean. It defaults to
+`false`; set it to `true` to enable Codex fast mode for a specific agent.
 GitHub PR sessions require a configured agent with `"role": "curator"` because
 the curator model is intentionally owned by project config, not by Python
 defaults.
@@ -216,8 +218,6 @@ round signals are cleared before the selected reviewers start:
 
 ```bash
 "$PR_BIN" --session "$SESSION" status
-"$PR_BIN" --session "$SESSION" inbox
-"$PR_BIN" --session "$SESSION" reply --agent Vera --id q_1234abcd "Use ninja check-foo."
 "$PR_BIN" --session "$SESSION" note --message "Ran targeted tests; passed."
 "$PR_BIN" --session "$SESSION" add-comment --file path/to/file.py --line 42 --severity warning --body-file /tmp/body.md
 "$PR_BIN" --session "$SESSION" comments --unresolved   # use this to find c_... ids
@@ -225,3 +225,10 @@ round signals are cleared before the selected reviewers start:
 "$PR_BIN" --session "$SESSION" add-global-comment --severity suggestion --body "A few comments."
 "$PR_BIN" --session "$SESSION" add-global-comment --category request-changes --body-file /tmp/blocking.md
 ```
+
+`note` is a report-only channel for non-review output such as test execution
+and comment curation. Review findings and discussion belong in comments.
+There is no interactive agent help channel: blocked reviewers record a
+`Review Blocked` report when possible, exit without `round-done`, and are
+rerun after the environment is fixed. Comment-thread replies remain available
+through `add-comment --reply-to`.

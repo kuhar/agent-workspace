@@ -21,6 +21,16 @@ def test_default_personas_dir_is_bundled():
     assert (personas / "vera.md").exists()
 
 
+def test_babysitting_commands_are_not_registered():
+    from peanut_review import cli
+
+    parser = cli.build_parser()
+    commands = next(action.choices for action in parser._actions
+                    if action.dest == "command")
+
+    assert {"ask", "inbox", "reply"}.isdisjoint(commands)
+
+
 def _make_workspace(files: dict[str, str] | None = None) -> str:
     """Create a temp workspace with optional files. Returns workspace path."""
     ws = tempfile.mkdtemp(prefix="pr-ws-")
@@ -559,29 +569,6 @@ def test_status(mock_git):
     assert "review=pending" in text
     assert "signal=no" in text
     assert "comments=0" in text
-
-
-@patch("peanut_review.session._run_git", side_effect=_mock_git)
-def test_ask_and_reply(mock_git):
-    sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
-    main(["--session", sd, "init", "--workspace", "/tmp/repo"])
-
-    # Write a question manually (simulating agent)
-    from peanut_review.polling import write_question
-    write_question(sd, "vera", "Where is the build dir?")
-
-    # Check inbox
-    rc = main(["--session", sd, "inbox"])
-    assert rc == 0
-
-    # Reply
-    rc = main(["--session", sd, "reply", "--agent", "vera", "--id", "q_001",
-               "It's in ../build-release/"])
-    assert rc == 0
-
-    # Inbox should be empty now
-    from peanut_review.polling import list_unanswered
-    assert len(list_unanswered(sd)) == 0
 
 
 # ── Multi-pass wake-up + cursor tests ─────────────────────────────────

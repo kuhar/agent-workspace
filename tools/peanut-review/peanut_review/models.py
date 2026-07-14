@@ -156,12 +156,12 @@ class Comment:
 
 @dataclass
 class Note:
-    """Free-form agent activity that is not review feedback.
+    """A non-review report from a reviewer or curator.
 
     Notes are intentionally separate from comments: they have no severity,
     category, file anchor, resolution state, or GitHub synchronization fields.
-    Use them for test execution reports and operational context that should be
-    visible in peanut-review but never pushed as PR review feedback.
+    Use them for reports such as test execution and comment curation that
+    should be visible in peanut-review but never pushed as PR review feedback.
     """
 
     id: str = field(default_factory=lambda: _short_id("n"))
@@ -185,6 +185,8 @@ class AgentConfig:
     name: str = ""
     model: str = ""
     reasoning_effort: str = ""
+    # Per-run Codex fast-mode override. None uses peanut-review's off default.
+    fast_mode: bool | None = None
     persona: str = ""
     role: str = AgentRole.REVIEWER.value
     status: str = AgentStatus.PENDING.value
@@ -202,18 +204,25 @@ class AgentConfig:
     def to_dict(self) -> dict:
         d = asdict(self)
         reasoning_effort = d.pop("reasoning_effort")
-        return {
-            k: v
-            for k, v in d.items()
-            if v is not None
-            and not (k == "role" and v == AgentRole.REVIEWER.value)
-        } | ({"reasoningEffort": reasoning_effort} if reasoning_effort else {})
+        fast_mode = d.pop("fast_mode")
+        return (
+            {
+                k: v
+                for k, v in d.items()
+                if v is not None
+                and not (k == "role" and v == AgentRole.REVIEWER.value)
+            }
+            | ({"reasoningEffort": reasoning_effort} if reasoning_effort else {})
+            | ({"fastMode": fast_mode} if fast_mode is not None else {})
+        )
 
     @classmethod
     def from_dict(cls, d: dict) -> AgentConfig:
         raw = dict(d)
         if "reasoningEffort" in raw:
             raw.setdefault("reasoning_effort", raw.pop("reasoningEffort"))
+        if "fastMode" in raw:
+            raw.setdefault("fast_mode", raw.pop("fastMode"))
         return cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
 
 
@@ -290,37 +299,6 @@ class Session:
         if gh_raw:
             s.github = GitHubPR.from_dict(gh_raw)
         return s
-
-
-@dataclass
-class Question:
-    id: str = ""
-    agent: str = ""
-    timestamp: str = field(default_factory=_now_iso)
-    question: str = ""
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
-
-    @classmethod
-    def from_json(cls, text: str) -> Question:
-        d = json.loads(text)
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-
-
-@dataclass
-class Reply:
-    answered_by: str = "orchestrator"
-    timestamp: str = field(default_factory=_now_iso)
-    answer: str = ""
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
-
-    @classmethod
-    def from_json(cls, text: str) -> Reply:
-        d = json.loads(text)
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass

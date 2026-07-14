@@ -390,6 +390,7 @@ def _build_agent_cmd(
         ]
         if agent.reasoning_effort:
             cmd += ["--reasoning-effort", agent.reasoning_effort]
+        cmd.append("--fast-mode" if agent.fast_mode is True else "--no-fast-mode")
     return cmd
 
 

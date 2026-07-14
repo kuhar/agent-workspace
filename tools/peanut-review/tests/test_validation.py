@@ -40,6 +40,7 @@ def test_validate_project_config_normalizes_paths(tmp_path: Path):
                     "name": "vera",
                     "model": "gpt-5.6-sol",
                     "reasoningEffort": "high",
+                    "fastMode": False,
                     "persona": "vera.md",
                     "runner": "codex",
                 },
@@ -56,7 +57,51 @@ def test_validate_project_config_normalizes_paths(tmp_path: Path):
     assert cfg["personasDir"] == str(personas.resolve())
     assert cfg["agents"][0]["runner"] == "codex"
     assert cfg["agents"][0]["reasoningEffort"] == "high"
+    assert cfg["agents"][0]["fastMode"] is False
     assert cfg["agents"][1]["runner"] == "cursor"
+
+
+def test_validate_project_config_rejects_invalid_fast_mode(tmp_path: Path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    personas = tmp_path / "personas"
+    personas.mkdir()
+    (personas / "vera.md").write_text("persona\n")
+    config_path = tmp_path / ".peanut-review.json"
+
+    try:
+        validation.validate_project_config(
+            {
+                "reviewRoot": "reviews",
+                "workspaceRoot": ".",
+                "repoRelative": "repo",
+                "personasDir": "personas",
+                "agents": [
+                    {
+                        "name": "vera",
+                        "model": "opus",
+                        "persona": "vera.md",
+                        "runner": "cursor",
+                        "fastMode": True,
+                    },
+                    {
+                        "name": "irene",
+                        "model": "gpt",
+                        "persona": "vera.md",
+                        "runner": "codex",
+                        "fastMode": "off",
+                    },
+                ],
+            },
+            config_path=config_path,
+        )
+    except validation.ValidationError as e:
+        message = str(e)
+    else:
+        raise AssertionError("expected validation error")
+
+    assert "agents[0].fastMode is only supported with runner 'codex'" in message
+    assert "agents[1].fastMode must be a boolean" in message
 
 
 def test_validate_project_config_reports_actionable_errors(tmp_path: Path):

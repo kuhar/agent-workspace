@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -238,7 +239,7 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "I'm not sure if this works when ..." in curator_prompt
     assert "Can we make this ...?" in curator_prompt
     assert "do not use question form as the default" in curator_prompt
-    assert "Record one concise summary in agent activity" in curator_prompt
+    assert "Record one concise summary in Agent reports" in curator_prompt
     assert "deletion ledger with one entry" in curator_prompt
     assert "including comments deleted after" in curator_prompt
     assert "its original `file:line` anchor (or `global`)" in curator_prompt
@@ -246,6 +247,8 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     assert "Deleted comments: none" in curator_prompt
     assert "note --message" in curator_prompt
     assert "Read your persona" not in curator_prompt
+    assert "peanut-review ask" not in reviewer_prompt
+    assert "babysitting channel" not in reviewer_prompt
 
 
 def test_launch_curator_requires_configured_curator():
@@ -341,11 +344,59 @@ def test_launch_dry_run_codex_agent_cmd():
     assert cmd[0].endswith("codex-agent-task.sh")
     assert "--model" in cmd and "gpt-5.5" in cmd
     assert "--reasoning-effort" in cmd and "high" in cmd
+    assert "--no-fast-mode" in cmd
     # Codex needs unrestricted writes because workspace-write + --add-dir is
     # still read-only for the out-of-workspace session dir in current Codex.
     assert "--sandbox" in cmd and "danger-full-access" in cmd
     assert "--add-dir" in cmd
     assert sd in cmd
+
+
+def test_launch_dry_run_can_enable_codex_fast_mode():
+    sd = _make_session_dir([
+        AgentConfig(
+            name="cleo",
+            model="gpt-5.5",
+            fast_mode=True,
+            persona="vera.md",
+            runner="codex",
+        ),
+    ])
+
+    [result] = launch.launch_agents(sd, dry_run=True)
+
+    assert "--fast-mode" in result["cmd"]
+    assert "--no-fast-mode" not in result["cmd"]
+
+
+@pytest.mark.parametrize(
+    ("wrapper_flag", "codex_flag"),
+    [
+        ("--fast-mode", "--enable fast_mode"),
+        ("--no-fast-mode", "--disable fast_mode"),
+        (None, "--disable fast_mode"),
+    ],
+)
+def test_codex_runner_translates_fast_mode_flags(tmp_path, wrapper_flag, codex_flag):
+    script = launch._find_launcher_script("codex")
+    fast_mode_args = [wrapper_flag] if wrapper_flag else []
+
+    proc = subprocess.run(
+        [
+            script,
+            "--workspace", str(tmp_path),
+            "--output-dir", str(tmp_path / "log"),
+            "--name", "vera",
+            *fast_mode_args,
+            "--prompt", "review this",
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert codex_flag in proc.stderr
 
 
 def test_launch_uses_python_supervisor_for_non_dry_run():

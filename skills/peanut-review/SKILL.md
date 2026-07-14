@@ -70,9 +70,9 @@ before running commands and keep it current.
 - [ ] Confirm the checkout is built/testable and reviewer-visible tools are
       reachable before launching reviewers.
 - [ ] Confirm project config and reviewer permissions are valid.
-- [ ] Launch reviewers and verify startup with `status`, `inbox`, logs, and
+- [ ] Launch reviewers and verify startup with `status`, logs, and
       `wait-all`.
-- [ ] Answer reviewer questions promptly.
+- [ ] Inspect failed runs and non-review agent reports promptly.
 - [ ] Track the last reviewed comment id for later `--since` queries.
 - [ ] Triage every finding: keep, delete, resolve, reply, or push to GitHub.
 - [ ] Finish with the right artifact: GitHub review comments/verdict for PRs,
@@ -105,7 +105,7 @@ GitHub PR review?"
 
 ## Working Variables
 
-Set these descriptive names in notes or shell snippets:
+Set these descriptive names in an operator scratchpad or shell snippets:
 
 ```bash
 PR_BIN=tools/peanut-review/bin/peanut-review
@@ -180,7 +180,8 @@ approve/request-changes decision back to GitHub.
    ```
 
 2. Build/test the checkout with the project workflow. If reviewers need
-   non-obvious tool paths, record them in a session note before launch.
+   non-obvious tool paths, make them available through the runner workspace
+   or rendered prompt before launch; do not use Agent reports as setup chat.
 
 3. Launch reviewers and wait for the first pass plus automatic curation:
 
@@ -286,29 +287,34 @@ Use this when the orchestrator can modify the patch under review.
 
 ## Shared Review Mechanics
 
-After any launch, monitor, answer questions, rerun failed reviewers, and stop
-stale processes through the CLI:
+After any launch, monitor reports, rerun failed reviewers, and stop stale
+processes through the CLI:
 
 ```bash
 "$PR_BIN" --session "$SESSION" status
-"$PR_BIN" --session "$SESSION" inbox
 "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
 "$PR_BIN" --session "$SESSION" comments
-"$PR_BIN" --session "$SESSION" reply --agent <name> --id <qid> "answer"
 "$PR_BIN" --session "$SESSION" launch --agent Irene
 "$PR_BIN" --session "$SESSION" rerun --agent Irene
 "$PR_BIN" --session "$SESSION" kill-agents
 "$PR_BIN" --session "$SESSION" kill-agents --agent Irene
 ```
 
-Use `status` for a compact view, but treat signal files, comments, inbox, logs,
+Use `status` for a compact view, but treat signal files, comments, reports, logs,
 and live processes as the real health checks. `process=...` is supervisor-owned
 runtime state; `review=done` means the agent posted `round-done`.
 
-Current reviewer prompts tell agents to signal `round-done` and exit. The
+The authoritative reviewer prompt is
+`tools/peanut-review/peanut_review/templates/agent-prompt.md`; do not maintain
+a second skill-local copy. It tells agents to signal `round-done` and exit. The
 supervisor should stop a lingering process shortly after observing that signal.
 Use `kill-agents` only when `status` shows stale live processes, a launch needs
 to be aborted, or the user explicitly asks.
+
+There is no interactive agent help channel. If a reviewer is blocked, it may
+record one `Review Blocked` report and exit without `round-done`; inspect the
+runner log/report, fix the environment, then rerun it. Review discussion stays
+in comments and anchored comment replies.
 
 ## Reviewer Selection
 
@@ -347,11 +353,13 @@ storage instead of starting a new server or guessing a different root.
 - **opencode**: `opencode run`; model ids are `provider/model`, including
   `openai/*`, `opencode/*`, or local `llama.cpp/*`.
 - **codex**: `codex exec`; requires `codex login` and gets
-  `--add-dir <session>` so it can write session files.
+  `--add-dir <session>` so it can write session files. Set per-agent
+  `"fastMode": true` to enable Codex fast mode. It defaults to `false`.
 
-Agents submit findings, replies, questions, notes, and completion signals with
-peanut-review CLI commands from the rendered prompt. Notes are for test reports
-or non-review activity and are not pushed to GitHub.
+Agents submit findings, comment replies, non-review reports, and completion
+signals with peanut-review CLI commands from the rendered prompt. The `note`
+channel is only for reports such as test execution and comment curation; notes
+are not pushed to GitHub.
 
 ## Failure Handling
 
@@ -361,4 +369,4 @@ or non-review activity and are not pushed to GitHub.
 - If a session was launched under bad assumptions, prefer archiving it and
   starting fresh over reusing stale signals/comments.
 - If the orchestrator crashes, run `status`, then resume from the latest
-  comments, questions, and signal state.
+  comments, reports, logs, and signal state.

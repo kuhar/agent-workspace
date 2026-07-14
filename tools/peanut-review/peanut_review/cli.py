@@ -571,7 +571,7 @@ def _read_note_body(args: argparse.Namespace) -> str | None:
 
 
 def cmd_note(args: argparse.Namespace) -> int:
-    """Record a free-form activity note outside the review comment stream."""
+    """Record a non-review agent report outside the comment stream."""
     session_dir = _get_session_dir(args)
     author = _get_author(args)
     body = _read_note_body(args)
@@ -585,7 +585,7 @@ def cmd_note(args: argparse.Namespace) -> int:
 
 
 def cmd_notes(args: argparse.Namespace) -> int:
-    """List/filter free-form notes."""
+    """List/filter non-review agent reports."""
     session_dir = _get_session_dir(args)
     notes = store.filter_notes(
         store.read_all_notes(session_dir),
@@ -598,7 +598,7 @@ def cmd_notes(args: argparse.Namespace) -> int:
         return 0
 
     if not notes:
-        print("No notes found.")
+        print("No reports found.")
         return 0
     hdr = f"{'ID':<14} {'Agent':<10} {'Timestamp':<32} {'Body'}"
     print(hdr)
@@ -1064,43 +1064,6 @@ def cmd_signal_all(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ask(args: argparse.Namespace) -> int:
-    """Ask a question and block until answered."""
-    session_dir = _get_session_dir(args)
-    agent = _get_author(args)
-    q = polling.write_question(session_dir, agent, args.question)
-    print(f"Asked {q.id}: {q.question}", file=sys.stderr)
-    reply = polling.wait_reply(
-        session_dir, agent, q.id,
-        timeout=args.timeout,
-    )
-    if reply:
-        print(reply.answer)
-        return 0
-    print("Timeout waiting for reply", file=sys.stderr)
-    return 1
-
-
-def cmd_inbox(args: argparse.Namespace) -> int:
-    """Show unanswered questions."""
-    session_dir = _get_session_dir(args)
-    questions = polling.list_unanswered(session_dir, agent=args.agent)
-    if not questions:
-        print("No unanswered questions.")
-        return 0
-    for q in questions:
-        print(f"[{q.agent}] {q.id}: {q.question}")
-    return 0
-
-
-def cmd_reply(args: argparse.Namespace) -> int:
-    """Reply to an agent's question."""
-    session_dir = _get_session_dir(args)
-    polling.write_reply(session_dir, args.agent, args.id, args.answer)
-    print(f"Replied to {args.agent}/{args.id}")
-    return 0
-
-
 def cmd_verdict(args: argparse.Namespace) -> int:
     """Record final verdict."""
     session_dir = _get_session_dir(args)
@@ -1219,7 +1182,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     notes = store.read_all_notes(session_dir)
     if notes:
         print()
-        print(f"Notes: {len(notes)}")
+        print(f"Reports: {len(notes)}")
 
     # Signals
     signals_dir = Path(session_dir) / "signals"
@@ -1228,14 +1191,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         if sigs:
             print()
             print(f"Signals: {', '.join(sigs)}")
-
-    # Unanswered questions
-    questions = polling.list_unanswered(session_dir)
-    if questions:
-        print()
-        print(f"Unanswered questions: {len(questions)}")
-        for q in questions:
-            print(f"  [{q.agent}] {q.id}: {q.question[:60]}")
 
     return 0
 
@@ -1485,14 +1440,14 @@ def build_parser() -> argparse.ArgumentParser:
     # note
     sp = sub.add_parser(
         "note",
-        help="Record free-form agent activity outside the review comment stream",
+        help="Record a non-review agent report outside the comment stream",
     )
     sp.add_argument("--message", help="Note body")
     sp.add_argument("--file", help="Read note body from FILE, or '-' for stdin")
     sp.add_argument("--author", help="Author name (default: git config user.name)")
 
     # notes
-    sp = sub.add_parser("notes", help="List/filter free-form activity notes")
+    sp = sub.add_parser("notes", help="List/filter non-review agent reports")
     sp.add_argument("--agent", help="Filter by agent")
     sp.add_argument("--since", metavar="ID",
                     help="Return only notes posted after this note id")
@@ -1596,21 +1551,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("signal-all", help="Signal all agents")
     sp.add_argument("event", help="Event name")
 
-    # ask
-    sp = sub.add_parser("ask", help="Ask a question (blocks until reply)")
-    sp.add_argument("question", help="Question text")
-    sp.add_argument("--timeout", type=int, default=600, help="Timeout seconds (default: 600)")
-
-    # inbox
-    sp = sub.add_parser("inbox", help="Show unanswered questions")
-    sp.add_argument("--agent", help="Filter by agent")
-
-    # reply
-    sp = sub.add_parser("reply", help="Reply to a question")
-    sp.add_argument("--agent", required=True, help="Agent name")
-    sp.add_argument("--id", required=True, help="Question ID")
-    sp.add_argument("answer", help="Answer text")
-
     # verdict
     sp = sub.add_parser("verdict", help="Record final verdict")
     grp = sp.add_mutually_exclusive_group(required=True)
@@ -1690,9 +1630,6 @@ def main(argv: list[str] | None = None) -> int:
         "wait": cmd_wait,
         "wait-all": cmd_wait_all,
         "signal-all": cmd_signal_all,
-        "ask": cmd_ask,
-        "inbox": cmd_inbox,
-        "reply": cmd_reply,
         "verdict": cmd_verdict,
         "migrate": cmd_migrate,
         "status": cmd_status,

@@ -87,7 +87,7 @@ def read_all_comments(session_dir: str | Path) -> list[Comment]:
 
 
 def append_note(session_dir: str | Path, note: Note) -> Note:
-    """Append a free-form note to the author's JSONL file."""
+    """Append a non-review report to the author's JSONL file."""
     path = _agent_note_file(session_dir, note.author)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = note.to_json() + "\n"
@@ -103,7 +103,7 @@ def append_note(session_dir: str | Path, note: Note) -> Note:
 
 
 def read_agent_notes(session_dir: str | Path, agent: str) -> list[Note]:
-    """Read all free-form notes from one agent's JSONL file."""
+    """Read all non-review reports from one agent's JSONL file."""
     path = _agent_note_file(session_dir, agent)
     if not path.exists():
         return []

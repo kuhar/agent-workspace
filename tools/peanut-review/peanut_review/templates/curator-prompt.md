@@ -131,12 +131,13 @@ copy.
 - Do not launch or rerun reviewer agents.
 - Do not push to GitHub.
 - Do not add praise-only summaries.
-- Do not leave notes to the author in your final text output; use
-  peanut-review comments/notes instead.
+- Do not leave author-facing feedback in your final text output or Agent
+  reports; use peanut-review comments. Use `note` only for the required
+  curation report below.
 
 # Finish
 
-Record one concise summary in agent activity before signaling completion. Use
+Record one concise summary in Agent reports before signaling completion. Use
 `note`, not a review comment. Include a deletion ledger with one entry for
 every comment you deleted during this run, including comments deleted after
 merging their useful detail elsewhere. Each entry must name the comment ID,

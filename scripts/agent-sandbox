@@ -585,6 +585,11 @@ if $MEMORY_LIMIT_SET; then
         echo "Error: --memory-limit-gb requires systemd-run and a running systemd user manager." >&2
         exit 1
     fi
+    CHOOM_BIN="$(command -v choom || true)"
+    if [[ -z "$CHOOM_BIN" ]]; then
+        echo "Error: --memory-limit-gb requires choom to configure OOM victim preference." >&2
+        exit 1
+    fi
     SYSTEMCTL_BIN="$(command -v systemctl || true)"
     if [[ -n "$SYSTEMCTL_BIN" ]] && ! "$SYSTEMCTL_BIN" --user show-environment >/dev/null 2>&1; then
         echo "Error: --memory-limit-gb requires an accessible systemd user manager." >&2
@@ -600,9 +605,9 @@ if $MEMORY_LIMIT_SET; then
         --quiet \
         --collect \
         --property=OOMPolicy=kill \
-        --property=OOMScoreAdjust=1000 \
         --property="MemoryMax=${MEMORY_LIMIT_GB}G" \
         -- \
+        "$CHOOM_BIN" -n 1000 -- \
         /usr/bin/bwrap "${BWRAP_ARGS[@]}" -- "${AGENT_CMD[@]}"
 fi
 

@@ -11,8 +11,8 @@
 #   Run setup-bwrap-apparmor.sh from this directory.
 #
 # Usage:
-#   agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [project-dir] [-- harness-args...]
-#   agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [project-dir] [-- harness-args...]
+#   agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
+#   agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
 #
 # Examples:
 #   agent-sandbox ~/iree/constraints
@@ -28,18 +28,23 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [project-dir] [-- harness-args...]
-  agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [project-dir] [-- harness-args...]
+  agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
+  agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
 
 Options:
   --harness, -H NAME       Select claude, opencode, or codex (default: claude)
   --im-feeling-lucky      Use real gh/git/ssh credentials instead of sandbox credentials
   --airgap, --no-network  Disable shell command networking and Codex web tools
+  --memory-limit-gb N     Limit aggregate agent process-tree cgroup memory to N GiB
   -h, --help              Show this help
+
+Unlimited runs use a sacrificial OOM guard to protect surrounding services.
+The explicit memory limit requires an accessible systemd user manager.
 
 Examples:
   agent-sandbox ~/iree/constraints
   agent-sandbox --harness opencode ~/iree/constraints
+  agent-sandbox --memory-limit-gb 16 ~/iree/constraints
   agent-sandbox codex ~/iree/constraints -- "fix the build"
   agent-sandbox opencode ~/iree/constraints -- run "fix the build"
 EOF
@@ -50,6 +55,8 @@ HARNESS="claude"
 HARNESS_ARGS=()
 IM_FEELING_LUCKY=false
 AIRGAP=false
+MEMORY_LIMIT_GB=""
+MEMORY_LIMIT_SET=false
 
 script_name="$(basename "$0")"
 case "$script_name" in
@@ -79,6 +86,20 @@ while [[ $# -gt 0 ]]; do
             AIRGAP=true
             shift
             ;;
+        --memory-limit-gb)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: $1 requires a positive integer" >&2
+                exit 1
+            fi
+            MEMORY_LIMIT_GB="$2"
+            MEMORY_LIMIT_SET=true
+            shift 2
+            ;;
+        --memory-limit-gb=*)
+            MEMORY_LIMIT_GB="${1#*=}"
+            MEMORY_LIMIT_SET=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -102,6 +123,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if $MEMORY_LIMIT_SET && [[ ! "$MEMORY_LIMIT_GB" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --memory-limit-gb requires a positive integer (GiB), got '$MEMORY_LIMIT_GB'" >&2
+    exit 1
+fi
 
 case "$HARNESS" in
     claude|opencode|codex) ;;
@@ -320,6 +346,12 @@ if $AIRGAP; then
     else
         echo "  Network: disabled"
     fi
+fi
+if $MEMORY_LIMIT_SET; then
+    echo "  Memory: ${MEMORY_LIMIT_GB} GiB aggregate process-tree limit"
+    echo "  OOM policy: kill the whole agent cgroup"
+else
+    echo "  OOM policy: prefer and kill the whole bwrap tree"
 fi
 
 # --- Detect git worktrees with git dirs outside the project ---
@@ -545,7 +577,61 @@ done
 BWRAP_ARGS+=(
     --chdir "$PROJECT_DIR"
     --die-with-parent
-    --
 )
 
-exec /usr/bin/bwrap "${BWRAP_ARGS[@]}" "${AGENT_CMD[@]}"
+if $MEMORY_LIMIT_SET; then
+    SYSTEMD_RUN_BIN="$(command -v systemd-run || true)"
+    if [[ -z "$SYSTEMD_RUN_BIN" ]]; then
+        echo "Error: --memory-limit-gb requires systemd-run and a running systemd user manager." >&2
+        exit 1
+    fi
+    SYSTEMCTL_BIN="$(command -v systemctl || true)"
+    if [[ -n "$SYSTEMCTL_BIN" ]] && ! "$SYSTEMCTL_BIN" --user show-environment >/dev/null 2>&1; then
+        echo "Error: --memory-limit-gb requires an accessible systemd user manager." >&2
+        echo "Start a user session with systemd, or omit the memory limit." >&2
+        exit 1
+    fi
+
+    # A transient scope puts bwrap, the agent, and every descendant in one
+    # cgroup, so MemoryMax applies to their aggregate memory usage.
+    exec "$SYSTEMD_RUN_BIN" \
+        --user \
+        --scope \
+        --quiet \
+        --collect \
+        --property=OOMPolicy=kill \
+        --property=OOMScoreAdjust=1000 \
+        --property="MemoryMax=${MEMORY_LIMIT_GB}G" \
+        -- \
+        /usr/bin/bwrap "${BWRAP_ARGS[@]}" -- "${AGENT_CMD[@]}"
+fi
+
+# For unlimited runs, arm a tiny sacrificial parent before allowing the agent
+# to start. oom_score_adj=1000 makes this wrapper the preferred global OOM
+# victim. bwrap then observes its parent dying, and the private PID namespace
+# ensures that tearing down bwrap also kills every process spawned by the agent.
+OOM_GUARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-sandbox-oom.XXXXXX")"
+OOM_GUARD_FIFO="$OOM_GUARD_DIR/start"
+mkfifo "$OOM_GUARD_FIFO"
+exec {OOM_GUARD_FD}<>"$OOM_GUARD_FIFO"
+rm "$OOM_GUARD_FIFO"
+rmdir "$OOM_GUARD_DIR"
+
+/usr/bin/bwrap \
+    "${BWRAP_ARGS[@]}" \
+    --unshare-pid \
+    --block-fd "$OOM_GUARD_FD" \
+    -- \
+    "${AGENT_CMD[@]}" <&0 &
+BWRAP_PID=$!
+
+if ! printf '1000\n' >"/proc/$$/oom_score_adj"; then
+    kill "$BWRAP_PID" 2>/dev/null || true
+    wait "$BWRAP_PID" 2>/dev/null || true
+    echo "Error: could not arm the OOM guard via /proc/$$/oom_score_adj." >&2
+    exit 1
+fi
+
+printf '1\n' >&"$OOM_GUARD_FD"
+exec {OOM_GUARD_FD}>&-
+wait "$BWRAP_PID"

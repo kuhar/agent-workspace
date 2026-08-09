@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -19,8 +20,62 @@ import subprocess
 from . import gh, models, session as sess, store
 
 
-DEFAULT_REVIEW_BODY = "A few comments"
 DEFAULT_DIFF_CONTEXT = 3
+
+
+_SINGLE_INLINE_NEUTRAL_TEMPLATES = (
+    "Just one comment",
+    "One thing I noticed",
+    "Left one note to consider",
+)
+
+_SINGLE_INLINE_SUGGESTION_TEMPLATES = (
+    "Just one suggestion",
+    "One small suggestion",
+    "Left one thought",
+)
+
+_SINGLE_INLINE_NIT_TEMPLATES = (
+    "Just one nit",
+    "Left one nit",
+    "A quick nit",
+)
+
+_INLINE_NEUTRAL_TEMPLATES = (
+    "Just {comments}",
+    "Left {inline_comments}",
+    "Added {comments}",
+)
+
+_INLINE_SUGGESTION_TEMPLATES = (
+    "Just {suggestions}",
+    "Left {inline_suggestions}",
+    "Added {new_suggestions}",
+)
+
+_INLINE_NIT_TEMPLATES = (
+    "Left {nits}.",
+    "Just {nits}.",
+    "Noted {nits}.",
+)
+
+_MIXED_NEUTRAL_TEMPLATES = (
+    "{comments_cap}, plus {replies}",
+    "Left {replies} and {new_comments}",
+    "Added {comments} and {replies}",
+)
+
+_MIXED_SUGGESTION_TEMPLATES = (
+    "{suggestions_cap}, plus {replies}",
+    "Left {replies} and {new_suggestions}",
+    "Just {replies} and {comments_with_suggestions}.",
+)
+
+_MIXED_NIT_TEMPLATES = (
+    "{nits_cap}, plus {replies}.",
+    "Left {replies} and {nits}.",
+    "Left {nits} along with {replies}.",
+)
 
 
 @dataclass(frozen=True)
@@ -292,6 +347,170 @@ def _review_body(global_comments: list[models.Comment]) -> str:
     return "\n\n".join(c.body.strip() for c in global_comments if c.body.strip())
 
 
+def _count_phrase(count: int, *, one: str, few: str, many: str) -> str:
+    if count == 1:
+        return one
+    if count <= 4:
+        return few
+    return many.format(count=count)
+
+
+def _capitalize(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _stable_template(
+    templates: tuple[str, ...],
+    inline_comments: list[models.Comment],
+    replies: list[models.Comment],
+) -> str:
+    """Vary wording per push while keeping retries reproducible."""
+    identities = [f"comment:{c.id}:{c.severity}" for c in inline_comments]
+    identities.extend(f"reply:{c.id}:{c.severity}" for c in replies)
+    digest = hashlib.sha256("\0".join(sorted(identities)).encode()).digest()
+    return templates[int.from_bytes(digest[:8], "big") % len(templates)]
+
+
+def _default_review_body(
+    inline_comments: list[models.Comment],
+    replies: list[models.Comment],
+) -> str:
+    """Describe an inline-only push with count-aware, varied wording."""
+    comment_count = len(inline_comments)
+    if comment_count == 0:
+        return ""
+
+    all_comments = [*inline_comments, *replies]
+    nit_tone = all(
+        c.severity == models.Severity.NIT.value for c in all_comments
+    )
+    suggestion_tone = all(
+        c.severity in {
+            models.Severity.SUGGESTION.value,
+            models.Severity.NIT.value,
+        }
+        for c in all_comments
+    )
+
+    if comment_count == 1 and not replies:
+        if nit_tone:
+            templates = _SINGLE_INLINE_NIT_TEMPLATES
+        elif suggestion_tone:
+            templates = _SINGLE_INLINE_SUGGESTION_TEMPLATES
+        else:
+            templates = _SINGLE_INLINE_NEUTRAL_TEMPLATES
+        return _stable_template(
+            templates, inline_comments, replies,
+        )
+
+    comments = _count_phrase(
+        comment_count,
+        one="one comment",
+        few="a few comments",
+        many="{count} comments",
+    )
+    inline_comment_phrase = _count_phrase(
+        comment_count,
+        one="one inline comment",
+        few="a few inline comments",
+        many="{count} inline comments",
+    )
+    new_comments = _count_phrase(
+        comment_count,
+        one="a new comment",
+        few="a few new comments",
+        many="{count} new comments",
+    )
+    suggestions = _count_phrase(
+        comment_count,
+        one="one suggestion",
+        few="a few suggestions",
+        many="{count} suggestions",
+    )
+    inline_suggestions = _count_phrase(
+        comment_count,
+        one="one inline suggestion",
+        few="a few inline suggestions",
+        many="{count} inline suggestions",
+    )
+    new_suggestions = _count_phrase(
+        comment_count,
+        one="a new suggestion",
+        few="a few new suggestions",
+        many="{count} new suggestions",
+    )
+    comments_with_suggestions = _count_phrase(
+        comment_count,
+        one="a comment with a suggestion",
+        few="a few comments with suggestions",
+        many="{count} comments with suggestions",
+    )
+    nits = _count_phrase(
+        comment_count,
+        one="one nit",
+        few="some nits",
+        many="{count} nits",
+    )
+    values = {
+        "comments": comments,
+        "comments_cap": _capitalize(comments),
+        "inline_comments": inline_comment_phrase,
+        "new_comments": new_comments,
+        "suggestions": suggestions,
+        "suggestions_cap": _capitalize(suggestions),
+        "inline_suggestions": inline_suggestions,
+        "new_suggestions": new_suggestions,
+        "comments_with_suggestions": comments_with_suggestions,
+        "nits": nits,
+        "nits_cap": _capitalize(nits),
+    }
+
+    if not replies:
+        if nit_tone:
+            templates = _INLINE_NIT_TEMPLATES
+        elif suggestion_tone:
+            templates = _INLINE_SUGGESTION_TEMPLATES
+        else:
+            templates = _INLINE_NEUTRAL_TEMPLATES
+        template = _stable_template(
+            templates, inline_comments, replies,
+        )
+        return template.format(**values)
+
+    reply_phrase = _count_phrase(
+        len(replies),
+        one="an inline reply",
+        few="a few inline replies",
+        many="{count} inline replies",
+    )
+    values.update({
+        "replies": reply_phrase,
+    })
+    if nit_tone:
+        templates = _MIXED_NIT_TEMPLATES
+    elif suggestion_tone:
+        templates = _MIXED_SUGGESTION_TEMPLATES
+    else:
+        templates = _MIXED_NEUTRAL_TEMPLATES
+    template = _stable_template(templates, inline_comments, replies)
+    return template.format(**values)
+
+
+def _replies_described_by_review(
+    plan: PushPlan,
+    inline_comments: list[models.Comment],
+) -> list[models.Comment]:
+    """Return replies whose parent is available to this push."""
+    available_parent_ids = set(plan.ext_map)
+    available_parent_ids.update(c.id for c in inline_comments)
+    return [
+        c for c in plan.new_replies
+        if c.file != sess.GLOBAL_FILE
+        and c.reply_to not in plan.promoted_anchors
+        and c.reply_to in available_parent_ids
+    ]
+
+
 def _review_event(global_comments: list[models.Comment]) -> str:
     categories = {
         models.normalize_comment_category(c.category) for c in global_comments
@@ -399,7 +618,9 @@ def execute_push(
     review_event = _review_event(global_top)
     inline_payloads = [_review_comment_payload(c) for c in inline_top]
     if review_event == "COMMENT" and not review_body:
-        review_body = DEFAULT_REVIEW_BODY
+        review_body = _default_review_body(
+            inline_top, _replies_described_by_review(plan, inline_top),
+        )
     created_inline: dict[str, dict] = {}
     review_id: str | None = None
     review_url = ""

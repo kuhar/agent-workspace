@@ -1119,11 +1119,135 @@ def test_gh_push_single_line_omits_start_line(gh_shim, tmp_path):
     assert "start_line" not in payload
 
 
-def test_gh_push_inline_only_uses_default_review_body(gh_shim, tmp_path):
+def test_default_review_body_has_multiple_templates_for_each_shape():
+    template_pools = (
+        gh_push._SINGLE_INLINE_NEUTRAL_TEMPLATES,
+        gh_push._SINGLE_INLINE_SUGGESTION_TEMPLATES,
+        gh_push._SINGLE_INLINE_NIT_TEMPLATES,
+        gh_push._INLINE_NEUTRAL_TEMPLATES,
+        gh_push._INLINE_SUGGESTION_TEMPLATES,
+        gh_push._INLINE_NIT_TEMPLATES,
+        gh_push._MIXED_NEUTRAL_TEMPLATES,
+        gh_push._MIXED_SUGGESTION_TEMPLATES,
+        gh_push._MIXED_NIT_TEMPLATES,
+    )
+    assert sum(len(pool) for pool in template_pools) >= 16
+    assert all(len(pool) > 1 for pool in template_pools)
+
+    def bodies(inline_count: int, reply_count: int) -> set[str]:
+        variants = set()
+        for variant in range(64):
+            inline = [
+                models.Comment(id=f"c_{variant}_top_{i}")
+                for i in range(inline_count)
+            ]
+            replies = [
+                models.Comment(id=f"c_{variant}_reply_{i}")
+                for i in range(reply_count)
+            ]
+            variants.add(gh_push._default_review_body(inline, replies))
+        return variants
+
+    for shape in ((1, 0), (3, 0), (1, 1), (1, 3), (3, 1), (3, 3)):
+        assert len(bodies(*shape)) > 1
+
+
+def test_default_review_body_uses_severity_appropriate_non_decision_tone():
+    suggestion_bodies = set()
+    neutral_bodies = set()
+    for variant in range(64):
+        suggestion_bodies.add(gh_push._default_review_body([
+            models.Comment(
+                id=f"c_{variant}", severity=models.Severity.SUGGESTION.value,
+            ),
+        ], []))
+        for inline_count, reply_count in ((1, 0), (3, 0), (1, 3), (3, 3)):
+            neutral_bodies.add(gh_push._default_review_body(
+                [models.Comment(
+                    id=f"c_{variant}_top_{index}",
+                    severity=models.Severity.CRITICAL.value,
+                ) for index in range(inline_count)],
+                [models.Comment(
+                    id=f"c_{variant}_reply_{index}",
+                    severity=models.Severity.CRITICAL.value,
+                ) for index in range(reply_count)],
+            ))
+
+    assert suggestion_bodies.isdisjoint(neutral_bodies)
+    assert all(
+        marker not in body.lower()
+        for body in suggestion_bodies | neutral_bodies
+        for marker in (
+            "block", "must", "required", "request changes",
+            "critical", "warning", "issue",
+        )
+    )
+
+
+def test_default_review_body_has_nit_and_suggestion_variants():
+    nit_bodies = {
+        gh_push._default_review_body([
+            models.Comment(
+                id=f"c_nit_{variant}_{index}",
+                severity=models.Severity.NIT.value,
+            )
+            for index in range(3)
+        ], [])
+        for variant in range(128)
+    }
+    suggestion_bodies = {
+        gh_push._default_review_body(
+            [models.Comment(
+                id=f"c_top_{variant}_{index}",
+                severity=models.Severity.SUGGESTION.value,
+            ) for index in range(3)],
+            [models.Comment(
+                id=f"c_reply_{variant}_{index}",
+                severity=models.Severity.SUGGESTION.value,
+            ) for index in range(3)],
+        )
+        for variant in range(128)
+    }
+
+    assert "Left some nits." in nit_bodies
+    assert any("comments with suggestions" in body for body in suggestion_bodies)
+
+
+@pytest.mark.parametrize(("inline_count", "reply_count", "fragments"), [
+    (1, 0, ("comment",)),
+    (3, 0, ("few", "comment")),
+    (6, 0, ("6", "comment")),
+    (1, 1, ("comment", "reply")),
+    (1, 3, ("comment", "few", "repl")),
+    (6, 7, ("6", "comment", "7", "repl")),
+])
+def test_default_review_body_describes_actual_counts(
+    inline_count, reply_count, fragments,
+):
+    inline = [
+        models.Comment(
+            id=f"c_top_{i}", severity=models.Severity.WARNING.value,
+        )
+        for i in range(inline_count)
+    ]
+    replies = [
+        models.Comment(
+            id=f"c_reply_{i}", severity=models.Severity.WARNING.value,
+        )
+        for i in range(reply_count)
+    ]
+
+    body = gh_push._default_review_body(inline, replies).lower()
+
+    assert all(fragment in body for fragment in fragments)
+
+
+def test_gh_push_inline_only_uses_count_aware_review_body(gh_shim, tmp_path):
     sd = _make_gh_session(tmp_path)
-    store.append_comment(sd, models.Comment(
+    inline = models.Comment(
         author="vera", file="src/x.py", line=7, body="single",
-    ))
+    )
+    store.append_comment(sd, inline)
 
     gh_shim.set_fixtures([
         _review_post_fixture(300),
@@ -1135,7 +1259,9 @@ def test_gh_push_inline_only_uses_default_review_body(gh_shim, tmp_path):
     rc = main(["--session", sd, "gh-push"])
     assert rc == 0
     [call] = [c for c in gh_shim.calls() if "-X" in c["argv"]]
-    assert json.loads(call["stdin"])["body"] == "A few comments"
+    assert json.loads(call["stdin"])["body"] == gh_push._default_review_body(
+        [inline], [],
+    )
 
 
 def test_gh_error_surfaces_response_body(gh_shim):
@@ -1215,6 +1341,17 @@ def test_gh_push_pushes_reply_after_parent(gh_shim, tmp_path):
         rc = main(["--session", sd, "gh-push"])
     assert rc == 0
     assert "Pushed 2" in out.getvalue()
+    review_call = next(
+        c for c in gh_shim.calls()
+        if "repos/acme/foo/pulls/42/reviews" in c["argv"]
+        and "-X" in c["argv"]
+    )
+    assert json.loads(review_call["stdin"])["body"] == (
+        gh_push._default_review_body(
+            [parent],
+            [next(c for c in store.read_all_comments(sd) if c.body == "reply")],
+        )
+    )
     by_body = {c.body: c for c in store.read_all_comments(sd)}
     assert by_body["parent"].external_id == "200"
     assert by_body["reply"].external_id == "201"

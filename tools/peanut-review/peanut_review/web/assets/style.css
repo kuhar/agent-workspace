@@ -1025,7 +1025,7 @@ table.sessions td.id a:hover { text-decoration: underline; }
 table.sessions td .head { color: var(--muted); font-size: 11px; margin-top: 2px; }
 table.sessions td .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
 table.sessions td.change, table.sessions td.workspace,
-table.sessions td.created { color: var(--muted); font-size: 12px; }
+table.sessions td.updated { color: var(--muted); font-size: 12px; }
 table.sessions td.change {
   max-width: 420px;
   overflow: hidden;

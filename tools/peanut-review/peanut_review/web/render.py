@@ -121,6 +121,19 @@ def _time_tag(timestamp: str, *, extra_class: str = "") -> str:
     )
 
 
+def _session_update_tag(timestamp: str) -> str:
+    if not timestamp:
+        return ""
+    label = _relative_time_label(timestamp)
+    if not label:
+        return html.escape(timestamp)
+    ts = html.escape(timestamp)
+    return (
+        f'<time class="session-updated" datetime="{ts}" title="{ts}">'
+        f'updated {html.escape(label)}</time>'
+    )
+
+
 KILLABLE_PROCESS_STATES = {"launching", "running"}
 
 
@@ -1116,7 +1129,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     fallback_change = f"{s.get('base_ref', '')} … {s.get('topic_ref', '')}"
     change = html.escape(s.get("change_label") or fallback_change)
     workspace = html.escape(s.get("workspace", ""))
-    created = html.escape(s.get("created_at", ""))
+    updated = _session_update_tag(s.get("updated_at", ""))
     total = s.get("comment_count", 0)
     unresolved = s.get("unresolved_count", 0)
     stale = s.get("stale_count", 0)
@@ -1140,7 +1153,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
         f'<td class="change" title="{change}">{change}</td>'
         f'<td class="mono workspace">{workspace}</td>'
         f'<td class="counts">{counts}</td>'
-        f'<td class="mono created">{created}</td>'
+        f'<td class="mono updated">{updated}</td>'
         f'</tr>'
     )
 
@@ -1162,7 +1175,7 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
             '<table class="sessions">'
             '<thead><tr>'
             '<th>Session</th><th>State</th><th>Change</th>'
-            '<th>Workspace</th><th>Comments</th><th>Created</th>'
+            '<th>Workspace</th><th>Comments</th><th>Updated</th>'
             '</tr></thead>'
             f'<tbody id="session-rows">{rows}</tbody>'
             '</table>'

@@ -8,7 +8,7 @@ import tempfile
 import threading
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -292,6 +292,21 @@ def test_render_index_includes_theme_toggle():
 
     assert 'id="theme-toggle"' in html
     assert 'localStorage.getItem("pr.theme")' in html
+
+
+def test_render_index_labels_and_renders_last_update():
+    updated_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=16)
+    ).isoformat(timespec="microseconds")
+    html = render.render_index([{
+        "id": "session-a",
+        "updated_at": updated_at,
+    }], roots=["/tmp/reviews"])
+
+    assert "<th>Updated</th>" in html
+    assert "updated 16 minutes ago" in html
+    assert f'datetime="{updated_at}"' in html
+    assert "<th>Created</th>" not in html
 
 
 def test_render_page_labels_round_state_as_in_review(
@@ -1581,6 +1596,38 @@ def test_registry_picks_up_sessions_added_later(tmp_path: Path, repo: Path):
     assert reg.get(s.id) == root / "late"
 
 
+def test_registry_sorts_sessions_by_last_update(tmp_path: Path, repo: Path):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    older, older_dir = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "older"),
+    )
+    newer, newer_dir = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "newer"),
+    )
+    older.created_at = "2026-08-01T00:00:00.000000+00:00"
+    newer.created_at = "2026-08-02T00:00:00.000000+00:00"
+    sess.save_session(older_dir, older)
+    sess.save_session(newer_dir, newer)
+
+    billion = 1_000_000_000
+    os.utime(Path(older_dir) / "session.json", ns=(billion, billion))
+    os.utime(Path(newer_dir) / "session.json", ns=(2 * billion, 2 * billion))
+    store.append_comment(older_dir, Comment(
+        author="reviewer", file="", line=0, body="new activity",
+    ))
+    comment_file = Path(older_dir) / "comments" / "reviewer.jsonl"
+    os.utime(comment_file, ns=(3 * billion, 3 * billion))
+
+    summaries = web_app.SessionRegistry([root]).list_sessions()
+
+    assert [summary["id"] for summary in summaries] == [older.id, newer.id]
+    assert summaries[0]["updated_at"] == "1970-01-01T00:00:03.000000+00:00"
+    assert summaries[1]["updated_at"] == "1970-01-01T00:00:02.000000+00:00"
+
+
 def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
     root = tmp_path / "review-root"
     root.mkdir()
@@ -1610,8 +1657,8 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         data = json.loads(raw)
         ids = {d["id"] for d in data}
         assert ids == {s1.id, s2.id}
-        # Newest first
-        assert data[0]["created_at"] >= data[1]["created_at"]
+        # Most recently updated first.
+        assert data[0]["updated_at"] >= data[1]["updated_at"]
         # Each session still reachable at its own URL
         c1, _ = _get(f"http://127.0.0.1:{port}/{s1.id}/")
         c2, _ = _get(f"http://127.0.0.1:{port}/{s2.id}/")

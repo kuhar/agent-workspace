@@ -76,6 +76,32 @@
     return parts.join(" · ");
   }
 
+  function relativeTimeLabel(timestamp) {
+    const millis = Date.parse(timestamp);
+    if (!Number.isFinite(millis)) return "";
+    const seconds = Math.max(0, Math.floor((Date.now() - millis) / 1000));
+    if (seconds < 45) return "just now";
+    if (seconds < 90) return "1 minute ago";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} minutes ago`;
+    if (minutes < 90) return "1 hour ago";
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours !== 1 ? "s" : ""} ago`;
+    if (hours < 48) return "yesterday";
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days} days ago`;
+    const months = Math.max(1, Math.floor(days / 30));
+    if (days < 365) return `${months} month${months !== 1 ? "s" : ""} ago`;
+    const years = Math.max(1, Math.floor(days / 365));
+    return `${years} year${years !== 1 ? "s" : ""} ago`;
+  }
+
+  function updatedCell(timestamp) {
+    const label = relativeTimeLabel(timestamp);
+    if (!label) return esc(timestamp);
+    return `<time class="session-updated" datetime="${esc(timestamp)}" title="${esc(timestamp)}">updated ${esc(label)}</time>`;
+  }
+
   function rowHtml(s) {
     const agent = `${s.agent_count} agent${s.agent_count !== 1 ? "s" : ""}`;
     const change = s.change_label || `${s.base_ref} … ${s.topic_ref}`;
@@ -89,7 +115,7 @@
         <td class="change" title="${esc(change)}">${esc(change)}</td>
         <td class="mono workspace">${esc(s.workspace)}</td>
         <td class="counts">${countsCell(s)}</td>
-        <td class="mono created">${esc(s.created_at)}</td>
+        <td class="mono updated">${updatedCell(s.updated_at)}</td>
       </tr>
     `;
   }

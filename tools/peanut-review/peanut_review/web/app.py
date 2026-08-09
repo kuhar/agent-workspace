@@ -13,6 +13,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +35,19 @@ from .render import render_index, render_page
 
 
 DEFAULT_ROOT = Path("/tmp/peanut-review")
+
+
+def _session_updated_at(session_dir: Path) -> tuple[int, str]:
+    """Return the latest persisted UI-visible session activity time."""
+    paths = [session_dir / "session.json"]
+    for subdir in ("comments", "notes"):
+        paths.extend((session_dir / subdir).glob("*.jsonl"))
+
+    latest_ns = max(path.stat().st_mtime_ns for path in paths)
+    updated_at = datetime.fromtimestamp(
+        latest_ns / 1_000_000_000, tz=timezone.utc,
+    ).isoformat(timespec="microseconds")
+    return latest_ns, updated_at
 
 
 class SessionRegistry:
@@ -107,7 +121,7 @@ class SessionRegistry:
         return next(iter(self._by_id)) if len(self._by_id) == 1 else None
 
     def list_sessions(self) -> list[dict]:
-        """Summaries for every known session, newest first."""
+        """Summaries for every known session, most recently updated first."""
         if self._roots:
             self.rescan()
         summaries: list[dict] = []
@@ -116,6 +130,7 @@ class SessionRegistry:
                 s = load_session(sdir)
                 comments = store.read_all_comments(sdir)
                 notes = store.read_all_notes(sdir)
+                updated_ns, updated_at = _session_updated_at(sdir)
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
             live = [c for c in comments if not c.deleted]
@@ -138,6 +153,8 @@ class SessionRegistry:
                 "change_label": change_label,
                 "github_title": github_title,
                 "created_at": s.created_at,
+                "updated_at": updated_at,
+                "_updated_ns": updated_ns,
                 "workspace": s.workspace,
                 "repo_relative": s.repo_relative,
                 "repo_path": repo_path(s),
@@ -151,7 +168,12 @@ class SessionRegistry:
                 "note_count": len(notes),
                 "agent_count": len(s.agents),
             })
-        summaries.sort(key=lambda d: d["created_at"], reverse=True)
+        summaries.sort(
+            key=lambda d: (d["_updated_ns"], d["created_at"], d["id"]),
+            reverse=True,
+        )
+        for summary in summaries:
+            del summary["_updated_ns"]
         return summaries
 
 

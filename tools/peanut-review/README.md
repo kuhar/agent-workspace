@@ -1,6 +1,6 @@
 # peanut-review
 
-Structured code review for humans and agents, with a CLI, JSONL session state,
+Structured code review for humans and agents, with a CLI, JSONL session data,
 and a browser UI.
 
 ## TL;DR
@@ -60,7 +60,7 @@ Refresh an existing GitHub-backed session:
 Refresh peanut-review session <SESSION> after the PR changed. Prefer re-running
 gh pr co <PR> over manual git operations when updating the local checkout; use
 --force only if we intentionally want to discard local divergence. Then run
-gh-pull and migrate, and show new/unresolved comments. Do not launch agents
+sync-pr and gh-pull, and show new/unresolved comments. Do not launch agents
 unless the update is substantial or I explicitly ask.
 ```
 
@@ -201,10 +201,16 @@ Use this after the author pushes a new revision.
 # PR branch in place. Use --force only to intentionally discard local divergence.
 gh pr co "$PR"
 
+"$PR_BIN" --session "$SESSION" sync-pr
 "$PR_BIN" --session "$SESSION" gh-pull
-"$PR_BIN" --session "$SESSION" migrate
 "$PR_BIN" --session "$SESSION" comments --since "$LAST_COMMENT_ID"
 ```
+
+Session base/head refs are stored as commit SHAs. Opening the web UI never
+retargets them: if the checkout has moved, the page reports that the workspace
+differs until `sync-pr` (GitHub sessions) or `migrate` (local sessions) is run
+explicitly. Agent launch/rerun is refused for a GitHub session while its
+workspace is checked out at a different commit.
 
 Rerun agents only for substantial changes. Use `rerun`, not `launch`, so stale
 round signals are cleared before the selected reviewers start:
@@ -228,6 +234,10 @@ round signals are cleared before the selected reviewers start:
 
 `note` is a report-only channel for non-review output such as test execution
 and comment curation. Review findings and discussion belong in comments.
+Review progress is derived from reviewer and Curator runtime status. Sessions
+do not have a separate lifecycle state: `round-done` records an agent's
+completion, while `result.json` records an optional verdict without preventing
+later reruns.
 There is no interactive agent help channel: blocked reviewers record a
 `Review Blocked` report when possible, exit without `round-done`, and are
 rerun after the environment is fixed. Comment-thread replies remain available

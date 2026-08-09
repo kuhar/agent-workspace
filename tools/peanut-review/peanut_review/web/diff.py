@@ -29,7 +29,11 @@ def _run_git(workspace: str, *args: str) -> str:
         ["git", "-C", workspace, *args],
         capture_output=True, text=True, timeout=30,
     )
-    # Non-zero is common for git diff with merges; swallow.
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"git {' '.join(args)} failed (rc={result.returncode}): {detail}"
+        )
     return result.stdout
 
 

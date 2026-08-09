@@ -70,13 +70,6 @@ def category_is_review_decision(category: str | None) -> bool:
     }
 
 
-class SessionState(str, Enum):
-    INIT = "init"
-    ROUND = "round"
-    COMPLETE = "complete"
-    ABORTED = "aborted"
-
-
 class AgentStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -266,7 +259,6 @@ class Session:
     diff_commands: list[str] = field(default_factory=list)
     diff_stat: str = ""
     agents: list[AgentConfig] = field(default_factory=list)
-    state: str = SessionState.INIT.value
     timeout: int = 1200
     github: GitHubPR | None = None
     # Comment id used as the lower bound for the next curator run. Reviewer

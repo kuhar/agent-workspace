@@ -16,6 +16,7 @@ from pygments.util import ClassNotFound
 from ..models import Comment, Note, Session
 from ..session import GLOBAL_FILE
 from .diff import DiffLine, FileDiff
+from .progress import summarize_agent_progress
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
@@ -46,13 +47,6 @@ THEME_TOGGLE_BUTTON = (
     '<button id="theme-toggle" class="theme-toggle" type="button" '
     'title="Color theme: system">theme: system</button>'
 )
-
-SESSION_STATE_LABELS = {
-    "init": "ready",
-    "round": "in review",
-    "complete": "done",
-    "aborted": "aborted",
-}
 
 DIFF_CONTEXT_LINES = 32
 FOLD_MIN_OMITTED_LINES = 8
@@ -130,15 +124,11 @@ def _session_update_tag(timestamp: str) -> str:
     ts = html.escape(timestamp)
     return (
         f'<time class="session-updated" datetime="{ts}" title="{ts}">'
-        f'updated {html.escape(label)}</time>'
+        f'{html.escape(label)}</time>'
     )
 
 
 KILLABLE_PROCESS_STATES = {"launching", "running"}
-
-
-def _session_state_label(state: str) -> str:
-    return SESSION_STATE_LABELS.get(state, state.replace("-", " "))
 
 
 def _github_change_title(session: Session) -> str:
@@ -1002,7 +992,6 @@ def _render_sidebar(
         f'<ul class="files">{global_row}{file_rows}{report_row}</ul>'
         '<h3>Session</h3>'
         '<ul>'
-        f'<li data-k="state"><span>state</span><span class="v">{html.escape(session.state)}</span></li>'
         f'{session_rows}'
         f'<li data-k="total"><span>comments</span><span class="v">{len(live)}</span></li>'
         f'<li data-k="stale_comments"><span>stale</span><span class="v">{stale_count}</span></li>'
@@ -1124,8 +1113,9 @@ def _render_file_row(fd: FileDiff, unresolved: int, total: int) -> str:
 
 def _render_session_row(s: dict, base_url: str = "") -> str:
     sid = html.escape(s["id"])
-    state = html.escape(s.get("state", ""))
-    state_label = html.escape(_session_state_label(s.get("state", "")))
+    progress = s.get("progress") or summarize_agent_progress([])
+    progress_status = html.escape(progress.get("status", "pending"))
+    progress_label = html.escape(progress.get("label", ""))
     fallback_change = f"{s.get('base_ref', '')} … {s.get('topic_ref', '')}"
     change = html.escape(s.get("change_label") or fallback_change)
     workspace = html.escape(s.get("workspace", ""))
@@ -1134,8 +1124,16 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     unresolved = s.get("unresolved_count", 0)
     stale = s.get("stale_count", 0)
     crit = s.get("critical_count", 0)
-    agent_count = s.get("agent_count", 0)
     session_subtitle = html.escape(s.get("session_subtitle") or s.get("current_head", ""))
+    github_url = html.escape(s.get("github_url", ""), quote=True)
+    if github_url:
+        session_reference = (
+            f'<a class="github-ref" href="{github_url}" target="_blank" '
+            f'rel="noopener noreferrer" title="Open GitHub PR">'
+            f'{session_subtitle}</a>'
+        )
+    else:
+        session_reference = session_subtitle
     counts = (
         f'<span class="n">{total}</span>'
         f'<span class="sub"> total</span>'
@@ -1144,12 +1142,11 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
         + (f' · <span class="n muted">{stale}</span><span class="sub"> stale</span>' if stale else "")
     )
     return (
-        f'<tr class="session-row state-{state}" data-id="{sid}">'
+        f'<tr class="session-row" data-id="{sid}">'
         f'<td class="id"><a href="{base_url}/{sid}">{sid}</a>'
-        f'<div class="mono head">{session_subtitle}</div></td>'
-        f'<td><span class="badge state-{state}" '
-        f'title="session state: {state}">{state_label}</span>'
-        f'<div class="sub">{agent_count} agent{"s" if agent_count != 1 else ""}</div></td>'
+        f'<div class="mono head">{session_reference}</div></td>'
+        f'<td><span class="badge review-progress progress-{progress_status}" '
+        f'title="Agent-derived review progress">{progress_label}</span></td>'
         f'<td class="change" title="{change}">{change}</td>'
         f'<td class="mono workspace">{workspace}</td>'
         f'<td class="counts">{counts}</td>'
@@ -1174,7 +1171,7 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
         body = (
             '<table class="sessions">'
             '<thead><tr>'
-            '<th>Session</th><th>State</th><th>Change</th>'
+            '<th>Session</th><th>Progress</th><th>Change</th>'
             '<th>Workspace</th><th>Comments</th><th>Updated</th>'
             '</tr></thead>'
             f'<tbody id="session-rows">{rows}</tbody>'
@@ -1249,12 +1246,14 @@ def render_page(
     )
 
     head_badge = (
-        '<span class="badge head head-shifted">HEAD shifted</span>'
+        '<span class="badge head head-shifted" '
+        'title="The checkout differs from the pinned review snapshot">'
+        'workspace differs</span>'
         if head_shifted else '<span class="badge head"></span>'
     )
-    state = html.escape(session.state)
-    state_class = f"state-{state}"
-    state_label = html.escape(_session_state_label(session.state))
+    progress = summarize_agent_progress(session.agents)
+    progress_status = html.escape(progress["status"])
+    progress_label = html.escape(progress["label"])
     change_label = _change_label(session)
     change_label_html = html.escape(change_label)
     title_label = change_label if _github_change_title(session) else session_id
@@ -1326,8 +1325,9 @@ def render_page(
     {THEME_TOGGLE_BUTTON}
     {gh_push_button}
     {head_badge}
-    <span class="badge session-state {state_class}" data-session-state="{state}"
-          title="session state: {state}">{state_label}</span>
+    <span class="badge review-progress progress-{progress_status}"
+          data-progress-status="{progress_status}"
+          title="Agent-derived review progress">{progress_label}</span>
   </header>
   <main>
     {sidebar}

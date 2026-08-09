@@ -45,10 +45,10 @@
   --on-label: #1e1e1e;
   --on-danger: #ffffff;
   --badge-fg: #ffffff;
-  --state-init-bg: #3a3a3a;
-  --state-round-bg: #3d4a6a;
-  --state-complete-bg: #16825d;
-  --state-aborted-bg: #5a2d2d;
+  --progress-pending-bg: #3a3a3a;
+  --progress-running-bg: #3d4a6a;
+  --progress-done-bg: #16825d;
+  --progress-failed-bg: #5a2d2d;
   --head-shifted-bg: #5d4a2a;
   --success-bg: #16825d;
   --success-border: #23835c;
@@ -106,10 +106,10 @@
     --on-label: #ffffff;
     --on-danger: #ffffff;
     --badge-fg: #ffffff;
-    --state-init-bg: #6e7781;
-    --state-round-bg: #57606a;
-    --state-complete-bg: #1a7f37;
-    --state-aborted-bg: #cf222e;
+    --progress-pending-bg: #6e7781;
+    --progress-running-bg: #57606a;
+    --progress-done-bg: #1a7f37;
+    --progress-failed-bg: #cf222e;
     --head-shifted-bg: #9a6700;
     --success-bg: #1f883d;
     --success-border: #1a7f37;
@@ -167,10 +167,10 @@
   --on-label: #ffffff;
   --on-danger: #ffffff;
   --badge-fg: #ffffff;
-  --state-init-bg: #6e7781;
-  --state-round-bg: #57606a;
-  --state-complete-bg: #1a7f37;
-  --state-aborted-bg: #cf222e;
+  --progress-pending-bg: #6e7781;
+  --progress-running-bg: #57606a;
+  --progress-done-bg: #1a7f37;
+  --progress-failed-bg: #cf222e;
   --head-shifted-bg: #9a6700;
   --success-bg: #1f883d;
   --success-border: #1a7f37;
@@ -256,8 +256,6 @@ header .badge {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-header .badge.state-complete { background: var(--state-complete-bg); color: var(--badge-fg); }
-header .badge.state-round { background: var(--state-round-bg); color: var(--badge-fg); }
 header .badge.head-shifted { background: var(--head-shifted-bg); color: var(--badge-fg); }
 header .copy-session-id {
   background: transparent;
@@ -1041,10 +1039,11 @@ table.sessions td.counts .n.crit { color: var(--critical); }
 table.sessions td.counts .n.muted { color: var(--muted); }
 table.sessions td.counts .sub { color: var(--muted); font-size: 11px; }
 
-.badge.state-init { background: var(--state-init-bg); color: var(--badge-fg); }
-.badge.state-round { background: var(--state-round-bg); color: var(--badge-fg); }
-.badge.state-complete { background: var(--state-complete-bg); color: var(--badge-fg); }
-.badge.state-aborted { background: var(--state-aborted-bg); color: var(--badge-fg); }
+.badge.progress-pending { background: var(--progress-pending-bg); color: var(--badge-fg); }
+.badge.progress-running { background: var(--progress-running-bg); color: var(--badge-fg); }
+.badge.progress-done { background: var(--progress-done-bg); color: var(--badge-fg); }
+.badge.progress-failed { background: var(--progress-failed-bg); color: var(--badge-fg); }
+.badge.review-progress { text-transform: none; letter-spacing: 0; }
 .badge {
   padding: 2px 8px;
   border-radius: 4px;

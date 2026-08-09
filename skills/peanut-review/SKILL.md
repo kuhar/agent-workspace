@@ -23,7 +23,7 @@ after `/peanut-review` as a routing hint when present:
 - `/peanut-review status <session-path>`: inspect or recover a session without
   changing comments unless asked.
 
-For `curate`, start from the live session state and produce a push-ready,
+For `curate`, start from the live session data and produce a push-ready,
 author-facing comment set:
 
 - Resolve the live session path and source checkout. If the current directory
@@ -94,11 +94,11 @@ Mode-specific checklist:
 
 ## Ask Before Guessing
 
-Use project config and discoverable local facts first. If a choice affects where
-state is written, which checkout is reviewed, or which paid/local model runner
-is used, and the answer is not already in the repo or user request, ask a
-concise question instead of inventing it. Do not ask for facts you can cheaply
-read from config files or CLI discovery.
+Use project config and discoverable local facts first. If a choice affects
+where session data is written, which checkout is reviewed, or which paid/local
+model runner is used, and the answer is not already in the repo or user
+request, ask a concise question instead of inventing it. Do not ask for facts
+you can cheaply read from config files or CLI discovery.
 
 If the lifecycle is unclear, ask: "Is this a local author-owned review, or a
 GitHub PR review?"
@@ -135,7 +135,7 @@ curator model; missing curator config should fail before launch. Add the same
 entry for local sessions when the web UI curator button or `curate` command
 should be available.
 
-Do not blur roots. `reviewRoot` is session storage/web UI state;
+Do not blur roots. `reviewRoot` is session storage/web UI data;
 `workspaceRoot` + `repoRelative` identify the checkout under review. If build
 outputs or project tools live outside the source checkout, make sure the actual
 runner workspace and permissions let agents reach them before launch.
@@ -221,12 +221,12 @@ approve/request-changes decision back to GitHub.
    ```
 
 After author updates, refresh the checkout with the project PR-update flow,
-then run `gh-pull` and `migrate`. Rerun reviewers only for substantial updates
+then run `sync-pr` and `gh-pull`. Rerun reviewers only for substantial updates
 or a human request.
 
 ```bash
+"$PR_BIN" --session "$SESSION" sync-pr
 "$PR_BIN" --session "$SESSION" gh-pull
-"$PR_BIN" --session "$SESSION" migrate
 ```
 
 ## Local Author-Owned Review
@@ -277,7 +277,8 @@ Use this when the orchestrator can modify the patch under review.
    Repeat only while useful. There is no round counter; track new work with
    `--since <comment-id>`.
 
-6. Record the final verdict; archive if useful:
+6. Record the final verdict; archive if useful. A verdict writes `result.json`
+   but does not close the session or prevent later reruns:
 
    ```bash
    "$PR_BIN" --session "$SESSION" verdict --approve --body "All critical issues addressed"
@@ -302,7 +303,9 @@ processes through the CLI:
 
 Use `status` for a compact view, but treat signal files, comments, reports, logs,
 and live processes as the real health checks. `process=...` is supervisor-owned
-runtime state; `review=done` means the agent posted `round-done`.
+runtime status; `review=done` means the agent posted `round-done`. There is no
+separate session lifecycle state: web progress is derived from reviewer and
+Curator runtime status, and an optional verdict is stored independently.
 
 The authoritative reviewer prompt is
 `tools/peanut-review/peanut_review/templates/agent-prompt.md`; do not maintain
@@ -369,4 +372,4 @@ are not pushed to GitHub.
 - If a session was launched under bad assumptions, prefer archiving it and
   starting fresh over reusing stale signals/comments.
 - If the orchestrator crashes, run `status`, then resume from the latest
-  comments, reports, logs, and signal state.
+  comments, reports, logs, and signals.

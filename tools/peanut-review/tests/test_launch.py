@@ -12,11 +12,11 @@ from unittest.mock import patch
 import pytest
 
 from peanut_review import launch
-from peanut_review.models import AgentConfig, AgentRole, Comment
+from peanut_review.models import AgentConfig, AgentRole, Comment, GitHubPR
 
 
 def _mock_git(workspace, *args):
-    if args == ("rev-parse", "HEAD"):
+    if args[:2] == ("rev-parse", "--verify"):
         return "abc123def456"
     if args[0] == "diff" and "--stat" in args:
         return "+1 -0 1 file"
@@ -114,6 +114,60 @@ def test_launch_dry_run_cursor_agent_cmd():
     cmd = results[0]["cmd"]
     assert cmd[0].endswith("cursor-agent-task.sh")
     assert "--model" in cmd and "opus-4.6-thinking" in cmd
+
+
+def test_launch_refuses_github_session_from_different_checkout(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_cursor_config(repo)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "x.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "x.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+    base = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    (repo / "x.py").write_text("x = 2\n")
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "review"], check=True)
+    review_head = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+    ).strip()
+
+    sd = str(tmp_path / "session")
+    from peanut_review.session import create_session
+    create_session(
+        workspace=str(repo),
+        base_ref=base,
+        topic_ref=review_head,
+        agents=[AgentConfig(
+            name="vera", model="opus", persona="vera.md",
+        ).to_dict()],
+        session_dir=sd,
+        github=GitHubPR(
+            repo="acme/foo", number=42,
+            head_sha=review_head, base_sha=base,
+        ),
+    )
+    (repo / "x.py").write_text("x = 3\n")
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "other"], check=True)
+
+    with pytest.raises(ValueError, match="does not match pinned review head"):
+        launch.launch_agents(sd, dry_run=True)
+
+
+def test_launch_refuses_github_session_when_workspace_head_is_unavailable():
+    sd = _make_session_dir([
+        AgentConfig(name="vera", model="opus", persona="vera.md"),
+    ])
+    from peanut_review import session as sess
+    session = sess.load_session(sd)
+    session.github = GitHubPR(repo="acme/foo", number=42)
+    sess.save_session(sd, session)
+
+    with pytest.raises(ValueError, match="cannot resolve workspace HEAD"):
+        launch.launch_agents(sd, dry_run=True)
 
 
 def test_launch_uses_workspace_root_for_cursor_and_nested_repo_for_prompt(tmp_path):
@@ -215,6 +269,12 @@ def test_launch_default_excludes_curator_and_curate_uses_dedicated_prompt(tmp_pa
     curator_prompt = (Path(sd) / "prompts" / "Curator.md").read_text()
     assert "Read your persona" in reviewer_prompt
     assert "comment curator" in curator_prompt
+    completion_contract = (
+        "This signal and your process outcome are the authoritative "
+        "completion status"
+    )
+    assert completion_contract in reviewer_prompt
+    assert completion_contract in curator_prompt
     assert "Reviewer agents: `vera`" in curator_prompt
     assert "Optimize for a small, high-signal final comment set" in curator_prompt
     assert "collapse similar low-level findings into one concise global comment" in curator_prompt

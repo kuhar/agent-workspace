@@ -26,11 +26,11 @@ from ..session import (
     refresh_agent_statuses,
     repo_path,
     reviewer_agents,
-    retarget_review_head,
-    save_session,
     validate_comment_location,
+    workspace_head_mismatch,
 )
 from . import diff as diffmod
+from .progress import summarize_agent_progress
 from .render import render_index, render_page
 
 
@@ -144,10 +144,14 @@ class SessionRegistry:
                 if s.github and s.github.repo and s.github.number
                 else (s.current_head or "")[:12]
             )
+            github_url = (
+                s.github.url.strip()
+                if s.github and s.github.url else ""
+            )
+            agents = _agent_payload(sdir, s)
             summaries.append({
                 "id": sid,
                 "session_dir": str(sdir),
-                "state": s.state,
                 "base_ref": s.base_ref,
                 "topic_ref": s.topic_ref,
                 "change_label": change_label,
@@ -159,6 +163,7 @@ class SessionRegistry:
                 "repo_relative": s.repo_relative,
                 "repo_path": repo_path(s),
                 "session_subtitle": session_subtitle,
+                "github_url": github_url,
                 "current_head": (s.current_head or "")[:12],
                 "comment_count": len(live),
                 "unresolved_count": sum(1 for c in live if not c.resolved),
@@ -166,7 +171,7 @@ class SessionRegistry:
                 "critical_count": sum(1 for c in live if c.severity == "critical"),
                 "deleted_count": len(comments) - len(live),
                 "note_count": len(notes),
-                "agent_count": len(s.agents),
+                "progress": summarize_agent_progress(agents),
             })
         summaries.sort(
             key=lambda d: (d["_updated_ns"], d["created_at"], d["id"]),
@@ -175,42 +180,6 @@ class SessionRegistry:
         for summary in summaries:
             del summary["_updated_ns"]
         return summaries
-
-
-def _git_head(workspace: str) -> str | None:
-    try:
-        out = subprocess.run(
-            ["git", "-C", workspace, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if out.returncode == 0:
-            return out.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-    return None
-
-
-def _auto_migrate_if_shifted(session_dir: Path) -> tuple[bool, str | None, bool]:
-    """If the workspace HEAD moved, mark stale + update review-head metadata.
-
-    Returns (shifted, new_head, changed). `shifted` is True only when comments
-    were marked stale on this call. `changed` is also True when stale session
-    metadata was repaired without a new HEAD shift.
-    """
-    s = load_session(session_dir)
-    live = _git_head(repo_path(s))
-    if not live:
-        return False, live, False
-    shifted = live != s.current_head
-    try:
-        changed = retarget_review_head(s, live)
-    except RuntimeError:
-        return False, live, False
-    if shifted:
-        store.mark_stale(session_dir)
-    if changed:
-        save_session(session_dir, s)
-    return shifted, live, changed
 
 
 ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
@@ -302,16 +271,18 @@ class _Handler(BaseHTTPRequestHandler):
 
         session = load_session(session_dir)
         refresh_agent_statuses(session_dir, session)
-        shifted, _, session_changed = _auto_migrate_if_shifted(session_dir)
-        if session_changed:
-            session = load_session(session_dir)
+        workspace_mismatch, workspace_head = workspace_head_mismatch(session)
 
         if tail in ("/", ""):
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
-            files = diffmod.parse_diff(
-                repo_path(session), session.base_ref, session.topic_ref,
-            )
+            try:
+                files = diffmod.parse_diff(
+                    repo_path(session), session.base_ref, session.topic_ref,
+                )
+            except RuntimeError as e:
+                self._error(409, f"cannot render pinned review diff: {e}")
+                return
             agent_runtime = {}
             for agent in session.agents:
                 snapshot = runtime.inspect_agent_runtime(session_dir, agent)
@@ -321,7 +292,8 @@ class _Handler(BaseHTTPRequestHandler):
                 }
             html_out = render_page(
                 load_session(session_dir), session_id, files, comments,
-                notes=notes, head_shifted=shifted, base_url=self.base_url,
+                notes=notes, head_shifted=workspace_mismatch,
+                base_url=self.base_url,
                 agent_runtime=agent_runtime,
             )
             self._html(200, html_out)
@@ -336,9 +308,9 @@ class _Handler(BaseHTTPRequestHandler):
                 session.github.title.strip()
                 if session.github and session.github.title else ""
             )
+            agents = _agent_payload(session_dir, session)
             payload = {
                 "id": session.id,
-                "state": session.state,
                 "base_ref": session.base_ref,
                 "topic_ref": session.topic_ref,
                 "change_label": (
@@ -350,13 +322,19 @@ class _Handler(BaseHTTPRequestHandler):
                 "workspace": session.workspace,
                 "repo_relative": session.repo_relative,
                 "repo_path": repo_path(session),
-                "agents": _agent_payload(session_dir, session),
+                "agents": agents,
+                "progress": summarize_agent_progress(agents),
                 "comment_count": len(live),
                 "note_count": len(notes),
                 "stale_count": sum(1 for c in live if c.stale),
                 "critical_count": sum(1 for c in live if c.severity == "critical"),
                 "deleted_count": len(comments) - len(live),
-                "head_shifted": shifted,
+                # Compatibility field for older clients. Browsing is
+                # intentionally read-only; this now reports persistent
+                # workspace drift rather than a one-shot auto-migration.
+                "head_shifted": workspace_mismatch,
+                "workspace_mismatch": workspace_mismatch,
+                "workspace_head": workspace_head,
                 # Only meaningful for gh-backed sessions; null otherwise so
                 # the client can decide whether to show the pending row.
                 "pending_push": (
@@ -521,7 +499,11 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._error(400, "line must be an integer")
                 end_line = data.get("end_line")
                 session = load_session(session_dir)
-                _, err = validate_comment_location(repo_path(session), file, line)
+                _, err = validate_comment_location(
+                    repo_path(session), file, line,
+                    head_ref=session.current_head,
+                    require_pinned=session.github is not None,
+                )
                 if err:
                     return self._error(400, err)
 
@@ -727,7 +709,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         end = min(end, start + MAX_DIFF_FOLD_FETCH_LINES)
         s = load_session(session_dir)
-        files = diffmod.parse_diff(repo_path(s), s.base_ref, s.topic_ref)
+        try:
+            files = diffmod.parse_diff(repo_path(s), s.base_ref, s.topic_ref)
+        except RuntimeError as e:
+            return self._error(409, f"cannot render pinned review diff: {e}")
         fd = next((f for f in files if f.path == file_path), None)
         if fd is None:
             return self._error(404, f"diff file not found: {file_path}")

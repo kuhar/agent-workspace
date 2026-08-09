@@ -120,6 +120,44 @@ def _require_configured_curator(agents: list[models.AgentConfig]) -> models.Agen
     return curator.ensure_curator_agent(agents)
 
 
+def _github_pr_from_info(pr_info) -> models.GitHubPR:
+    return models.GitHubPR(
+        repo=pr_info.repo,
+        number=pr_info.number,
+        url=pr_info.url,
+        head_sha=pr_info.head_sha,
+        base_sha=pr_info.base_sha,
+        title=pr_info.title,
+        head_ref_name=pr_info.head_ref_name,
+    )
+
+
+def _sync_session_to_pr(
+    session_dir: str | Path,
+    pr_info,
+    *,
+    base_ref: str | None = None,
+    topic_ref: str | None = None,
+) -> tuple[models.Session, bool, bool, int]:
+    existing = sess.load_session(session_dir)
+    if existing.github is not None and (
+        existing.github.repo != pr_info.repo
+        or existing.github.number != pr_info.number
+    ):
+        raise ValueError(
+            f"session is linked to {existing.github.repo}#{existing.github.number}, "
+            f"not {pr_info.repo}#{pr_info.number}"
+        )
+    session, head_changed, changed = sess.sync_session_snapshot(
+        session_dir,
+        base_ref=base_ref or pr_info.base_sha,
+        topic_ref=topic_ref or pr_info.head_sha,
+        github=_github_pr_from_info(pr_info),
+    )
+    stale_count = store.mark_stale(session_dir) if head_changed else 0
+    return session, head_changed, changed, stale_count
+
+
 # ── Subcommand handlers ────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -158,15 +196,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 pr_info.repo, pr_info.number,
                 pr_info.head_ref_name or pr_info.title,
             )
-        github = models.GitHubPR(
-            repo=pr_info.repo,
-            number=pr_info.number,
-            url=pr_info.url,
-            head_sha=pr_info.head_sha,
-            base_sha=pr_info.base_sha,
-            title=pr_info.title,
-            head_ref_name=pr_info.head_ref_name,
-        )
+        github = _github_pr_from_info(pr_info)
     else:
         base_ref = args.base if args.base is not None else "main"
         topic_ref = args.topic if args.topic is not None else "HEAD"
@@ -360,7 +390,25 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 1
 
     if session_json.exists():
-        session_obj = sess.load_session(session_dir)
+        if args.sync:
+            try:
+                session_obj, head_changed, changed, stale_count = _sync_session_to_pr(
+                    session_dir,
+                    pr_info,
+                    base_ref=args.base,
+                    topic_ref=args.topic,
+                )
+            except (RuntimeError, ValueError) as e:
+                print(f"Error: could not synchronize session: {e}", file=sys.stderr)
+                return 1
+            if changed:
+                action = "moved" if head_changed else "repaired"
+                print(
+                    f"Synchronized PR snapshot ({action}); "
+                    f"marked {stale_count} comments stale"
+                )
+        else:
+            session_obj = sess.load_session(session_dir)
         if session_obj.github is not None:
             try:
                 sess.ensure_curator(session_obj)
@@ -369,15 +417,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             sess.save_session(session_dir, session_obj)
         print(session_dir)
     else:
-        github = models.GitHubPR(
-            repo=pr_info.repo,
-            number=pr_info.number,
-            url=pr_info.url,
-            head_sha=pr_info.head_sha,
-            base_sha=pr_info.base_sha,
-            title=pr_info.title,
-            head_ref_name=pr_info.head_ref_name,
-        )
+        github = _github_pr_from_info(pr_info)
         try:
             session_obj, created_dir = sess.create_session(
                 workspace=cfg["workspace"],
@@ -422,6 +462,41 @@ def cmd_start(args: argparse.Namespace) -> int:
         else:
             pid_str = "dry-run"
         print(f"  {r['name']}: {pid_str}")
+    return 0
+
+
+def cmd_sync_pr(args: argparse.Namespace) -> int:
+    """Explicitly synchronize a session to the current GitHub PR snapshot."""
+    session_dir = _get_session_dir(args)
+    session = sess.load_session(session_dir)
+    if args.pr:
+        spec = args.pr
+    elif session.github is not None:
+        spec = f"{session.github.repo}#{session.github.number}"
+    else:
+        print("Error: PR argument required for an unlinked session", file=sys.stderr)
+        return 1
+
+    from . import gh
+    try:
+        repo, number = gh.resolve_pr_spec(spec, workspace=sess.repo_path(session))
+        pr_info = gh.fetch_pr_info(repo, number)
+        synced, head_changed, changed, stale_count = _sync_session_to_pr(
+            session_dir, pr_info,
+        )
+    except (RuntimeError, ValueError, gh.GhError) as e:
+        print(f"Error: could not synchronize session: {e}", file=sys.stderr)
+        return 1
+
+    if not changed:
+        print("PR snapshot unchanged")
+    elif head_changed:
+        print(
+            f"Synchronized to {synced.current_head[:12]}, "
+            f"marked {stale_count} comments stale"
+        )
+    else:
+        print(f"Repaired PR snapshot at {synced.current_head[:12]}")
     return 0
 
 
@@ -509,6 +584,8 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
             end_line = args.end_line
             file_lines, err = sess.validate_comment_location(
                 sess.repo_path(s), file, line,
+                head_ref=s.current_head,
+                require_pinned=s.github is not None,
             )
             if err:
                 print(f"Error: {err}", file=sys.stderr)
@@ -1041,23 +1118,14 @@ def cmd_signal_all(args: argparse.Namespace) -> int:
 
     Special-case `next-round`: clears any stale `next-round` / `round-done`
     signal files so a fresh `wait next-round` in the new pass doesn't
-    auto-satisfy on a leftover file, and lifts the session out of INIT into
-    ROUND on first call. No-op for sessions that are already COMPLETE or
-    ABORTED.
+    auto-satisfy on a leftover file.
     """
     session_dir = _get_session_dir(args)
     s = sess.load_session(session_dir)
     agents = [a.name for a in sess.reviewer_agents(s)]
 
     if args.event == "next-round":
-        if s.state in (models.SessionState.COMPLETE.value,
-                       models.SessionState.ABORTED.value):
-            print(f"Cannot signal next-round: session state is {s.state}",
-                  file=sys.stderr)
-            return 1
         _clear_signals_matching(session_dir, ["next-round", "round-done"])
-        if s.state == models.SessionState.INIT.value:
-            sess.transition_state(session_dir, models.SessionState.ROUND.value)
 
     polling.signal_all(session_dir, agents, args.event)
     print(f"Signaled {args.event} to {', '.join(agents)}")
@@ -1097,8 +1165,6 @@ def cmd_verdict(args: argparse.Namespace) -> int:
     result_path = Path(session_dir) / "result.json"
     result_path.write_text(v.to_json() + "\n")
 
-    sess.transition_state(session_dir, models.SessionState.COMPLETE.value)
-
     print(f"Verdict: {decision}")
     return 0
 
@@ -1137,7 +1203,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     sess.refresh_agent_statuses(session_dir, s)
 
     print(f"Session:  {s.id}")
-    print(f"State:    {s.state}")
     print(f"Base:     {s.base_ref}")
     print(f"Head:     {s.current_head[:12]}")
     if s.original_head != s.current_head:
@@ -1145,6 +1210,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"Workspace: {s.workspace}")
     if s.repo_relative:
         print(f"Repo:      {sess.repo_path(s)}")
+    workspace_mismatch, workspace_head = sess.workspace_head_mismatch(s)
+    if workspace_head:
+        print(f"Workspace HEAD: {workspace_head[:12]}")
+    if workspace_mismatch:
+        print("Warning: workspace differs from the pinned review snapshot")
+
+    consistency_warnings = []
+    if s.topic_ref != s.current_head:
+        consistency_warnings.append("topic_ref does not match current_head")
+    expected_command = f"git diff {s.base_ref}...{s.topic_ref}"
+    if s.diff_commands != [expected_command]:
+        consistency_warnings.append("diff_commands do not match the pinned refs")
+    if s.github is not None:
+        if s.github.head_sha != s.current_head:
+            consistency_warnings.append("GitHub head does not match current_head")
+        if s.github.base_sha != s.base_ref:
+            consistency_warnings.append("GitHub base does not match base_ref")
+    for warning in consistency_warnings:
+        print(f"Warning: {warning}")
     print()
 
     # Agents
@@ -1390,12 +1474,28 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Only create the session; do not spawn agents")
     sp.add_argument("--reuse", action="store_true",
                     help="Reuse an existing session directory instead of refusing")
+    sp.add_argument(
+        "--sync",
+        action="store_true",
+        help="Synchronize an existing session to the PR's current base/head SHAs",
+    )
     sp.add_argument("--dry-run", action="store_true",
                     help="Print resolved init/launch commands without writing")
     sp.add_argument("--launch-dry-run", action="store_true",
                     help="Create/reuse the session, but print agent launch commands")
     sp.add_argument("--template", help="Agent prompt template path")
     sp.add_argument("--cli-json", help="Path to cli.json for agent permissions")
+
+    # sync-pr
+    sp = sub.add_parser(
+        "sync-pr",
+        help="Explicitly synchronize a session to its current GitHub PR snapshot",
+    )
+    sp.add_argument(
+        "pr",
+        nargs="?",
+        help="Optional PR spec override (defaults to the linked PR)",
+    )
 
     # add-comment
     sp = sub.add_parser("add-comment",
@@ -1613,6 +1713,7 @@ def main(argv: list[str] | None = None) -> int:
         "rerun": cmd_rerun,
         "kill-agents": cmd_kill_agents,
         "start": cmd_start,
+        "sync-pr": cmd_sync_pr,
         "add-comment": cmd_add_comment,
         "add-global-comment": cmd_add_global_comment,
         "note": cmd_note,

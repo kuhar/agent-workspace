@@ -5,21 +5,22 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from peanut_review.models import AgentConfig, Session, SessionState
+from peanut_review.models import AgentConfig, Session
 from peanut_review.session import (
     create_session,
     discover_session,
     load_session,
     save_session,
-    transition_state,
     update_agent_status,
 )
 
 
 def _mock_git(workspace, *args):
     """Mock git calls for testing."""
-    if args == ("rev-parse", "HEAD"):
-        return "abc123def456"
+    if args[:2] == ("rev-parse", "--verify"):
+        if args[-1] == "main^{commit}":
+            return "base123def456"
+        return "head123def456"
     if args[0] == "diff" and "--stat" in args:
         return "+42 -10 3 files"
     return ""
@@ -40,10 +41,11 @@ def test_create_session(mock_git):
     )
 
     assert s.workspace == "/tmp/fakerepo"
-    assert s.base_ref == "main"
+    assert s.base_ref == "base123def456"
+    assert s.topic_ref == "head123def456"
+    assert s.current_head == "head123def456"
     assert len(s.agents) == 2
     assert s.agents[0].name == "vera"
-    assert s.state == SessionState.INIT.value
 
     # Directory structure created
     assert (Path(session_dir) / "comments").is_dir()
@@ -63,20 +65,6 @@ def test_load_session(mock_git):
 
     loaded = load_session(session_dir)
     assert loaded.workspace == "/tmp/repo"
-    assert loaded.state == SessionState.INIT.value
-
-
-@patch("peanut_review.session._run_git", side_effect=_mock_git)
-def test_state_transitions(mock_git):
-    sd = tempfile.mkdtemp(prefix="pr-test-")
-    session_dir = os.path.join(sd, "session")
-    create_session(workspace="/tmp/repo", session_dir=session_dir)
-
-    s = transition_state(session_dir, SessionState.ROUND.value)
-    assert s.state == "round"
-
-    s = transition_state(session_dir, SessionState.COMPLETE.value)
-    assert s.state == "complete"
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
@@ -133,7 +121,8 @@ def test_create_session_preserves_nested_repo_relative(mock_git):
     assert s.repo_path() == str((workspace / "rocm-systems").resolve())
     assert load_session(session_dir).repo_relative == "rocm-systems"
     mock_git.assert_any_call(
-        str((workspace / "rocm-systems").resolve()), "rev-parse", "HEAD",
+        str((workspace / "rocm-systems").resolve()),
+        "rev-parse", "--verify", "HEAD^{commit}",
     )
 
 
@@ -157,11 +146,19 @@ def test_session_json_roundtrip():
         agents=[
             AgentConfig(name="vera", model="opus", persona="vera.md"),
         ],
-        state="round",
     )
     text = s.to_json()
     s2 = Session.from_json(text)
     assert s2.id == "test-123"
     assert len(s2.agents) == 1
     assert s2.agents[0].name == "vera"
-    assert s2.state == "round"
+
+
+def test_session_json_ignores_legacy_lifecycle_state():
+    raw = json.loads(Session(id="test-123", workspace="/repo").to_json())
+    raw["state"] = "complete"
+
+    loaded = Session.from_json(json.dumps(raw))
+
+    assert not hasattr(loaded, "state")
+    assert "state" not in json.loads(loaded.to_json())

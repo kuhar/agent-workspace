@@ -150,3 +150,6 @@ If you deleted nothing, write `Deleted comments: none`.
 Then signal completion and exit immediately:
 
 `${PR_BIN} --session ${SESSION} signal round-done`
+
+This signal and your process outcome are the authoritative completion status;
+there is no separate session lifecycle state to update.

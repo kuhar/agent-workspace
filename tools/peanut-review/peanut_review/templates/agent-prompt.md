@@ -162,6 +162,9 @@ When done with findings and the test report, signal completion and exit immediat
 ${PR_BIN} --session ${SESSION} signal round-done
 ```
 
+This signal and your process outcome are the authoritative completion status;
+there is no separate session lifecycle state to update.
+
 Do not wait for another round. If another pass is needed, the orchestrator will
 relaunch you with `peanut-review rerun`.
 

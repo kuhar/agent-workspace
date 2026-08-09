@@ -11,13 +11,14 @@ from string import Template
 from typing import Sequence
 
 from . import curator, store
-from .models import AgentStatus, SessionState
+from .models import AgentStatus
 from .session import (
     load_session,
     repo_path,
     reset_agent_runtime,
     save_session,
     update_agent_status,
+    workspace_head_mismatch,
 )
 from .validation import validate_launch_prerequisites
 
@@ -434,6 +435,22 @@ def launch_agents(
     sdir = Path(session_dir)
     agents = _select_agents(session.agents, agent_names)
 
+    # A PR session is a pinned snapshot. Agents run in the live workspace, so
+    # launching them from a different checkout would review the wrong source
+    # even though the prompt's diff command remains pinned.
+    if session.github is not None:
+        mismatch, live_head = workspace_head_mismatch(session)
+        if live_head is None:
+            raise ValueError(
+                "cannot resolve workspace HEAD for the pinned GitHub review"
+            )
+        if mismatch:
+            raise ValueError(
+                f"workspace HEAD {live_head[:12]} does not match pinned review "
+                f"head {session.current_head[:12]}; check out the review head "
+                "before launching agents"
+            )
+
     validate_launch_prerequisites(
         workspace=session.workspace,
         agents=agents,
@@ -442,7 +459,6 @@ def launch_agents(
 
     prompts = render_all_prompts(session_dir, template_path, agent_names=agent_names)
 
-    session.state = SessionState.ROUND.value
     if not dry_run:
         _prepare_curation_baseline(sdir, session, agents)
     save_session(sdir, session)

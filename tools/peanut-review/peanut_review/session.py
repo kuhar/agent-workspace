@@ -1,4 +1,4 @@
-"""Session lifecycle — create, load, discover, update."""
+"""Session creation, loading, discovery, and updates."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AgentConfig, AgentStatus, GitHubPR, Session, SessionState, _now_iso
+from .models import AgentConfig, AgentStatus, GitHubPR, Session, _now_iso
 from . import curator
 
 META_FILE = "__meta__"
@@ -59,9 +59,20 @@ def _run_git(workspace: str, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _read_file_at_ref(workspace: str, ref: str, file: str) -> str:
+    """Read a file from a commit without changing its line structure."""
+    result = subprocess.run(
+        ["git", "-C", workspace, "show", f"{ref}:{file}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip())
+    return result.stdout
+
+
 def resolve_git_ref(workspace: str, ref: str = "HEAD") -> str:
-    """Resolve `ref` to a commit-ish SHA in `workspace`."""
-    return _run_git(workspace, "rev-parse", ref)
+    """Resolve `ref` to a commit SHA in `workspace`."""
+    return _run_git(workspace, "rev-parse", "--verify", f"{ref}^{{commit}}")
 
 
 def normalize_repo_relative(repo_relative: str | os.PathLike[str] | None) -> str:
@@ -84,23 +95,33 @@ def repo_path(session: Session) -> str:
     return session.repo_path()
 
 
-def retarget_review_head(session: Session, new_head: str) -> bool:
-    """Move a session's active review diff target to `new_head`.
+def retarget_review_snapshot(
+    session: Session,
+    new_base: str,
+    new_head: str,
+) -> bool:
+    """Move a session's active review diff to a resolved commit pair.
 
     `current_head` is the commit agents/comments are associated with, while
-    `topic_ref` and `diff_commands` are what humans and agents use to render
-    the active diff. They must move together during migration.
+    `base_ref`, `topic_ref`, and `diff_commands` are what humans and agents use
+    to render the active diff. They must move together during synchronization.
     """
-    diff_range = f"{session.base_ref}...{new_head}"
+    repo = repo_path(session)
+    base_sha = resolve_git_ref(repo, new_base)
+    head_sha = resolve_git_ref(repo, new_head)
+    diff_range = f"{base_sha}...{head_sha}"
     diff_command = f"git diff {diff_range}"
-    diff_stat = _run_git(repo_path(session), "diff", "--stat", diff_range)
+    diff_stat = _run_git(repo, "diff", "--stat", diff_range)
 
     changed = False
-    if session.current_head != new_head:
-        session.current_head = new_head
+    if session.base_ref != base_sha:
+        session.base_ref = base_sha
         changed = True
-    if session.topic_ref != new_head:
-        session.topic_ref = new_head
+    if session.current_head != head_sha:
+        session.current_head = head_sha
+        changed = True
+    if session.topic_ref != head_sha:
+        session.topic_ref = head_sha
         changed = True
     if session.diff_commands != [diff_command]:
         session.diff_commands = [diff_command]
@@ -109,6 +130,11 @@ def retarget_review_head(session: Session, new_head: str) -> bool:
         session.diff_stat = diff_stat
         changed = True
     return changed
+
+
+def retarget_review_head(session: Session, new_head: str) -> bool:
+    """Move a session's active review head while keeping its pinned base."""
+    return retarget_review_snapshot(session, session.base_ref, new_head)
 
 
 def create_session(
@@ -158,9 +184,13 @@ def create_session(
     repo_rel = normalize_repo_relative(repo_relative)
     repo = str((Path(workspace_abs) / repo_rel).resolve()) if repo_rel else workspace_abs
 
-    # Resolve git info
-    head_sha = _run_git(repo, "rev-parse", "HEAD")
-    diff_stat = _run_git(repo, "diff", "--stat", f"{base_ref}...{topic_ref}")
+    # Materialize the review snapshot. Symbolic refs are useful CLI inputs but
+    # unsafe persisted state: a later fetch or branch switch could silently
+    # change the rendered diff.
+    base_sha = resolve_git_ref(repo, base_ref)
+    head_sha = resolve_git_ref(repo, topic_ref)
+    diff_range = f"{base_sha}...{head_sha}"
+    diff_stat = _run_git(repo, "diff", "--stat", diff_range)
 
     # Build agent configs
     agent_configs = []
@@ -175,14 +205,13 @@ def create_session(
         created_at=_now_iso(),
         workspace=workspace_abs,
         repo_relative=repo_rel,
-        base_ref=base_ref,
-        topic_ref=topic_ref,
+        base_ref=base_sha,
+        topic_ref=head_sha,
         original_head=head_sha,
         current_head=head_sha,
-        diff_commands=[f"git diff {base_ref}...{topic_ref}"],
+        diff_commands=[f"git diff {diff_range}"],
         diff_stat=diff_stat,
         agents=agent_configs,
-        state=SessionState.INIT.value,
         timeout=timeout,
         github=github,
     )
@@ -233,6 +262,47 @@ def _session_lock(session_dir: str | Path):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def sync_session_snapshot(
+    session_dir: str | Path,
+    *,
+    base_ref: str,
+    topic_ref: str,
+    github: GitHubPR | None = None,
+) -> tuple[Session, bool, bool]:
+    """Atomically synchronize the persisted review snapshot.
+
+    Returns `(session, head_changed, metadata_changed)`. Callers decide when
+    a changed head should stale existing comments.
+    """
+    with _session_lock(session_dir):
+        session = load_session(session_dir)
+        old_head = session.current_head
+        changed = retarget_review_snapshot(session, base_ref, topic_ref)
+        if github is not None and session.github != github:
+            session.github = github
+            changed = True
+        if changed:
+            save_session(session_dir, session)
+        return session, session.current_head != old_head, changed
+
+
+def workspace_head(session: Session) -> str | None:
+    """Return the checked-out workspace commit, or None when unavailable."""
+    try:
+        return resolve_git_ref(repo_path(session), "HEAD")
+    except RuntimeError:
+        return None
+
+
+def workspace_head_mismatch(session: Session) -> tuple[bool, str | None]:
+    """Report whether the checkout differs from the pinned review head."""
+    live_head = workspace_head(session)
+    return (
+        live_head is not None and live_head != session.current_head,
+        live_head,
+    )
+
+
 def discover_session(start_path: str | Path | None = None) -> str | None:
     """Find session dir from $PEANUT_SESSION or .peanut-session marker."""
     env = os.environ.get("PEANUT_SESSION")
@@ -245,14 +315,6 @@ def discover_session(start_path: str | Path | None = None) -> str | None:
             if marker.exists():
                 return marker.read_text().strip()
     return None
-
-
-def transition_state(session_dir: str | Path, new_state: str) -> Session:
-    """Load session, update state, save, and return it."""
-    session = load_session(session_dir)
-    session.state = new_state
-    save_session(session_dir, session)
-    return session
 
 
 def update_agent_status(
@@ -298,7 +360,7 @@ def reset_agent_runtime(
         return session
 
 
-def _copy_session_state(dst: Session, src: Session) -> None:
+def _copy_session_fields(dst: Session, src: Session) -> None:
     dst.version = src.version
     dst.id = src.id
     dst.created_at = src.created_at
@@ -311,7 +373,6 @@ def _copy_session_state(dst: Session, src: Session) -> None:
     dst.diff_commands = src.diff_commands
     dst.diff_stat = src.diff_stat
     dst.agents = src.agents
-    dst.state = src.state
     dst.timeout = src.timeout
     dst.github = src.github
 
@@ -336,12 +397,17 @@ def refresh_agent_statuses(session_dir: str | Path, session: Session) -> bool:
                     changed = True
         if changed:
             save_session(session_dir, latest)
-        _copy_session_state(session, latest)
+        _copy_session_fields(session, latest)
     return changed
 
 
 def validate_comment_location(
-    repository: str, file: str, line: int,
+    repository: str,
+    file: str,
+    line: int,
+    *,
+    head_ref: str | None = None,
+    require_pinned: bool = False,
 ) -> tuple[list[str] | None, str | None]:
     """Validate file/line for a comment. Returns (lines, error_message).
 
@@ -353,12 +419,27 @@ def validate_comment_location(
     """
     if file == META_FILE or file == GLOBAL_FILE:
         return None, None
-    file_path = Path(repository) / file
-    if not file_path.exists():
-        return None, f"file not found in repository: {file}"
     if line < 1:
         return None, f"line must be >= 1 for source files (got {line})"
-    lines = file_path.read_text().splitlines()
+    if head_ref:
+        try:
+            contents = _read_file_at_ref(repository, head_ref, file)
+        except RuntimeError:
+            if require_pinned:
+                return None, f"file not found at review head {head_ref[:12]}: {file}"
+        else:
+            lines = contents.splitlines()
+            if line > len(lines):
+                return None, (
+                    f"{file} has {len(lines)} lines but line {line} is out of range"
+                )
+            return lines, None
+
+    if not head_ref or not require_pinned:
+        file_path = Path(repository) / file
+        if not file_path.exists():
+            return None, f"file not found in repository: {file}"
+        lines = file_path.read_text().splitlines()
     if line > len(lines):
         return None, f"{file} has {len(lines)} lines but line {line} is out of range"
     return lines, None

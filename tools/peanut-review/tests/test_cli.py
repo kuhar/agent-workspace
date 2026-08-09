@@ -77,7 +77,7 @@ def _make_git_repo() -> Path:
 
 
 def _mock_git(workspace, *args):
-    if args == ("rev-parse", "HEAD"):
+    if args[:2] == ("rev-parse", "--verify"):
         return "abc123def456789"
     if args[0] == "diff" and "--stat" in args:
         return "+42 -10 3 files"
@@ -85,7 +85,7 @@ def _mock_git(workspace, *args):
 
 
 def _mock_git_empty_diff(workspace, *args):
-    if args == ("rev-parse", "HEAD"):
+    if args[:2] == ("rev-parse", "--verify"):
         return "abc123def456789"
     if args[0] == "diff" and "--stat" in args:
         return ""
@@ -564,6 +564,7 @@ def test_status(mock_git):
         rc = main(["--session", sd, "status"])
     assert rc == 0
     text = out.getvalue()
+    assert "State:" not in text
     assert "vera" in text
     assert "process=pending" in text
     assert "review=pending" in text
@@ -585,8 +586,6 @@ def test_signal_all_next_round_writes_wake_signals_and_clears_stale():
         {"name": "vera", "model": "opus", "persona": "vera.md"},
         {"name": "felix", "model": "sonnet", "persona": "felix.md"},
     ])
-    sess.transition_state(sd, models.SessionState.ROUND.value)
-
     # Simulate the first pass finishing and orchestrator already having
     # signaled next-round once (so leftover files exist).
     polling.write_signal(sd, "vera", "round-done")
@@ -603,37 +602,32 @@ def test_signal_all_next_round_writes_wake_signals_and_clears_stale():
     assert (sigs / "felix.next-round").exists()
 
 
-def test_signal_all_next_round_from_init_lifts_to_round_state():
-    """First `signal-all next-round` from INIT moves the session into
-    ROUND so subsequent state-aware logic kicks in."""
+def test_signal_all_next_round_does_not_add_lifecycle_state():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
-    assert sess.load_session(sd).state == "init"
 
     rc = main(["--session", sd, "signal-all", "next-round"])
     assert rc == 0
-    assert sess.load_session(sd).state == "round"
+    assert "state" not in json.loads((Path(sd) / "session.json").read_text())
 
 
-def test_signal_all_next_round_after_complete_refused():
-    """Once a session is COMPLETE/ABORTED, signaling next-round shouldn't
-    silently resurrect it."""
+def test_signal_all_next_round_remains_available_after_verdict():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
-    sess.transition_state(sd, models.SessionState.COMPLETE.value)
+    assert main(["--session", sd, "verdict", "--comment"]) == 0
 
     rc = main(["--session", sd, "signal-all", "next-round"])
-    assert rc != 0
-    assert sess.load_session(sd).state == "complete"
+    assert rc == 0
+    assert (Path(sd) / "signals" / "vera.next-round").exists()
 
 
-def test_signal_all_other_event_does_not_change_state():
+def test_signal_all_other_event_writes_signal():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd, agents=[{"name": "vera", "model": "opus", "persona": "vera.md"}])
 
     rc = main(["--session", sd, "signal-all", "some-event"])
     assert rc == 0
-    assert sess.load_session(sd).state == "init"
+    assert (Path(sd) / "signals" / "vera.some-event").exists()
 
 
 def test_comments_since_filter_returns_only_newer():
@@ -730,10 +724,41 @@ def test_add_comment_echoes_source_line():
                    "--body", "test", "--author", "vera"])
     assert rc == 0
     assert "foo.py:2: print('hello')" in out.getvalue()
+    assert len(store.read_all_comments(sd)) == 1
 
-    # Verify comment WAS stored
-    from peanut_review.store import read_all_comments
-    assert len(read_all_comments(sd)) == 1
+
+def test_github_comment_validation_uses_pinned_head(tmp_path):
+    repo = _make_git_repo()
+    (repo / "foo.py").write_text("\nline2\nline3\n")
+    _git(repo, "commit", "-q", "-am", "review snapshot")
+    review_head = _git(repo, "rev-parse", "HEAD").strip()
+    base = _git(repo, "rev-parse", "HEAD~").strip()
+    sd = str(tmp_path / "session")
+    sess.create_session(
+        workspace=str(repo),
+        base_ref=base,
+        topic_ref=review_head,
+        session_dir=sd,
+        github=models.GitHubPR(
+            repo="acme/foo", number=42,
+            head_sha=review_head, base_sha=base,
+        ),
+    )
+
+    # Move the checkout to content where line 3 does not exist.
+    (repo / "foo.py").write_text("different\n")
+    _git(repo, "commit", "-q", "-am", "different checkout")
+
+    rc = main([
+        "--session", sd, "add-comment",
+        "--file", "foo.py", "--line", "3",
+        "--body", "pinned line", "--author", "vera",
+    ])
+
+    assert rc == 0
+    [comment] = store.read_all_comments(sd)
+    assert comment.head_sha == review_head
+    assert comment.line == 3
 
 
 def test_add_comment_rejects_line_zero():

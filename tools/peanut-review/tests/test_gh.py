@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -498,6 +498,148 @@ def test_init_id_overrides_auto_default(gh_shim, tmp_path):
     ])
     assert rc == 0
     assert sess.load_session(sd).id == "my-review"
+
+
+def test_sync_pr_updates_pinned_snapshot_and_stales_comments(gh_shim, tmp_path):
+    ws = _stage_workspace(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", ws, "rev-parse", "HEAD~"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    old_head = subprocess.run(
+        ["git", "-C", ws, "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    sd = str(tmp_path / "session")
+    sess.create_session(
+        workspace=ws,
+        base_ref=base,
+        topic_ref=old_head,
+        session_dir=sd,
+        github=models.GitHubPR(
+            repo="acme/foo", number=42, url="https://github.com/acme/foo/pull/42",
+            head_sha=old_head, base_sha=base, title="Old title",
+        ),
+    )
+    store.append_comment(sd, models.Comment(
+        author="vera", file="foo.py", line=2, body="check this",
+        head_sha=old_head,
+    ))
+
+    Path(ws, "foo.py").write_text("a\nb\nc\nd\n")
+    subprocess.run(
+        ["git", "-C", ws, "commit", "-q", "-am", "updated topic"],
+        check=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+    new_head = subprocess.run(
+        ["git", "-C", ws, "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    gh_shim.set_fixtures([{
+        "match": ["pr", "view", "42"],
+        "stdout": json.dumps({
+            "number": 42,
+            "headRefOid": new_head,
+            "baseRefOid": base,
+            "headRefName": "feature/add-it",
+            "url": "https://github.com/acme/foo/pull/42",
+            "title": "Updated title",
+        }),
+    }])
+
+    rc = main(["--session", sd, "sync-pr"])
+
+    assert rc == 0
+    synced = sess.load_session(sd)
+    assert synced.base_ref == base
+    assert synced.topic_ref == new_head
+    assert synced.current_head == new_head
+    assert synced.diff_commands == [f"git diff {base}...{new_head}"]
+    assert synced.github is not None
+    assert synced.github.head_sha == new_head
+    assert synced.github.title == "Updated title"
+    assert store.read_all_comments(sd)[0].stale is True
+
+
+def test_start_reuse_syncs_snapshot_before_pulling_comments(tmp_path):
+    ws = _stage_workspace(tmp_path)
+    base = subprocess.check_output(
+        ["git", "-C", ws, "rev-parse", "HEAD~"], text=True,
+    ).strip()
+    old_head = subprocess.check_output(
+        ["git", "-C", ws, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    review_root = tmp_path / "reviews"
+    sd = review_root / "foo-feature-add-it"
+    agents = [
+        {"name": "vera", "model": "opus", "persona": "vera.md"},
+        {"name": "Curator", "model": "gpt", "role": "curator"},
+    ]
+    sess.create_session(
+        workspace=str(tmp_path),
+        repo_relative="ws",
+        base_ref=base,
+        topic_ref=old_head,
+        agents=agents,
+        session_dir=str(sd),
+        session_id="foo-feature-add-it",
+        github=models.GitHubPR(
+            repo="acme/foo", number=42,
+            head_sha=old_head, base_sha=base,
+        ),
+        include_curator=True,
+    )
+    config = tmp_path / ".peanut-review.json"
+    config.write_text(json.dumps({
+        "reviewRoot": str(review_root),
+        "workspaceRoot": str(tmp_path),
+        "repoRelative": "ws",
+        "agents": agents,
+    }))
+
+    Path(ws, "foo.py").write_text("a\nb\nc\nd\n")
+    subprocess.run(
+        ["git", "-C", ws, "commit", "-q", "-am", "new head"],
+        check=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+    new_head = subprocess.check_output(
+        ["git", "-C", ws, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    pr_info = gh.PRInfo(
+        repo="acme/foo", number=42,
+        url="https://github.com/acme/foo/pull/42",
+        title="Add a feature", head_sha=new_head, base_sha=base,
+        head_ref_name="feature/add-it",
+    )
+    pull_result = MagicMock()
+    pull_result.summary.return_value = "Pulled 0 comments."
+
+    with (
+        patch("peanut_review.gh.resolve_pr_spec", return_value=("acme/foo", 42)),
+        patch("peanut_review.gh.fetch_pr_info", return_value=pr_info),
+        patch("peanut_review.gh_pull.pull_comments", return_value=pull_result) as pull,
+    ):
+        rc = main([
+            "start", "acme/foo#42", "--config", str(config),
+            "--reuse", "--sync", "--no-launch",
+        ])
+
+    assert rc == 0
+    synced = sess.load_session(sd)
+    assert synced.current_head == new_head
+    pulled_session = pull.call_args.args[1]
+    assert pulled_session.current_head == new_head
 
 
 def test_init_id_rejects_reserved_route_and_bad_chars(tmp_path):

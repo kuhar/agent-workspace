@@ -22,26 +22,16 @@
   function attrEsc(s) {
     return esc(s).replace(/"/g, "&quot;");
   }
-  function sessionStateLabel(state) {
-    const labels = {
-      init: "ready",
-      round: "in review",
-      complete: "done",
-      aborted: "aborted",
-    };
-    return labels[state] || String(state || "").replace(/-/g, " ");
-  }
-  function updateHeaderState(state) {
-    const badge = document.querySelector("header .session-state");
+  function updateHeaderProgress(progress) {
+    const badge = document.querySelector("header .review-progress");
     if (!badge) return;
-    const raw = String(state || "");
-    badge.textContent = sessionStateLabel(raw);
-    badge.dataset.sessionState = raw;
-    badge.title = `session state: ${raw}`;
+    const status = String(progress?.status || "pending");
+    badge.textContent = String(progress?.label || "no review agents");
+    badge.dataset.progressStatus = status;
     for (const cls of Array.from(badge.classList)) {
-      if (cls.startsWith("state-")) badge.classList.remove(cls);
+      if (cls.startsWith("progress-")) badge.classList.remove(cls);
     }
-    if (raw) badge.classList.add(`state-${raw}`);
+    badge.classList.add(`progress-${status}`);
   }
   function themeConfig(value) {
     return THEMES.find((t) => t.value === value) || THEMES[0];
@@ -1714,7 +1704,7 @@
     curatorRunBtn.addEventListener("click", launchCurator);
   }
 
-  // --- Periodic session refresh (for state/signals) ---
+  // --- Periodic session refresh (for progress/signals) ---
   async function refreshSidebar() {
     try {
       const s = await api("GET", "/api/session");
@@ -1722,15 +1712,20 @@
         const el = document.querySelector(`#sidebar [data-k="${id}"] .v`);
         if (el) el.textContent = val;
       };
-      set("state", s.state);
-      updateHeaderState(s.state);
+      updateHeaderProgress(s.progress);
       set("head", (s.current_head || "").slice(0, 12));
       set("stale_comments", s.stale_count);
       updatePushButton(s.pending_push);
       updateAgentList(s.agents || []);
-      if (s.head_shifted) {
-        const h = document.querySelector("header .badge.head");
-        if (h) { h.textContent = "HEAD shifted"; h.style.background = "#5d4a2a"; }
+      const h = document.querySelector("header .badge.head");
+      if (h && s.workspace_mismatch) {
+        h.textContent = "workspace differs";
+        h.title = "The checkout differs from the pinned review snapshot";
+        h.classList.add("head-shifted");
+      } else if (h) {
+        h.textContent = "";
+        h.title = "";
+        h.classList.remove("head-shifted");
       }
     } catch { /* ignore */ }
   }

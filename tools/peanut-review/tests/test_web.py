@@ -159,6 +159,11 @@ def test_parse_diff_empty_range(repo: Path):
     assert files == []
 
 
+def test_parse_diff_rejects_missing_pinned_ref(repo: Path):
+    with pytest.raises(RuntimeError, match="missing-review-base"):
+        diffmod.parse_diff(str(repo), "missing-review-base", "main")
+
+
 def test_parse_diff_new_file(repo: Path, tmp_path: Path):
     base = _git(repo, "rev-parse", "HEAD").strip()
     (repo / "new.py").write_text("x = 1\n")
@@ -301,27 +306,43 @@ def test_render_index_labels_and_renders_last_update():
     html = render.render_index([{
         "id": "session-a",
         "updated_at": updated_at,
+        "progress": {"label": "4 review agents running", "status": "running"},
     }], roots=["/tmp/reviews"])
 
+    assert "<th>Progress</th>" in html
+    assert "4 review agents running" in html
+    assert "<th>State</th>" not in html
     assert "<th>Updated</th>" in html
-    assert "updated 16 minutes ago" in html
+    assert ">16 minutes ago</time>" in html
+    assert ">updated 16 minutes ago</time>" not in html
     assert f'datetime="{updated_at}"' in html
     assert "<th>Created</th>" not in html
 
+    index_js = (
+        Path(web_app.__file__).parent / "assets" / "index.js"
+    ).read_text()
+    assert "s.progress" in index_js
+    assert "s.github_url" in index_js
+    assert 'class="github-ref"' in index_js
+    assert 'target="_blank"' in index_js
+    assert "sessionStateLabel" not in index_js
+    assert ">${esc(label)}</time>`" in index_js
+    assert ">updated ${esc(label)}</time>`" not in index_js
 
-def test_render_page_labels_round_state_as_in_review(
+
+def test_render_page_shows_agent_derived_progress(
     session_dir: Path, repo: Path
 ):
-    sess.transition_state(session_dir, "round")
     s = sess.load_session(session_dir)
+    s.agents[0].status = "running"
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     html = render.render_page(s, s.id, files, [], head_shifted=False)
     header = html[html.index("<header>"):html.index("</header>")]
 
-    assert 'class="badge session-state state-round"' in header
-    assert 'data-session-state="round"' in header
-    assert ">in review</span>" in header
-    assert ">round</span>" not in header
+    assert 'class="badge review-progress progress-running"' in header
+    assert 'data-progress-status="running"' in header
+    assert ">1 review agent running</span>" in header
+    assert "in review" not in header
 
 
 def test_render_page_has_copy_session_name_button(session_dir: Path, repo: Path):
@@ -1047,7 +1068,11 @@ def test_server_session_api(session_dir: Path):
         assert code == 200
         data = json.loads(raw)
         assert data["id"] == session_id
-        assert data["state"] == "init"
+        assert "state" not in data
+        assert data["progress"] == {
+            "label": "1 review agent pending",
+            "status": "pending",
+        }
         assert data["comment_count"] == 0
         assert "agents" in data
         assert data["agents"][0]["model"] == "m"
@@ -1446,7 +1471,9 @@ def test_server_unknown_session(session_dir: Path):
         srv.shutdown()
 
 
-def test_amend_auto_migrate(session_dir: Path, repo: Path):
+def test_amend_reports_workspace_mismatch_without_mutating_session(
+    session_dir: Path, repo: Path
+):
     srv, session_id, port = _start_server(session_dir)
     try:
         # Seed a comment
@@ -1458,24 +1485,32 @@ def test_amend_auto_migrate(session_dir: Path, repo: Path):
         (repo / "foo.py").write_text("def greet(name):\n    return f'hello, {name}!'\n")
         _git(repo, "commit", "-q", "--amend", "--no-edit", "-a")
 
-        # Hit /api/session — should trigger migrate
+        original = sess.load_session(session_dir)
+
+        # Browsing reports persistent drift but does not rewrite the snapshot.
         _, raw = _get(f"http://127.0.0.1:{port}/{session_id}/api/session")
         data = json.loads(raw)
         assert data["head_shifted"] is True
+        assert data["workspace_mismatch"] is True
         new_head = _git(repo, "rev-parse", "HEAD").strip()
-        migrated = sess.load_session(session_dir)
-        assert migrated.current_head == new_head
-        assert migrated.topic_ref == new_head
-        assert migrated.diff_commands == [f"git diff {migrated.base_ref}...{new_head}"]
+        assert data["workspace_head"] == new_head
+        unchanged = sess.load_session(session_dir)
+        assert unchanged.current_head == original.current_head
+        assert unchanged.topic_ref == original.topic_ref
+        assert unchanged.diff_commands == original.diff_commands
 
-        # Comment should now be stale
+        # Browsing does not stale comments either.
         comments = store.read_all_comments(session_dir)
-        assert comments[0].stale is True
+        assert comments[0].stale is False
 
-        # Subsequent hit — HEAD already migrated, no shift this time
+        # Subsequent requests continue to report the mismatch until an
+        # explicit migrate/sync operation changes the pinned snapshot.
         _, raw2 = _get(f"http://127.0.0.1:{port}/{session_id}/api/session")
         data2 = json.loads(raw2)
-        assert data2["head_shifted"] is False
+        assert data2["workspace_mismatch"] is True
+
+        _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        assert "workspace differs" in body.decode("utf-8")
     finally:
         srv.shutdown()
 
@@ -1657,6 +1692,7 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         data = json.loads(raw)
         ids = {d["id"] for d in data}
         assert ids == {s1.id, s2.id}
+        assert all(item["progress"]["status"] == "pending" for item in data)
         # Most recently updated first.
         assert data[0]["updated_at"] >= data[1]["updated_at"]
         # Each session still reachable at its own URL
@@ -1697,6 +1733,12 @@ def test_index_and_api_sessions_use_github_title(tmp_path: Path, repo: Path):
         text = body.decode("utf-8")
         assert "Add a feature" in text
         assert "acme/foo#42" in text
+        assert (
+            '<a class="github-ref" '
+            'href="https://github.com/acme/foo/pull/42" target="_blank" '
+            'rel="noopener noreferrer" title="Open GitHub PR">'
+            'acme/foo#42</a>'
+        ) in text
         assert "base-sha … topic-sha" not in text
 
         code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
@@ -1705,6 +1747,7 @@ def test_index_and_api_sessions_use_github_title(tmp_path: Path, repo: Path):
         assert item["change_label"] == "Add a feature"
         assert item["github_title"] == "Add a feature"
         assert item["session_subtitle"] == "acme/foo#42"
+        assert item["github_url"] == "https://github.com/acme/foo/pull/42"
     finally:
         srv.shutdown()
 

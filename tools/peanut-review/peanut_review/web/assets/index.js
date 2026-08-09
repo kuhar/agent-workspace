@@ -14,14 +14,8 @@
     d.textContent = s == null ? "" : String(s);
     return d.innerHTML;
   }
-  function sessionStateLabel(state) {
-    const labels = {
-      init: "ready",
-      round: "in review",
-      complete: "done",
-      aborted: "aborted",
-    };
-    return labels[state] || String(state || "").replace(/-/g, " ");
+  function attrEsc(s) {
+    return esc(s).replace(/"/g, "&quot;");
   }
   function themeConfig(value) {
     return THEMES.find((t) => t.value === value) || THEMES[0];
@@ -99,19 +93,21 @@
   function updatedCell(timestamp) {
     const label = relativeTimeLabel(timestamp);
     if (!label) return esc(timestamp);
-    return `<time class="session-updated" datetime="${esc(timestamp)}" title="${esc(timestamp)}">updated ${esc(label)}</time>`;
+    return `<time class="session-updated" datetime="${esc(timestamp)}" title="${esc(timestamp)}">${esc(label)}</time>`;
   }
 
   function rowHtml(s) {
-    const agent = `${s.agent_count} agent${s.agent_count !== 1 ? "s" : ""}`;
+    const progress = s.progress || { label: "no review agents", status: "pending" };
     const change = s.change_label || `${s.base_ref} … ${s.topic_ref}`;
     const sessionSubtitle = s.session_subtitle || s.current_head || "";
+    const sessionReference = s.github_url
+      ? `<a class="github-ref" href="${attrEsc(s.github_url)}" target="_blank" rel="noopener noreferrer" title="Open GitHub PR">${esc(sessionSubtitle)}</a>`
+      : esc(sessionSubtitle);
     return `
-      <tr class="session-row state-${esc(s.state)}" data-id="${esc(s.id)}">
+      <tr class="session-row" data-id="${esc(s.id)}">
         <td class="id"><a href="${BASE}/${esc(s.id)}">${esc(s.id)}</a>
-          <div class="mono head">${esc(sessionSubtitle)}</div></td>
-        <td><span class="badge state-${esc(s.state)}" title="session state: ${esc(s.state)}">${esc(sessionStateLabel(s.state))}</span>
-          <div class="sub">${esc(agent)}</div></td>
+          <div class="mono head">${sessionReference}</div></td>
+        <td><span class="badge review-progress progress-${esc(progress.status)}" title="Agent-derived review progress">${esc(progress.label)}</span></td>
         <td class="change" title="${esc(change)}">${esc(change)}</td>
         <td class="mono workspace">${esc(s.workspace)}</td>
         <td class="counts">${countsCell(s)}</td>

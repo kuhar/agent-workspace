@@ -375,6 +375,20 @@ def _copy_session_fields(dst: Session, src: Session) -> None:
     dst.agents = src.agents
     dst.timeout = src.timeout
     dst.github = src.github
+    dst.last_github_push_at = src.last_github_push_at
+
+
+def record_github_push(session_dir: str | Path, pushed_at: str) -> Session:
+    """Persist the latest successful GitHub push watermark atomically."""
+    with _session_lock(session_dir):
+        session = load_session(session_dir)
+        if (
+            session.last_github_push_at is None
+            or pushed_at > session.last_github_push_at
+        ):
+            session.last_github_push_at = pushed_at
+            save_session(session_dir, session)
+        return session
 
 
 def refresh_agent_statuses(session_dir: str | Path, session: Session) -> bool:

@@ -307,10 +307,14 @@ def test_render_index_labels_and_renders_last_update():
         "id": "session-a",
         "updated_at": updated_at,
         "progress": {"label": "4 review agents running", "status": "running"},
+        "push_activity": {
+            "label": "2 new comments since push", "status": "new", "count": 2,
+        },
     }], roots=["/tmp/reviews"])
 
     assert "<th>Progress</th>" in html
     assert "4 review agents running" in html
+    assert "2 new comments since push" in html
     assert "<th>State</th>" not in html
     assert "<th>Updated</th>" in html
     assert ">16 minutes ago</time>" in html
@@ -323,6 +327,7 @@ def test_render_index_labels_and_renders_last_update():
     ).read_text()
     assert "s.progress" in index_js
     assert "s.github_url" in index_js
+    assert "s.push_activity" in index_js
     assert 'class="github-ref"' in index_js
     assert 'target="_blank"' in index_js
     assert "sessionStateLabel" not in index_js
@@ -1733,6 +1738,7 @@ def test_index_and_api_sessions_use_github_title(tmp_path: Path, repo: Path):
         text = body.decode("utf-8")
         assert "Add a feature" in text
         assert "acme/foo#42" in text
+        assert "not pushed yet" in text
         assert (
             '<a class="github-ref" '
             'href="https://github.com/acme/foo/pull/42" target="_blank" '
@@ -1748,6 +1754,11 @@ def test_index_and_api_sessions_use_github_title(tmp_path: Path, repo: Path):
         assert item["github_title"] == "Add a feature"
         assert item["session_subtitle"] == "acme/foo#42"
         assert item["github_url"] == "https://github.com/acme/foo/pull/42"
+        assert item["push_activity"] == {
+            "status": "never",
+            "label": "not pushed yet",
+            "count": 0,
+        }
     finally:
         srv.shutdown()
 

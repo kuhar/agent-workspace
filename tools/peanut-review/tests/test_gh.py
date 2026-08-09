@@ -912,6 +912,7 @@ def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     assert cs["global"].external_id == "300"
     assert cs["global"].external_url == "https://h/r/300"
     assert cs["global"].external_synced_body == "global"
+    assert sess.load_session(sd).last_github_push_at is not None
 
     review_posts = [
         c for c in gh_shim.calls()
@@ -1380,6 +1381,7 @@ def test_gh_push_dry_run_does_not_call_gh(gh_shim, tmp_path):
     assert gh_shim.calls() == []
     # Comment is still local-only.
     assert store.read_all_comments(sd)[0].external_id is None
+    assert sess.load_session(sd).last_github_push_at is None
 
 
 def test_gh_push_refuses_session_without_github_field(tmp_path):

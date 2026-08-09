@@ -264,6 +264,10 @@ class Session:
     # Comment id used as the lower bound for the next curator run. Reviewer
     # launch/rerun updates this so the curator can focus on fresh findings.
     curation_since_comment_id: str | None = None
+    # Start time of the most recent successful local-comment push to GitHub.
+    # This is a creation-time watermark: comments deliberately omitted from
+    # that push are older than it, while comments added afterward are newer.
+    last_github_push_at: str | None = None
 
     def repo_path(self) -> str:
         if not self.repo_relative or self.repo_relative == ".":

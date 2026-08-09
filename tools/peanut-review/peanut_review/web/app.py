@@ -31,6 +31,7 @@ from ..session import (
 )
 from . import diff as diffmod
 from .progress import summarize_agent_progress
+from .push_activity import summarize_push_activity
 from .render import render_index, render_page
 
 
@@ -172,6 +173,7 @@ class SessionRegistry:
                 "deleted_count": len(comments) - len(live),
                 "note_count": len(notes),
                 "progress": summarize_agent_progress(agents),
+                "push_activity": summarize_push_activity(s, comments),
             })
         summaries.sort(
             key=lambda d: (d["_updated_ns"], d["created_at"], d["id"]),

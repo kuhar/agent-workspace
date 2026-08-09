@@ -143,6 +143,7 @@ def test_session_json_roundtrip():
     s = Session(
         id="test-123",
         workspace="/repo",
+        last_github_push_at="2026-08-09T12:00:00+00:00",
         agents=[
             AgentConfig(name="vera", model="opus", persona="vera.md"),
         ],
@@ -152,6 +153,7 @@ def test_session_json_roundtrip():
     assert s2.id == "test-123"
     assert len(s2.agents) == 1
     assert s2.agents[0].name == "vera"
+    assert s2.last_github_push_at == "2026-08-09T12:00:00+00:00"
 
 
 def test_session_json_ignores_legacy_lifecycle_state():

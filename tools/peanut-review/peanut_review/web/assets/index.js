@@ -67,7 +67,12 @@
       parts.push(`<span class="n crit">${s.critical_count}</span><span class="sub"> crit</span>`);
     if (s.stale_count)
       parts.push(`<span class="n muted">${s.stale_count}</span><span class="sub"> stale</span>`);
-    return parts.join(" · ");
+    const counts = parts.join(" · ");
+    const activity = s.push_activity;
+    if (!activity || !activity.label) return counts;
+    if (activity.status !== "new" && activity.status !== "never") return counts;
+    return counts
+      + `<div class="push-activity push-${activity.status}" title="GitHub comment push activity">${esc(activity.label)}</div>`;
   }
 
   function relativeTimeLabel(timestamp) {

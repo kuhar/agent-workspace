@@ -382,6 +382,15 @@ def execute_push(
         skipped_meta=plan.skipped_meta,
         skipped_imported_reviews=plan.skipped_imported_reviews,
     )
+    push_started_at = models._now_iso()
+    push_recorded = False
+
+    def record_push() -> None:
+        nonlocal push_recorded
+        if not push_recorded:
+            sess.record_github_push(session_dir, push_started_at)
+            push_recorded = True
+
     ext_map = dict(plan.ext_map)  # local copy — don't mutate caller's
 
     inline_top = [c for c in plan.new_top if c.file != sess.GLOBAL_FILE]
@@ -410,6 +419,7 @@ def execute_push(
                 ))
             result.failed += len(plan.new_top)
         else:
+            record_push()
             review_id = str(resp["id"])
             review_url = resp.get("html_url", "")
             if inline_top:
@@ -512,6 +522,7 @@ def execute_push(
             continue
         ext_id = str(resp["id"])
         url = resp.get("html_url", "")
+        record_push()
         store.update_comment_external(
             session_dir, c.id,
             external_source="github", external_id=ext_id,
@@ -534,6 +545,7 @@ def execute_push(
             result.items.append(PushItemResult(id=c.id, action="edit", error=str(e)))
             result.failed += 1
             continue
+        record_push()
         store.update_comment_external(
             session_dir, c.id,
             external_synced_body=c.body,

@@ -128,6 +128,21 @@ def _session_update_tag(timestamp: str) -> str:
     )
 
 
+def _push_activity_tag(activity: dict | None) -> str:
+    if not activity:
+        return ""
+    status = activity.get("status", "")
+    if status not in {"new", "never"}:
+        return ""
+    label = html.escape(str(activity.get("label", "")))
+    if not label:
+        return ""
+    return (
+        f'<div class="push-activity push-{status}" '
+        f'title="GitHub comment push activity">{label}</div>'
+    )
+
+
 KILLABLE_PROCESS_STATES = {"launching", "running"}
 
 
@@ -1124,6 +1139,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     unresolved = s.get("unresolved_count", 0)
     stale = s.get("stale_count", 0)
     crit = s.get("critical_count", 0)
+    push_activity = _push_activity_tag(s.get("push_activity"))
     session_subtitle = html.escape(s.get("session_subtitle") or s.get("current_head", ""))
     github_url = html.escape(s.get("github_url", ""), quote=True)
     if github_url:
@@ -1140,6 +1156,7 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
         + (f' · <span class="n warn">{unresolved}</span><span class="sub"> open</span>' if unresolved else "")
         + (f' · <span class="n crit">{crit}</span><span class="sub"> crit</span>' if crit else "")
         + (f' · <span class="n muted">{stale}</span><span class="sub"> stale</span>' if stale else "")
+        + push_activity
     )
     return (
         f'<tr class="session-row" data-id="{sid}">'

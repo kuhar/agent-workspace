@@ -191,8 +191,21 @@ fi
 
 echo "== Checkout =="
 echo "fetching $FETCH_REMOTE $BASE_REF and pull/$PR_NUMBER/head"
-git -C "$WORKSPACE" fetch "$FETCH_REMOTE" "$BASE_REF" "pull/${PR_NUMBER}/head:${FETCH_REF}"
+git -C "$WORKSPACE" fetch "$FETCH_REMOTE" "$BASE_REF" "+pull/${PR_NUMBER}/head:${FETCH_REF}"
 git -C "$WORKSPACE" switch -C "$LOCAL_BRANCH" "$FETCH_REF"
+CHECKED_OUT_HEAD="$(git -C "$WORKSPACE" rev-parse HEAD)"
+if [[ "$CHECKED_OUT_HEAD" != "$HEAD_SHA" ]]; then
+  echo "checked-out HEAD does not match GitHub PR head:" >&2
+  echo "  checkout: $CHECKED_OUT_HEAD" >&2
+  echo "  GitHub:   $HEAD_SHA" >&2
+  exit 1
+fi
+for required_commit in "$BASE_SHA" "$HEAD_SHA"; do
+  if ! git -C "$WORKSPACE" cat-file -e "${required_commit}^{commit}"; then
+    echo "missing required review commit: $required_commit" >&2
+    exit 1
+  fi
+done
 echo "workspace:   $WORKSPACE"
 echo "branch:      $LOCAL_BRANCH"
 echo "head:        $(git -C "$WORKSPACE" rev-parse --short=12 HEAD)"
@@ -226,36 +239,27 @@ if [[ -f "$SESSION/session.json" ]]; then
   SESSION_EXISTED=1
 fi
 
-START_OUTPUT="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" --reuse --no-launch)"
+START_OUTPUT="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" --reuse --sync --no-launch)"
 printf '%s\n' "$START_OUTPUT"
 
-"$PR_BIN" --session "$SESSION" migrate --new-head "$HEAD_SHA"
-
-DIFF_STAT="$(git -C "$WORKSPACE" diff --stat "${BASE_SHA}...${HEAD_SHA}")"
-tmp_session="$(mktemp)"
-jq \
+if ! jq -e \
   --arg repo "$RESOLVED_REPO" \
   --argjson number "$PR_NUMBER" \
-  --arg url "$PR_URL" \
-  --arg title "$PR_TITLE" \
-  --arg head_ref "$HEAD_REF" \
   --arg base "$BASE_SHA" \
   --arg head "$HEAD_SHA" \
-  --arg stat "$DIFF_STAT" \
-  '.base_ref=$base
-   | .topic_ref=$head
-   | .current_head=$head
-   | .diff_commands=["git diff \($base)...\($head)"]
-   | .diff_stat=$stat
-   | .github.repo=$repo
-   | .github.number=$number
-   | .github.url=$url
-   | .github.title=$title
-   | .github.head_ref_name=$head_ref
-   | .github.base_sha=$base
-   | .github.head_sha=$head' \
-  "$SESSION/session.json" >"$tmp_session"
-mv "$tmp_session" "$SESSION/session.json"
+  '.base_ref == $base
+   and .topic_ref == $head
+   and .current_head == $head
+   and .diff_commands == ["git diff \($base)...\($head)"]
+   and .github.repo == $repo
+   and .github.number == $number
+   and .github.base_sha == $base
+   and .github.head_sha == $head' \
+  "$SESSION/session.json" >/dev/null; then
+  echo "peanut-review session does not match the pinned PR snapshot" >&2
+  "$PR_BIN" --session "$SESSION" status >&2 || true
+  exit 1
+fi
 
 LAST_COMMENT_ID="$("$PR_BIN" --session "$SESSION" comments --format json | jq -r '.[-1].id // ""')"
 
@@ -312,11 +316,12 @@ Useful commands:
   $PR_BIN --session $SESSION comments --since ${LAST_COMMENT_ID:-<last-comment-id>}
   $PR_BIN --session $SESSION comments --unresolved
   $PR_BIN --session $SESSION gh-pull
-  $PR_BIN --session $SESSION migrate
+  $PR_BIN --session $SESSION sync-pr
   $PR_BIN --session $SESSION gh-push --dry-run
 
 Notes for the next orchestrator:
   - The checkout is refreshed from $FETCH_REMOTE pull/$PR_NUMBER/head, avoiding fork SSH remotes.
-  - Existing sessions are migrated to the current PR head and rerun; new sessions are launched.
+  - Session refs are pinned to exact PR commits and changed only by explicit synchronization.
+  - Existing sessions are synchronized to the current PR snapshot and rerun; new sessions are launched.
   - Use the "last comment before launch" id above with comments --since to isolate new reviewer feedback.
 EOF

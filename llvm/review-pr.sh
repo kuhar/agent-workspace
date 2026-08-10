@@ -8,7 +8,8 @@ Usage: review-pr.sh [--no-build] [--no-launch] <pr-number|github-pr-url|owner/re
 Checks the PR into ~/llvm/review/llvm-project, updates the existing PR checkout
 if it is already present, creates/reuses the peanut-review session from the
 existing ~/llvm/review/.peanut-review.json, and launches the configured
-reviewers.
+reviewers. The script owns the checkout for its full run; concurrent reviews
+using the same worktree wait for that ownership to be released.
 
 Environment overrides:
   REVIEW_PARENT   default: $HOME/llvm/review
@@ -126,6 +127,7 @@ need git
 need jq
 need sed
 need curl
+need flock
 if [[ "$NO_BUILD" != 1 ]]; then
   need ninja
 fi
@@ -147,6 +149,15 @@ if ! git -C "$WORKSPACE" remote get-url "$FETCH_REMOTE" >/dev/null 2>&1; then
   exit 1
 fi
 
+WORKTREE_GIT_DIR="$(git -C "$WORKSPACE" rev-parse --absolute-git-dir)"
+WORKTREE_LOCK="$WORKTREE_GIT_DIR/peanut-review-worktree.lock"
+echo "== Worktree ownership =="
+echo "waiting:     $WORKSPACE"
+exec {WORKTREE_LOCK_FD}>"$WORKTREE_LOCK"
+flock "$WORKTREE_LOCK_FD"
+echo "acquired:    $WORKSPACE"
+echo
+
 resolve_spec "$PR_SPEC"
 PR_JSON="$(gh pr view "$RESOLVED_NUMBER" --repo "$RESOLVED_REPO" \
   --json number,title,url,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt)"
@@ -161,6 +172,43 @@ BASE_SHA="$(jq -r '.baseRefOid' <<<"$PR_JSON")"
 UPDATED_AT="$(jq -r '.updatedAt' <<<"$PR_JSON")"
 LOCAL_BRANCH="pr-${PR_NUMBER}-$(slugify "$HEAD_REF")"
 FETCH_REF="refs/remotes/${FETCH_REMOTE}/pr/${PR_NUMBER}"
+
+ensure_review_checkout() {
+  local purpose="$1"
+  local current_head current_branch
+  current_head="$(git -C "$WORKSPACE" rev-parse HEAD)"
+  current_branch="$(git -C "$WORKSPACE" symbolic-ref --quiet --short HEAD || true)"
+  if [[ "$current_head" != "$HEAD_SHA" || "$current_branch" != "$LOCAL_BRANCH" ]]; then
+    echo "$purpose: selecting $RESOLVED_REPO#$PR_NUMBER on $LOCAL_BRANCH"
+    git -C "$WORKSPACE" switch -C "$LOCAL_BRANCH" "$HEAD_SHA"
+  fi
+  current_head="$(git -C "$WORKSPACE" rev-parse HEAD)"
+  current_branch="$(git -C "$WORKSPACE" symbolic-ref --quiet --short HEAD || true)"
+  if [[ "$current_head" != "$HEAD_SHA" || "$current_branch" != "$LOCAL_BRANCH" ]]; then
+    echo "could not prepare the owned worktree for $RESOLVED_REPO#$PR_NUMBER" >&2
+    git -C "$WORKSPACE" status --short --branch >&2
+    return 1
+  fi
+  echo "branch:      $current_branch"
+  echo "head:        $(git -C "$WORKSPACE" rev-parse --short=12 HEAD)"
+}
+
+CHECKOUT_READY=0
+finish_review_run() {
+  local status=$?
+  trap - EXIT
+  if [[ "$CHECKOUT_READY" == 1 ]]; then
+    echo
+    echo "== Final checkout =="
+    if ensure_review_checkout "final state"; then
+      echo "ready:       $RESOLVED_REPO#$PR_NUMBER"
+    else
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+trap finish_review_run EXIT
 
 echo "== PR =="
 echo "repo:        $RESOLVED_REPO"
@@ -192,14 +240,8 @@ fi
 echo "== Checkout =="
 echo "fetching $FETCH_REMOTE $BASE_REF and pull/$PR_NUMBER/head"
 git -C "$WORKSPACE" fetch "$FETCH_REMOTE" "$BASE_REF" "+pull/${PR_NUMBER}/head:${FETCH_REF}"
-git -C "$WORKSPACE" switch -C "$LOCAL_BRANCH" "$FETCH_REF"
-CHECKED_OUT_HEAD="$(git -C "$WORKSPACE" rev-parse HEAD)"
-if [[ "$CHECKED_OUT_HEAD" != "$HEAD_SHA" ]]; then
-  echo "checked-out HEAD does not match GitHub PR head:" >&2
-  echo "  checkout: $CHECKED_OUT_HEAD" >&2
-  echo "  GitHub:   $HEAD_SHA" >&2
-  exit 1
-fi
+ensure_review_checkout "checkout"
+CHECKOUT_READY=1
 for required_commit in "$BASE_SHA" "$HEAD_SHA"; do
   if ! git -C "$WORKSPACE" cat-file -e "${required_commit}^{commit}"; then
     echo "missing required review commit: $required_commit" >&2
@@ -207,8 +249,6 @@ for required_commit in "$BASE_SHA" "$HEAD_SHA"; do
   fi
 done
 echo "workspace:   $WORKSPACE"
-echo "branch:      $LOCAL_BRANCH"
-echo "head:        $(git -C "$WORKSPACE" rev-parse --short=12 HEAD)"
 echo
 
 echo "== Build =="
@@ -226,7 +266,9 @@ fi
 echo
 
 echo "== Session =="
-DRY_RUN="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" --dry-run --no-launch)"
+ensure_review_checkout "session setup"
+DRY_RUN="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" \
+  --base "$BASE_SHA" --topic "$HEAD_SHA" --dry-run --no-launch)"
 SESSION="$(awk '/^Session:/ {print $2; exit}' <<<"$DRY_RUN")"
 if [[ -z "$SESSION" ]]; then
   echo "could not resolve session path from peanut-review dry-run" >&2
@@ -239,7 +281,8 @@ if [[ -f "$SESSION/session.json" ]]; then
   SESSION_EXISTED=1
 fi
 
-START_OUTPUT="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" --reuse --sync --no-launch)"
+START_OUTPUT="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" \
+  --base "$BASE_SHA" --topic "$HEAD_SHA" --reuse --sync --no-launch)"
 printf '%s\n' "$START_OUTPUT"
 
 if ! jq -e \
@@ -272,6 +315,7 @@ if [[ "$NO_LAUNCH" == 1 ]]; then
   echo "== Launch skipped =="
 else
   echo "== Launch =="
+  ensure_review_checkout "agent launch"
   if [[ "$SESSION_EXISTED" == 1 ]]; then
     mapfile -t AGENTS < <(
       jq -r '.agents[] | select((.role // "reviewer") != "curator") | .name' \

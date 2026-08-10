@@ -120,13 +120,18 @@ def _require_configured_curator(agents: list[models.AgentConfig]) -> models.Agen
     return curator.ensure_curator_agent(agents)
 
 
-def _github_pr_from_info(pr_info) -> models.GitHubPR:
+def _github_pr_from_info(
+    pr_info,
+    *,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> models.GitHubPR:
     return models.GitHubPR(
         repo=pr_info.repo,
         number=pr_info.number,
         url=pr_info.url,
-        head_sha=pr_info.head_sha,
-        base_sha=pr_info.base_sha,
+        head_sha=head_sha or pr_info.head_sha,
+        base_sha=base_sha or pr_info.base_sha,
         title=pr_info.title,
         head_ref_name=pr_info.head_ref_name,
     )
@@ -152,7 +157,11 @@ def _sync_session_to_pr(
         session_dir,
         base_ref=base_ref or pr_info.base_sha,
         topic_ref=topic_ref or pr_info.head_sha,
-        github=_github_pr_from_info(pr_info),
+        github=_github_pr_from_info(
+            pr_info,
+            base_sha=base_ref,
+            head_sha=topic_ref,
+        ),
     )
     stale_count = store.mark_stale(session_dir) if head_changed else 0
     return session, head_changed, changed, stale_count
@@ -196,7 +205,11 @@ def cmd_init(args: argparse.Namespace) -> int:
                 pr_info.repo, pr_info.number,
                 pr_info.head_ref_name or pr_info.title,
             )
-        github = _github_pr_from_info(pr_info)
+        github = _github_pr_from_info(
+            pr_info,
+            base_sha=base_ref,
+            head_sha=topic_ref,
+        )
     else:
         base_ref = args.base if args.base is not None else "main"
         topic_ref = args.topic if args.topic is not None else "HEAD"
@@ -417,7 +430,11 @@ def cmd_start(args: argparse.Namespace) -> int:
             sess.save_session(session_dir, session_obj)
         print(session_dir)
     else:
-        github = _github_pr_from_info(pr_info)
+        github = _github_pr_from_info(
+            pr_info,
+            base_sha=args.base,
+            head_sha=args.topic,
+        )
         try:
             session_obj, created_dir = sess.create_session(
                 workspace=cfg["workspace"],

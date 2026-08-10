@@ -567,7 +567,10 @@ def test_sync_pr_updates_pinned_snapshot_and_stales_comments(gh_shim, tmp_path):
     assert store.read_all_comments(sd)[0].stale is True
 
 
-def test_start_reuse_syncs_snapshot_before_pulling_comments(tmp_path):
+@pytest.mark.parametrize("pin_existing_snapshot", [False, True])
+def test_start_reuse_syncs_snapshot_before_pulling_comments(
+    tmp_path, pin_existing_snapshot,
+):
     ws = _stage_workspace(tmp_path)
     base = subprocess.check_output(
         ["git", "-C", ws, "rev-parse", "HEAD~"], text=True,
@@ -630,16 +633,83 @@ def test_start_reuse_syncs_snapshot_before_pulling_comments(tmp_path):
         patch("peanut_review.gh.fetch_pr_info", return_value=pr_info),
         patch("peanut_review.gh_pull.pull_comments", return_value=pull_result) as pull,
     ):
-        rc = main([
+        args = [
             "start", "acme/foo#42", "--config", str(config),
             "--reuse", "--sync", "--no-launch",
-        ])
+        ]
+        if pin_existing_snapshot:
+            args.extend(["--base", base, "--topic", old_head])
+        rc = main(args)
 
     assert rc == 0
     synced = sess.load_session(sd)
-    assert synced.current_head == new_head
+    expected_head = old_head if pin_existing_snapshot else new_head
+    assert synced.current_head == expected_head
+    assert synced.github is not None
+    assert synced.github.head_sha == expected_head
     pulled_session = pull.call_args.args[1]
-    assert pulled_session.current_head == new_head
+    assert pulled_session.current_head == expected_head
+
+
+def test_start_new_session_preserves_explicit_snapshot(tmp_path):
+    ws = _stage_workspace(tmp_path)
+    base = subprocess.check_output(
+        ["git", "-C", ws, "rev-parse", "HEAD~"], text=True,
+    ).strip()
+    pinned_head = subprocess.check_output(
+        ["git", "-C", ws, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    Path(ws, "foo.py").write_text("a\nb\nc\nd\n")
+    subprocess.run(
+        ["git", "-C", ws, "commit", "-q", "-am", "later head"],
+        check=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+    later_head = subprocess.check_output(
+        ["git", "-C", ws, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    review_root = tmp_path / "reviews"
+    agents = [
+        {"name": "vera", "model": "opus", "persona": "vera.md"},
+        {"name": "Curator", "model": "gpt", "role": "curator"},
+    ]
+    config = tmp_path / ".peanut-review.json"
+    config.write_text(json.dumps({
+        "reviewRoot": str(review_root),
+        "workspaceRoot": str(tmp_path),
+        "repoRelative": "ws",
+        "agents": agents,
+    }))
+    pr_info = gh.PRInfo(
+        repo="acme/foo", number=42,
+        url="https://github.com/acme/foo/pull/42",
+        title="Add a feature", head_sha=later_head, base_sha=base,
+        head_ref_name="feature/add-it",
+    )
+    pull_result = MagicMock()
+    pull_result.summary.return_value = "Pulled 0 comments."
+
+    with (
+        patch("peanut_review.gh.resolve_pr_spec", return_value=("acme/foo", 42)),
+        patch("peanut_review.gh.fetch_pr_info", return_value=pr_info),
+        patch("peanut_review.gh_pull.pull_comments", return_value=pull_result),
+    ):
+        rc = main([
+            "start", "acme/foo#42", "--config", str(config),
+            "--base", base, "--topic", pinned_head, "--no-launch",
+        ])
+
+    assert rc == 0
+    created = sess.load_session(review_root / "foo-feature-add-it")
+    assert created.base_ref == base
+    assert created.current_head == pinned_head
+    assert created.github is not None
+    assert created.github.base_sha == base
+    assert created.github.head_sha == pinned_head
 
 
 def test_init_id_rejects_reserved_route_and_bad_chars(tmp_path):

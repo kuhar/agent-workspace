@@ -1215,13 +1215,13 @@ def test_default_review_body_has_nit_and_suggestion_variants():
 
 @pytest.mark.parametrize(("inline_count", "reply_count", "fragments"), [
     (1, 0, ("comment",)),
-    (3, 0, ("few", "comment")),
-    (6, 0, ("6", "comment")),
+    (3, 0, ("comment",)),
+    (6, 0, ("comment",)),
     (1, 1, ("comment", "reply")),
-    (1, 3, ("comment", "few", "repl")),
-    (6, 7, ("6", "comment", "7", "repl")),
+    (1, 3, ("comment", "repl")),
+    (6, 7, ("comment", "repl")),
 ])
-def test_default_review_body_describes_actual_counts(
+def test_default_review_body_describes_human_scaled_quantities(
     inline_count, reply_count, fragments,
 ):
     inline = [
@@ -1240,6 +1240,39 @@ def test_default_review_body_describes_actual_counts(
     body = gh_push._default_review_body(inline, replies).lower()
 
     assert all(fragment in body for fragment in fragments)
+
+
+@pytest.mark.parametrize("count", [3, 5, 7])
+def test_default_review_body_varies_exact_and_fuzzy_small_counts(count):
+    bodies = {
+        gh_push._default_review_body([
+            models.Comment(
+                id=f"c_{variant}_top_{index}",
+                severity=models.Severity.NIT.value,
+            )
+            for index in range(count)
+        ], []).lower()
+        for variant in range(128)
+    }
+
+    assert any(str(count) in body for body in bodies)
+    assert any(str(count) not in body for body in bodies)
+
+
+@pytest.mark.parametrize("count", [8, 18])
+def test_default_review_body_never_materializes_large_counts(count):
+    bodies = {
+        gh_push._default_review_body([
+            models.Comment(
+                id=f"c_{variant}_top_{index}",
+                severity=models.Severity.NIT.value,
+            )
+            for index in range(count)
+        ], []).lower()
+        for variant in range(128)
+    }
+
+    assert all(str(count) not in body for body in bodies)
 
 
 def test_gh_push_inline_only_uses_count_aware_review_body(gh_shim, tmp_path):

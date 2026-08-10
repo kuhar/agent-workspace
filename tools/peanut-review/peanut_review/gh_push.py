@@ -347,16 +347,50 @@ def _review_body(global_comments: list[models.Comment]) -> str:
     return "\n\n".join(c.body.strip() for c in global_comments if c.body.strip())
 
 
-def _count_phrase(count: int, *, one: str, few: str, many: str) -> str:
+def _capitalize(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _stable_choice(
+    choices: tuple[str, ...],
+    inline_comments: list[models.Comment],
+    replies: list[models.Comment],
+    *,
+    salt: str,
+) -> str:
+    """Vary wording per push while keeping retries reproducible."""
+    identities = [f"comment:{c.id}:{c.severity}" for c in inline_comments]
+    identities.extend(f"reply:{c.id}:{c.severity}" for c in replies)
+    material = "\0".join([salt, *sorted(identities)])
+    digest = hashlib.sha256(material.encode()).digest()
+    return choices[int.from_bytes(digest[:8], "big") % len(choices)]
+
+
+def _count_phrase(
+    count: int,
+    *,
+    one: str,
+    exact: str,
+    few: tuple[str, ...],
+    several: tuple[str, ...],
+    many: tuple[str, ...],
+    inline_comments: list[models.Comment],
+    replies: list[models.Comment],
+    salt: str,
+) -> str:
     if count == 1:
         return one
     if count <= 4:
-        return few
-    return many.format(count=count)
-
-
-def _capitalize(text: str) -> str:
-    return text[:1].upper() + text[1:]
+        choices = (*few, exact.format(count=count))
+    elif count <= 7:
+        choices = (*few, *several, exact.format(count=count))
+    elif count <= 9:
+        choices = several
+    else:
+        choices = many
+    return _stable_choice(
+        choices, inline_comments, replies, salt=f"quantity:{salt}",
+    )
 
 
 def _stable_template(
@@ -364,11 +398,9 @@ def _stable_template(
     inline_comments: list[models.Comment],
     replies: list[models.Comment],
 ) -> str:
-    """Vary wording per push while keeping retries reproducible."""
-    identities = [f"comment:{c.id}:{c.severity}" for c in inline_comments]
-    identities.extend(f"reply:{c.id}:{c.severity}" for c in replies)
-    digest = hashlib.sha256("\0".join(sorted(identities)).encode()).digest()
-    return templates[int.from_bytes(digest[:8], "big") % len(templates)]
+    return _stable_choice(
+        templates, inline_comments, replies, salt="review-template",
+    )
 
 
 def _default_review_body(
@@ -403,53 +435,128 @@ def _default_review_body(
             templates, inline_comments, replies,
         )
 
-    comments = _count_phrase(
-        comment_count,
+    def count_phrase(
+        salt: str,
+        *,
+        one: str,
+        exact: str,
+        few: tuple[str, ...],
+        several: tuple[str, ...],
+        many: tuple[str, ...],
+        count: int = comment_count,
+    ) -> str:
+        return _count_phrase(
+            count,
+            one=one,
+            exact=exact,
+            few=few,
+            several=several,
+            many=many,
+            inline_comments=inline_comments,
+            replies=replies,
+            salt=salt,
+        )
+
+    comments = count_phrase(
+        "comments",
         one="one comment",
-        few="a few comments",
-        many="{count} comments",
+        exact="{count} comments",
+        few=("a few comments", "some comments"),
+        several=("several comments", "a handful of comments"),
+        many=(
+            "a bunch of comments",
+            "quite a few comments",
+            "a number of comments",
+        ),
     )
-    inline_comment_phrase = _count_phrase(
-        comment_count,
+    inline_comment_phrase = count_phrase(
+        "inline-comments",
         one="one inline comment",
-        few="a few inline comments",
-        many="{count} inline comments",
+        exact="{count} inline comments",
+        few=("a few inline comments", "some inline comments"),
+        several=("several inline comments", "a handful of inline comments"),
+        many=(
+            "a bunch of inline comments",
+            "quite a few inline comments",
+            "a number of inline comments",
+        ),
     )
-    new_comments = _count_phrase(
-        comment_count,
+    new_comments = count_phrase(
+        "new-comments",
         one="a new comment",
-        few="a few new comments",
-        many="{count} new comments",
+        exact="{count} new comments",
+        few=("a few new comments", "some new comments"),
+        several=("several new comments", "a handful of new comments"),
+        many=(
+            "a bunch of new comments",
+            "quite a few new comments",
+            "a number of new comments",
+        ),
     )
-    suggestions = _count_phrase(
-        comment_count,
+    suggestions = count_phrase(
+        "suggestions",
         one="one suggestion",
-        few="a few suggestions",
-        many="{count} suggestions",
+        exact="{count} suggestions",
+        few=("a few suggestions", "some suggestions"),
+        several=("several suggestions", "a handful of suggestions"),
+        many=(
+            "a bunch of suggestions",
+            "quite a few suggestions",
+            "a number of suggestions",
+        ),
     )
-    inline_suggestions = _count_phrase(
-        comment_count,
+    inline_suggestions = count_phrase(
+        "inline-suggestions",
         one="one inline suggestion",
-        few="a few inline suggestions",
-        many="{count} inline suggestions",
+        exact="{count} inline suggestions",
+        few=("a few inline suggestions", "some inline suggestions"),
+        several=(
+            "several inline suggestions",
+            "a handful of inline suggestions",
+        ),
+        many=(
+            "a bunch of inline suggestions",
+            "quite a few inline suggestions",
+            "a number of inline suggestions",
+        ),
     )
-    new_suggestions = _count_phrase(
-        comment_count,
+    new_suggestions = count_phrase(
+        "new-suggestions",
         one="a new suggestion",
-        few="a few new suggestions",
-        many="{count} new suggestions",
+        exact="{count} new suggestions",
+        few=("a few new suggestions", "some new suggestions"),
+        several=("several new suggestions", "a handful of new suggestions"),
+        many=(
+            "a bunch of new suggestions",
+            "quite a few new suggestions",
+            "a number of new suggestions",
+        ),
     )
-    comments_with_suggestions = _count_phrase(
-        comment_count,
+    comments_with_suggestions = count_phrase(
+        "comments-with-suggestions",
         one="a comment with a suggestion",
-        few="a few comments with suggestions",
-        many="{count} comments with suggestions",
+        exact="{count} comments with suggestions",
+        few=(
+            "a few comments with suggestions",
+            "some comments with suggestions",
+        ),
+        several=(
+            "several comments with suggestions",
+            "a handful of comments with suggestions",
+        ),
+        many=(
+            "a bunch of comments with suggestions",
+            "quite a few comments with suggestions",
+            "a number of comments with suggestions",
+        ),
     )
-    nits = _count_phrase(
-        comment_count,
+    nits = count_phrase(
+        "nits",
         one="one nit",
-        few="some nits",
-        many="{count} nits",
+        exact="{count} nits",
+        few=("a few nits", "some nits"),
+        several=("several nits", "a handful of nits"),
+        many=("a bunch of nits", "quite a few nits", "a number of nits"),
     )
     values = {
         "comments": comments,
@@ -477,11 +584,18 @@ def _default_review_body(
         )
         return template.format(**values)
 
-    reply_phrase = _count_phrase(
-        len(replies),
+    reply_phrase = count_phrase(
+        "inline-replies",
+        count=len(replies),
         one="an inline reply",
-        few="a few inline replies",
-        many="{count} inline replies",
+        exact="{count} inline replies",
+        few=("a few inline replies", "some inline replies"),
+        several=("several inline replies", "a handful of inline replies"),
+        many=(
+            "a bunch of inline replies",
+            "quite a few inline replies",
+            "a number of inline replies",
+        ),
     )
     values.update({
         "replies": reply_phrase,

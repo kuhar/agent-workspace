@@ -598,6 +598,10 @@ def test_start_reuse_syncs_snapshot_before_pulling_comments(
         ),
         include_curator=True,
     )
+    stale_session = sess.load_session(sd)
+    stale_session.workspace = str(tmp_path / "previous-review-workspace")
+    stale_session.repo_relative = "old-repo"
+    sess.save_session(sd, stale_session)
     config = tmp_path / ".peanut-review.json"
     config.write_text(json.dumps({
         "reviewRoot": str(review_root),
@@ -645,10 +649,14 @@ def test_start_reuse_syncs_snapshot_before_pulling_comments(
     synced = sess.load_session(sd)
     expected_head = old_head if pin_existing_snapshot else new_head
     assert synced.current_head == expected_head
+    assert synced.workspace == str(tmp_path)
+    assert synced.repo_relative == "ws"
     assert synced.github is not None
     assert synced.github.head_sha == expected_head
     pulled_session = pull.call_args.args[1]
     assert pulled_session.current_head == expected_head
+    assert pulled_session.workspace == str(tmp_path)
+    assert pulled_session.repo_relative == "ws"
 
 
 def test_start_new_session_preserves_explicit_snapshot(tmp_path):

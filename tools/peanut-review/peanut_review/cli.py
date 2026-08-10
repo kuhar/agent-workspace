@@ -143,6 +143,8 @@ def _sync_session_to_pr(
     *,
     base_ref: str | None = None,
     topic_ref: str | None = None,
+    workspace: str | None = None,
+    repo_relative: str | None = None,
 ) -> tuple[models.Session, bool, bool, int]:
     existing = sess.load_session(session_dir)
     if existing.github is not None and (
@@ -162,6 +164,8 @@ def _sync_session_to_pr(
             base_sha=base_ref,
             head_sha=topic_ref,
         ),
+        workspace=workspace,
+        repo_relative=repo_relative,
     )
     stale_count = store.mark_stale(session_dir) if head_changed else 0
     return session, head_changed, changed, stale_count
@@ -410,6 +414,8 @@ def cmd_start(args: argparse.Namespace) -> int:
                     pr_info,
                     base_ref=args.base,
                     topic_ref=args.topic,
+                    workspace=cfg["workspace"],
+                    repo_relative=cfg["repoRelative"],
                 )
             except (RuntimeError, ValueError) as e:
                 print(f"Error: could not synchronize session: {e}", file=sys.stderr)

@@ -268,8 +268,10 @@ def sync_session_snapshot(
     base_ref: str,
     topic_ref: str,
     github: GitHubPR | None = None,
+    workspace: str | os.PathLike[str] | None = None,
+    repo_relative: str | os.PathLike[str] | None = None,
 ) -> tuple[Session, bool, bool]:
-    """Atomically synchronize the persisted review snapshot.
+    """Atomically synchronize the persisted review workspace and snapshot.
 
     Returns `(session, head_changed, metadata_changed)`. Callers decide when
     a changed head should stale existing comments.
@@ -277,7 +279,17 @@ def sync_session_snapshot(
     with _session_lock(session_dir):
         session = load_session(session_dir)
         old_head = session.current_head
-        changed = retarget_review_snapshot(session, base_ref, topic_ref)
+        changed = False
+        if workspace is not None:
+            workspace_abs = os.path.abspath(workspace)
+            repo_rel = normalize_repo_relative(repo_relative)
+            if session.workspace != workspace_abs:
+                session.workspace = workspace_abs
+                changed = True
+            if session.repo_relative != repo_rel:
+                session.repo_relative = repo_rel
+                changed = True
+        changed = retarget_review_snapshot(session, base_ref, topic_ref) or changed
         if github is not None and session.github != github:
             session.github = github
             changed = True

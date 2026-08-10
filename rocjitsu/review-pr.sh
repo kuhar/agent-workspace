@@ -13,7 +13,8 @@ The script owns the checkout for its full run; concurrent reviews using the
 same worktree wait for that ownership to be released.
 
 Environment overrides:
-  REVIEW_PARENT       default: $HOME/rocjitsu/review
+  REVIEW_PARENT       default: invoking ~/rocjitsu/review* directory, or
+                      $HOME/rocjitsu/review when run from the tracked source
   WORKSPACE           default: $REVIEW_PARENT/rocm-systems
   ROCJITSU_SOURCE     default: $WORKSPACE/emulation/rocjitsu
   BUILD_DIR           default: $REVIEW_PARENT/build
@@ -78,7 +79,12 @@ if [[ -z "$PR_SPEC" ]]; then
   exit 2
 fi
 
-REVIEW_PARENT="${REVIEW_PARENT:-$HOME/rocjitsu/review}"
+DEFAULT_REVIEW_PARENT="$HOME/rocjitsu/review"
+INVOCATION_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if [[ "$INVOCATION_DIR" == "$HOME/rocjitsu/"* && -f "$INVOCATION_DIR/.peanut-review.json" ]]; then
+  DEFAULT_REVIEW_PARENT="$INVOCATION_DIR"
+fi
+REVIEW_PARENT="${REVIEW_PARENT:-$DEFAULT_REVIEW_PARENT}"
 WORKSPACE="${WORKSPACE:-$REVIEW_PARENT/rocm-systems}"
 ROCJITSU_SOURCE="${ROCJITSU_SOURCE:-$WORKSPACE/emulation/rocjitsu}"
 BUILD_DIR="${BUILD_DIR:-$REVIEW_PARENT/build}"

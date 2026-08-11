@@ -266,6 +266,24 @@ if [[ -z "$SESSION" ]]; then
   echo "$DRY_RUN" >&2
   exit 1
 fi
+EXPECTED_SESSION_WORKSPACE="$(
+  sed -n '/^Workspace:/ { s/^Workspace:[[:space:]]*//; p; q; }' <<<"$DRY_RUN"
+)"
+if [[ -z "$EXPECTED_SESSION_WORKSPACE" ]]; then
+  echo "could not resolve session workspace from peanut-review dry-run" >&2
+  echo "$DRY_RUN" >&2
+  exit 1
+fi
+EXPECTED_REPO_RELATIVE="$(jq -r '.repoRelative' "$CONFIG")"
+if [[ "$EXPECTED_REPO_RELATIVE" == "." ]]; then
+  EXPECTED_REPO_RELATIVE=""
+fi
+
+SESSION_RUN_LOCK="${SESSION}.run.lock"
+echo "session wait: $SESSION"
+exec {SESSION_LOCK_FD}>"$SESSION_RUN_LOCK"
+flock "$SESSION_LOCK_FD"
+echo "session use:  $SESSION"
 
 SESSION_EXISTED=0
 if [[ -f "$SESSION/session.json" ]]; then
@@ -281,7 +299,11 @@ if ! jq -e \
   --argjson number "$PR_NUMBER" \
   --arg base "$BASE_SHA" \
   --arg head "$HEAD_SHA" \
-  '.base_ref == $base
+  --arg workspace "$EXPECTED_SESSION_WORKSPACE" \
+  --arg repo_relative "$EXPECTED_REPO_RELATIVE" \
+  '.workspace == $workspace
+   and .repo_relative == $repo_relative
+   and .base_ref == $base
    and .topic_ref == $head
    and .current_head == $head
    and .diff_commands == ["git diff \($base)...\($head)"]

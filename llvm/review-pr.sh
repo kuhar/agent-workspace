@@ -8,8 +8,9 @@ Usage: review-pr.sh [--no-build] [--no-launch] <pr-number|github-pr-url|owner/re
 Checks the PR into ~/llvm/review/llvm-project, updates the existing PR checkout
 if it is already present, creates/reuses the peanut-review session from the
 existing ~/llvm/review/.peanut-review.json, and launches the configured
-reviewers. The script owns the checkout for its full run; concurrent reviews
-using the same worktree wait for that ownership to be released.
+reviewers, then waits for every reviewer and the curator to finish. The script
+owns the checkout for its full run; concurrent reviews using the same worktree
+wait for that ownership to be released.
 
 Environment overrides:
   REVIEW_PARENT   default: $HOME/llvm/review
@@ -19,6 +20,7 @@ Environment overrides:
   DEFAULT_REPO    default: llvm/llvm-project
   FETCH_REMOTE    default: origin
   PR_BIN          default: $HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review
+  REVIEW_WAIT_TIMEOUT default: reviewAgentTimeoutSeconds from the config (900)
   ALLOW_DIRTY=1   allow switching with tracked local changes
 EOF
 }
@@ -139,6 +141,11 @@ fi
 if [[ ! -f "$CONFIG" ]]; then
   echo "missing peanut-review config: $CONFIG" >&2
   exit 1
+fi
+REVIEW_WAIT_TIMEOUT="${REVIEW_WAIT_TIMEOUT:-$(jq -r '.reviewAgentTimeoutSeconds // 900' "$CONFIG")}"
+if ! [[ "$REVIEW_WAIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "REVIEW_WAIT_TIMEOUT must be a positive integer: $REVIEW_WAIT_TIMEOUT" >&2
+  exit 2
 fi
 if ! git -C "$WORKSPACE" rev-parse --show-toplevel >/dev/null 2>&1; then
   echo "missing LLVM checkout: $WORKSPACE" >&2
@@ -356,6 +363,16 @@ else
     "$PR_BIN" --session "$SESSION" launch
   fi
   echo
+
+  echo "== Wait for review completion =="
+  echo "timeout:     $REVIEW_WAIT_TIMEOUT seconds per phase (reviewers, then curator)"
+  "$PR_BIN" --session "$SESSION" wait-all round-done \
+    --timeout "$REVIEW_WAIT_TIMEOUT"
+  echo
+
+  echo "== Final review status =="
+  "$PR_BIN" --session "$SESSION" status
+  echo
 fi
 
 echo "== Orchestrator context =="
@@ -377,7 +394,7 @@ Useful commands:
   ninja -C $BUILD_DIR $BUILD_TARGETS
   $PR_BIN --session $SESSION status
   $PR_BIN --session $SESSION inbox
-  $PR_BIN --session $SESSION wait-all round-done --timeout 900
+  $PR_BIN --session $SESSION wait-all round-done --timeout $REVIEW_WAIT_TIMEOUT
   $PR_BIN --session $SESSION kill-agents
   $PR_BIN --session $SESSION comments --since ${LAST_COMMENT_ID:-<last-comment-id>}
   $PR_BIN --session $SESSION comments --unresolved
@@ -389,5 +406,7 @@ Notes for the next orchestrator:
   - The checkout is refreshed from $FETCH_REMOTE pull/$PR_NUMBER/head, avoiding fork SSH remotes.
   - Session refs are pinned to exact PR commits and changed only by explicit synchronization.
   - Existing sessions are synchronized to the current PR snapshot and rerun; new sessions are launched.
+  - The wrapper blocks until all reviewers finish, then wait-all launches and waits for Curator.
+  - A reviewer/Curator failure or timeout makes the wrapper exit nonzero so callers can serialize review jobs safely.
   - Use the "last comment before launch" id above with comments --since to isolate new reviewer feedback.
 EOF

@@ -2318,6 +2318,11 @@ def test_client_gh_push_modal_includes_selection_controls():
     assert "fitEditTextarea(ta, targetHeight)" in block
     assert 'api("POST", "/api/edit", { comment_id: cid, body: newBody })' in block
     assert 'api("POST", "/api/delete", { comment_id: cid })' in block
+    assert "function captureGhSelectionState()" in block
+    assert "function restoreGhSelectionState(state)" in block
+    assert "state.set(box.value, box.checked)" in block
+    assert "if (state.has(box.value)) box.checked = state.get(box.value)" in block
+    assert block.count("await fetchGhPreview(selectionState)") == 2
 
 
 def test_client_polling_is_single_flight_and_visibility_aware():

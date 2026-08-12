@@ -1934,7 +1934,23 @@
       + `</li>`;
   }
 
-  async function fetchGhPreview() {
+  function captureGhSelectionState() {
+    const state = new Map();
+    if (!ghBody) return state;
+    ghBody.querySelectorAll(".push-select").forEach((box) => {
+      state.set(box.value, box.checked);
+    });
+    return state;
+  }
+
+  function restoreGhSelectionState(state) {
+    if (!ghBody || !state) return;
+    ghBody.querySelectorAll(".push-select").forEach((box) => {
+      if (state.has(box.value)) box.checked = state.get(box.value);
+    });
+  }
+
+  async function fetchGhPreview(selectionState = null) {
     let plan;
     try {
       plan = await api("GET", "/api/gh/preview");
@@ -1980,6 +1996,7 @@
       }
     }
     ghBody.innerHTML = html;
+    restoreGhSelectionState(selectionState);
     bindGhSelectionControls(pushable);
   }
 
@@ -2100,9 +2117,10 @@
         close();
         return;
       }
+      const selectionState = captureGhSelectionState();
       try {
         await api("POST", "/api/edit", { comment_id: cid, body: newBody });
-        await fetchGhPreview();
+        await fetchGhPreview(selectionState);
         refreshSidebar();
         refreshComments();
       } catch (e) {
@@ -2116,10 +2134,11 @@
     const cid = btn.dataset.pushDelete;
     if (!cid) return;
     if (!confirm("Delete this comment? It's a soft-delete — the record is kept but hidden from agents and the default view.")) return;
+    const selectionState = captureGhSelectionState();
     btn.disabled = true;
     try {
       await api("POST", "/api/delete", { comment_id: cid });
-      await fetchGhPreview();
+      await fetchGhPreview(selectionState);
       refreshSidebar();
       refreshComments();
     } catch (e) {

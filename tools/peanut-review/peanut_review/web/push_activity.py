@@ -25,16 +25,24 @@ def summarize_push_activity(
     if session.github is None:
         return None
 
+    unpushed = [
+        c
+        for c in comments
+        if not c.deleted
+        and c.file != META_FILE
+        and c.external_source is None
+        and c.external_id is None
+    ]
+
     if session.last_github_push_at is None:
-        # Older sessions may contain locally-pushed comments but predate the
-        # watermark. Stay neutral until their next push rather than treating
-        # intentionally omitted comments as new or claiming no push occurred.
-        has_legacy_local_push = any(
-            c.external_id is not None and not c.author.lower().startswith("gh:")
-            for c in comments
-        )
-        if has_legacy_local_push:
-            return None
+        if unpushed:
+            count = len(unpushed)
+            noun = "comment" if count == 1 else "comments"
+            return {
+                "status": "new",
+                "label": f"{count} {noun} not pushed yet",
+                "count": count,
+            }
         return {"status": "never", "label": "not pushed yet", "count": 0}
 
     pushed_at = _timestamp(session.last_github_push_at)
@@ -42,11 +50,8 @@ def summarize_push_activity(
         return None
     new_count = sum(
         1
-        for c in comments
-        if not c.deleted
-        and c.file != META_FILE
-        and c.external_source is None
-        and (created_at := _timestamp(c.timestamp)) is not None
+        for c in unpushed
+        if (created_at := _timestamp(c.timestamp)) is not None
         and created_at > pushed_at
     )
     if not new_count:

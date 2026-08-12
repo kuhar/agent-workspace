@@ -1851,6 +1851,45 @@ def test_registry_pages_and_caches_only_requested_summaries(
     assert pr_page["sessions"][0]["id"] == first.id
 
 
+def test_registry_push_activity_is_scoped_to_each_session(
+    tmp_path: Path, repo: Path,
+):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    first, first_dir = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "first-session"),
+        github=GitHubPR(repo="acme/foo", number=41),
+    )
+    second, second_dir = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "second-session"),
+        github=GitHubPR(repo="acme/foo", number=42),
+    )
+    first.last_github_push_at = "2026-08-11T12:00:00+00:00"
+    sess.save_session(first_dir, first)
+    store.append_comment(first_dir, Comment(
+        author="vera", timestamp="2026-08-11T12:01:00+00:00",
+    ))
+    store.append_comment(second_dir, Comment(
+        author="felix", timestamp="2026-08-10T12:00:00+00:00",
+    ))
+
+    summaries = web_app.SessionRegistry([root]).list_sessions()
+    activity = {item["id"]: item["push_activity"] for item in summaries}
+
+    assert activity[first.id] == {
+        "status": "new",
+        "label": "1 new comment since push",
+        "count": 1,
+    }
+    assert activity[second.id] == {
+        "status": "new",
+        "label": "1 comment not pushed yet",
+        "count": 1,
+    }
+
+
 def test_registry_sorts_sessions_by_last_update(tmp_path: Path, repo: Path):
     root = tmp_path / "review-root"
     root.mkdir()

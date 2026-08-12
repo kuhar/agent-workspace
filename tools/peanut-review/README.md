@@ -24,6 +24,29 @@ bin/peanut_review_serve.sh
 
 Defaults: `root=$HOME/reviews`, `url=http://127.0.0.1:27183/pr`.
 
+### Optional browser profiling
+
+The runtime has no browser dependency. For repeatable local performance
+measurements, install Playwright in a disposable virtual environment and run
+the optional profiler against either the direct server or the Caddy mount:
+
+```bash
+python -m venv /tmp/peanut-review-profiler
+/tmp/peanut-review-profiler/bin/pip install playwright
+/tmp/peanut-review-profiler/bin/playwright install chromium
+
+/tmp/peanut-review-profiler/bin/python scripts/profile_web.py \
+  --url http://127.0.0.1:27183/example-session/ \
+  --url http://127.0.0.1:27182/pr/example-session/ \
+  --runs 3 --output /tmp/peanut-review-profile.json
+```
+
+The JSON report records medians plus every run: response start,
+DOMContentLoaded, main-thread task, layout and style time, long tasks,
+transferred bytes, DOM shape, bottom-scroll cost, and steady-state polling
+bytes and CPU. Compare medians from the same machine, browser build, server
+mount, session snapshot, and run count.
+
 ## Copy/Paste Prompts
 
 First-time project setup:

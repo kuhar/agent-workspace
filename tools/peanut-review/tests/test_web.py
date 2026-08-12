@@ -1,6 +1,7 @@
 """Tests for the web subpackage: diff parser, renderer, HTTP server."""
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import subprocess
@@ -176,6 +177,62 @@ def test_parse_diff_new_file(repo: Path, tmp_path: Path):
     assert new_files[0].additions == 1
 
 
+def test_parse_diff_uses_bounded_virtual_context_and_revision_cache(tmp_path: Path):
+    repo = _long_repo(tmp_path, line_count=120, changed_line=60)
+    diffmod.clear_diff_cache()
+
+    [first] = diffmod.parse_diff(str(repo), "main~1", "main")
+    [second] = diffmod.parse_diff(str(repo), "main~1", "main")
+
+    assert first.total_lines == 121
+    assert len(first.lines) == 66
+    assert [(gap.start_index, gap.count) for gap in first.gaps] == [
+        (0, 27),
+        (93, 28),
+    ]
+    assert second is first
+    assert diffmod.diff_cache_info().hits == 1
+
+
+def test_bounded_diff_slice_reads_virtual_context(tmp_path: Path):
+    repo = _long_repo(tmp_path, line_count=120, changed_line=60)
+    [fd] = diffmod.parse_diff(str(repo), "main~1", "main")
+
+    lines = diffmod.slice_diff(fd, 4, 9)
+
+    assert [line.new_lineno for line in lines] == [5, 6, 7, 8, 9]
+    assert lines[0].content == "value_005 = 5"
+    assert all(line.kind == "context" for line in lines)
+
+
+def test_bounded_diff_preserves_rename_delete_and_binary_shapes(tmp_path: Path):
+    repo = tmp_path / "shape-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "old.txt").write_text("one\ntwo\n")
+    (repo / "removed.txt").write_text("remove\nme\n")
+    (repo / "image.bin").write_bytes(b"\x00\x01\x02")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "mv", "old.txt", "renamed.txt")
+    (repo / "removed.txt").unlink()
+    (repo / "image.bin").write_bytes(b"\x00\x03\x04")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "change shapes")
+
+    files = {fd.path: fd for fd in diffmod.parse_diff(str(repo), "main~1", "main")}
+
+    assert files["renamed.txt"].status == "R"
+    assert files["renamed.txt"].total_lines == 2
+    assert files["renamed.txt"].gaps[0].count == 2
+    assert files["removed.txt"].status == "D"
+    assert [line.kind for line in files["removed.txt"].lines] == ["deleted", "deleted"]
+    assert files["image.bin"].status == "M"
+    assert files["image.bin"].binary is True
+
+
 # ---------------- renderer ----------------
 
 def test_render_page_smoke(session_dir: Path, repo: Path):
@@ -208,8 +265,9 @@ def test_render_page_folds_long_unchanged_context(tmp_path: Path):
     assert 'data-folded-lines="27"' in html
     assert 'class="fold-toggle"' in html
     assert 'data-fold-expand=' in html
-    assert 'class="fold-payload"' in html
-    assert "MAX_FOLD_EXPAND_LINES = 100" in html
+    assert 'class="fold-payload"' not in html
+    app_js = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
+    assert "MAX_FOLD_EXPAND_LINES = 100" in app_js
     assert "27 unchanged lines hidden" in html
     assert "28 unchanged lines hidden" in html
     assert html.count('class="line context"') < 80
@@ -279,16 +337,58 @@ def test_render_page_keeps_comment_anchor_visible_when_context_folded(
     assert 'data-line="5"' in html
 
 
+def test_render_page_enforces_global_row_and_highlight_budgets(
+    session_dir: Path,
+):
+    s = sess.load_session(session_dir)
+    files = []
+    for file_index in range(80):
+        lines = [
+            diffmod.DiffLine("added", None, line + 1, f"value = {line}", line)
+            for line in range(100)
+        ]
+        files.append(diffmod.FileDiff(
+            path=f"generated/{file_index:03d}.py",
+            status="A",
+            lines=lines,
+            additions=len(lines),
+            total_lines=len(lines),
+        ))
+
+    html = render.render_page(s, s.id, files, [], head_shifted=False)
+
+    assert html.count('class="line added"') == render.MAX_INITIAL_PAGE_LINES
+    assert html.count('<span class="hl-') < render.MAX_INITIAL_PAGE_HIGHLIGHT_LINES * 8
+    assert "--file-intrinsic-size:" in html
+
+
+def test_render_page_tracks_known_comments_outside_rendered_files(
+    session_dir: Path, repo: Path,
+):
+    s = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
+    comment = Comment(
+        author="vera", file="outside.py", line=10, body="not in this diff",
+    )
+
+    html = render.render_page(s, s.id, files, [comment], head_shifted=False)
+
+    assert "not in this diff" not in html
+    assert f'window.PR_KNOWN_COMMENT_IDS = ["{comment.id}"]' in html
+
+
 def test_render_page_keeps_file_header_sticky(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     html = render.render_page(s, s.id, files, [], head_shifted=False)
 
-    assert ".file-header" in html
-    assert "position: sticky;" in html
-    assert "top: var(--sticky-file-top);" in html
-    assert "border-radius: 0;" in html
-    assert "--sticky-target-offset" in html
+    css = (Path(web_app.__file__).parent / "assets" / "style.css").read_text()
+    assert ".file-header" in css
+    assert "position: sticky;" in css
+    assert "top: var(--sticky-file-top);" in css
+    assert "border-radius: 0;" in css
+    assert "--sticky-target-offset" in css
+    assert "content-visibility: auto" in css
     assert '<span class="path" title="foo.py">foo.py</span>' in html
 
 
@@ -297,6 +397,23 @@ def test_render_index_includes_theme_toggle():
 
     assert 'id="theme-toggle"' in html
     assert 'localStorage.getItem("pr.theme")' in html
+
+
+def test_render_index_slash_focuses_session_filter():
+    html = render.render_index([], roots=["/tmp/reviews"])
+    index_js = (
+        Path(web_app.__file__).parent / "assets" / "index.js"
+    ).read_text()
+
+    assert 'id="session-search"' in html
+    assert 'placeholder="Press / to search"' in html
+    assert 'aria-keyshortcuts="/ Escape"' in html
+    assert 'event.key !== "/"' in index_js
+    assert "isEditing" in index_js
+    assert "sessionSearch.focus()" in index_js
+    assert "sessionSearch.select()" in index_js
+    assert 'event.key === "Escape"' in index_js
+    assert "sessionSearch.blur()" in index_js
 
 
 def test_render_index_labels_and_renders_last_update():
@@ -361,7 +478,8 @@ def test_render_page_has_copy_session_name_button(session_dir: Path, repo: Path)
     assert f'data-session-id="{s.id}"' in header
     assert 'title="Copy session name"' in header
     assert ">▣</button>" in header
-    assert "copyTextToClipboard" in html
+    app_js = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
+    assert "copyTextToClipboard" in app_js
 
 
 def test_render_page_uses_github_title_for_change_label(
@@ -1066,6 +1184,64 @@ def test_server_session_page(session_dir: Path):
         srv.shutdown()
 
 
+def test_server_serves_versioned_compressed_assets(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        text = body.decode()
+        marker = 'href="/assets/style.css?v='
+        start = text.index(marker) + len('href="')
+        end = text.index('"', start)
+        asset_url = text[start:end]
+        assert '<style>' not in text
+        assert 'src="/assets/app.js?v=' in text
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}{asset_url}",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        with urllib.request.urlopen(request) as response:
+            compressed = response.read()
+            assert response.headers["Content-Encoding"] == "gzip"
+            assert "immutable" in response.headers["Cache-Control"]
+            assert response.headers["ETag"]
+        assert b"content-visibility: auto" in gzip.decompress(compressed)
+    finally:
+        srv.shutdown()
+
+
+def test_comment_and_note_routes_do_not_refresh_agents_or_git(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        with (
+            patch("peanut_review.web.app.refresh_agent_statuses") as refresh,
+            patch("peanut_review.web.app.workspace_head_mismatch") as mismatch,
+        ):
+            assert _get(f"http://127.0.0.1:{port}/{session_id}/api/comments")[0] == 200
+            assert _get(f"http://127.0.0.1:{port}/{session_id}/api/notes")[0] == 200
+        refresh.assert_not_called()
+        mismatch.assert_not_called()
+    finally:
+        srv.shutdown()
+
+
+def test_unchanged_comment_poll_returns_not_modified(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    url = f"http://127.0.0.1:{port}/{session_id}/api/comments"
+    try:
+        with urllib.request.urlopen(url) as response:
+            assert response.status == 200
+            etag = response.headers["ETag"]
+            assert json.loads(response.read()) == []
+        request = urllib.request.Request(url, headers={"If-None-Match": etag})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(request)
+        assert exc.value.code == 304
+        assert exc.value.headers["ETag"] == etag
+    finally:
+        srv.shutdown()
+
+
 def test_server_session_api(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
@@ -1636,6 +1812,45 @@ def test_registry_picks_up_sessions_added_later(tmp_path: Path, repo: Path):
     assert reg.get(s.id) == root / "late"
 
 
+def test_registry_pages_and_caches_only_requested_summaries(
+    tmp_path: Path, repo: Path,
+):
+    root = tmp_path / "review-root"
+    root.mkdir()
+    first, first_dir = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "first-session"),
+    )
+    second, _ = sess.create_session(
+        workspace=str(repo), base_ref="main~1", topic_ref="main",
+        session_dir=str(root / "second-session"),
+    )
+    first.github = GitHubPR(
+        repo="acme/widgets", number=4242,
+        url="https://github.com/acme/widgets/pull/4242",
+    )
+    sess.save_session(first_dir, first)
+    registry = web_app.SessionRegistry([root])
+
+    with patch(
+        "peanut_review.web.app.store.read_all_comments",
+        wraps=store.read_all_comments,
+    ) as read_comments:
+        page = registry.page_sessions(limit=1)
+        repeated = registry.page_sessions(limit=1)
+
+    assert page["total"] == 2
+    assert page["has_more"] is True
+    assert len(page["sessions"]) == 1
+    assert repeated["sessions"] == page["sessions"]
+    assert read_comments.call_count == 1
+    assert registry.page_sessions(query=first.id)["total"] == 1
+    assert registry.page_sessions(query=second.id)["total"] == 1
+    pr_page = registry.page_sessions(query="4242")
+    assert pr_page["total"] == 1
+    assert pr_page["sessions"][0]["id"] == first.id
+
+
 def test_registry_sorts_sessions_by_last_update(tmp_path: Path, repo: Path):
     root = tmp_path / "review-root"
     root.mkdir()
@@ -1695,11 +1910,19 @@ def test_index_and_api_sessions_list_all(tmp_path: Path, repo: Path):
         code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
         assert code == 200
         data = json.loads(raw)
-        ids = {d["id"] for d in data}
+        ids = {d["id"] for d in data["sessions"]}
         assert ids == {s1.id, s2.id}
-        assert all(item["progress"]["status"] == "pending" for item in data)
+        assert data["total"] == 2
+        assert data["has_more"] is False
+        assert all(
+            item["progress"]["status"] == "pending"
+            for item in data["sessions"]
+        )
         # Most recently updated first.
-        assert data[0]["updated_at"] >= data[1]["updated_at"]
+        assert (
+            data["sessions"][0]["updated_at"]
+            >= data["sessions"][1]["updated_at"]
+        )
         # Each session still reachable at its own URL
         c1, _ = _get(f"http://127.0.0.1:{port}/{s1.id}/")
         c2, _ = _get(f"http://127.0.0.1:{port}/{s2.id}/")
@@ -1749,7 +1972,7 @@ def test_index_and_api_sessions_use_github_title(tmp_path: Path, repo: Path):
 
         code, raw = _get(f"http://127.0.0.1:{port}/api/sessions")
         assert code == 200
-        [item] = json.loads(raw)
+        [item] = json.loads(raw)["sessions"]
         assert item["change_label"] == "Add a feature"
         assert item["github_title"] == "Add a feature"
         assert item["session_subtitle"] == "acme/foo#42"
@@ -1871,6 +2094,8 @@ def test_index_emits_prefixed_hrefs_and_base_url_global(tmp_path: Path, repo: Pa
         assert f'href="/pr/{s.id}"' in text
         # Client-side JS can read the same prefix.
         assert 'window.PR_BASE_URL = "/pr"' in text
+        assert 'href="/pr/assets/style.css?v=' in text
+        assert 'src="/pr/assets/index.js?v=' in text
         # No bare-root session hrefs.
         assert f'href="/{s.id}"' not in text
 
@@ -1895,6 +2120,8 @@ def test_session_page_emits_prefixed_session_url(session_dir: Path):
         # app.js API calls are rooted at window.PR_SESSION_URL.
         assert f'window.PR_SESSION_URL = "/pr/{session_id}"' in text
         assert 'window.PR_BASE_URL = "/pr"' in text
+        assert 'href="/pr/assets/style.css?v=' in text
+        assert 'src="/pr/assets/app.js?v=' in text
     finally:
         srv.shutdown()
 
@@ -2052,6 +2279,25 @@ def test_client_gh_push_modal_includes_selection_controls():
     assert "fitEditTextarea(ta, targetHeight)" in block
     assert 'api("POST", "/api/edit", { comment_id: cid, body: newBody })' in block
     assert 'api("POST", "/api/delete", { comment_id: cid })' in block
+
+
+def test_client_polling_is_single_flight_and_visibility_aware():
+    text = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
+
+    assert "function startPoll(task, delayForState)" in text
+    assert "async function pollJson(path)" in text
+    assert 'headers["If-None-Match"] = etag' in text
+    assert "response.status === 304" in text
+    assert "if (document.hidden)" in text
+    assert 'document.addEventListener("visibilitychange"' in text
+    assert "if (!inFlight)" in text
+    assert "startPoll(refreshComments" in text
+    assert "startPoll(refreshReports" in text
+    assert "startPoll(refreshSidebar" in text
+    assert "setInterval(refreshComments" not in text
+    assert "setInterval(refreshReports" not in text
+    assert "setInterval(refreshSidebar" not in text
+    assert "knownCommentIds.has(c.id)" in text
 
 
 def test_server_edit_endpoint_updates_body_and_history(session_dir: Path):

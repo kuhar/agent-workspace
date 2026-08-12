@@ -1,6 +1,7 @@
 """Render a peanut-review session as a single HTML page."""
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -15,10 +16,18 @@ from pygments.util import ClassNotFound
 
 from ..models import Comment, Note, Session
 from ..session import GLOBAL_FILE
-from .diff import DiffLine, FileDiff
+from .diff import DiffGap, DiffLine, FileDiff, materialized_view
 from .progress import summarize_agent_progress
 
 ASSETS_DIR = Path(__file__).parent / "assets"
+
+
+def asset_version(name: str) -> str:
+    return hashlib.sha256((ASSETS_DIR / name).read_bytes()).hexdigest()[:12]
+
+
+def _asset_url(base_url: str, name: str) -> str:
+    return f"{base_url}/assets/{name}?v={asset_version(name)}"
 
 # Visual labels for the keyboard chord prefixes shown in the sidebar
 # shortcuts. Must match the corresponding constants in `assets/app.js`
@@ -59,8 +68,8 @@ MAX_HIGHLIGHT_FILE_LINES = 2_000
 MAX_HIGHLIGHT_CHANGED_LINES = 1_500
 MAX_HIGHLIGHT_RENDERED_LINES = 1_200
 MAX_HIGHLIGHT_RENDERED_BYTES = 200_000
-MAX_EMBEDDED_FOLD_LINES = 300
-MAX_EMBEDDED_FOLD_BYTES = 120_000
+MAX_INITIAL_PAGE_LINES = 6_000
+MAX_INITIAL_PAGE_HIGHLIGHT_LINES = 800
 
 
 def _relative_time_label(timestamp: str, *, now: datetime | None = None) -> str:
@@ -453,6 +462,7 @@ def _thread_anchor_lines(
 def _visible_line_ranges(
     fd: FileDiff,
     threads_at_line: dict[tuple[str, int], list[list[Comment]]],
+    lines: list[DiffLine] | None = None,
 ) -> list[tuple[int, int]]:
     """Return half-open line-index ranges worth rendering for this file.
 
@@ -460,16 +470,17 @@ def _visible_line_ranges(
     context windows so old review threads remain visible even when they are on
     unchanged lines outside the current diff hunks.
     """
-    line_count = len(fd.lines)
+    source_lines = fd.lines if lines is None else lines
+    line_count = len(source_lines)
     if line_count == 0:
         return []
 
-    changed_anchor_indices = _changed_anchor_indices(fd.lines)
+    changed_anchor_indices = _changed_anchor_indices(source_lines)
     anchor_indices = set(changed_anchor_indices)
     comment_anchor_indices: set[int] = set()
     comment_lines = _thread_anchor_lines(fd.path, threads_at_line)
     if comment_lines:
-        for idx, dl in enumerate(fd.lines):
+        for idx, dl in enumerate(source_lines):
             if dl.new_lineno in comment_lines:
                 comment_anchor_indices.add(idx)
                 anchor_indices.add(idx)
@@ -487,7 +498,7 @@ def _visible_line_ranges(
 
 def _is_large_file_diff(fd: FileDiff) -> bool:
     return (
-        len(fd.lines) > LARGE_FILE_LINE_THRESHOLD
+        max(len(fd.lines), fd.total_lines) > LARGE_FILE_LINE_THRESHOLD
         or fd.additions + fd.deletions > LARGE_FILE_CHANGED_THRESHOLD
     )
 
@@ -621,26 +632,6 @@ def _line_span_label(lines: list[int | None]) -> str:
     return f"{nums[0]}-{nums[-1]}"
 
 
-def _fold_payload_json(lines: list[DiffLine]) -> str:
-    payload = [
-        {
-            "kind": dl.kind,
-            "old_lineno": dl.old_lineno,
-            "new_lineno": dl.new_lineno,
-            "content": dl.content,
-        }
-        for dl in lines
-    ]
-    return json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
-
-
-def _should_embed_fold_payload(lines: list[DiffLine]) -> bool:
-    return (
-        len(lines) <= MAX_EMBEDDED_FOLD_LINES
-        and sum(len(dl.content) for dl in lines) <= MAX_EMBEDDED_FOLD_BYTES
-    )
-
-
 def _line_bounds(lines: list[int | None]) -> tuple[int | None, int | None]:
     nums = [n for n in lines if n is not None]
     if not nums:
@@ -681,12 +672,13 @@ def _render_fold_gap(
     fold_id_html = html.escape(fold_id, quote=True)
     file_html = html.escape(file_path, quote=True)
     label_html = html.escape(label)
-    end_index = start_index + count
+    logical_start = lines[0].full_index if lines else start_index
+    logical_end = lines[-1].full_index + 1 if lines else logical_start
     data_attrs = [
         f'data-folded-lines="{count}"',
         f'data-fold-file="{file_html}"',
-        f'data-fold-start-index="{start_index}"',
-        f'data-fold-end-index="{end_index}"',
+        f'data-fold-start-index="{logical_start}"',
+        f'data-fold-end-index="{logical_end}"',
     ]
     if old_start is not None and old_end is not None:
         data_attrs.append(f'data-fold-old-start="{old_start}"')
@@ -694,13 +686,6 @@ def _render_fold_gap(
     if new_start is not None and new_end is not None:
         data_attrs.append(f'data-fold-new-start="{new_start}"')
         data_attrs.append(f'data-fold-new-end="{new_end}"')
-    payload_html = ""
-    if _should_embed_fold_payload(lines):
-        payload = _fold_payload_json(lines)
-        payload_html = (
-            f'<script type="application/json" id="fold-data-{fold_id_html}" '
-            f'class="fold-payload">{payload}</script>'
-        )
     return (
         f'<div class="line fold-gap" {" ".join(data_attrs)} title="{title}">'
         '<span class="ln old fold-marker">...</span>'
@@ -711,7 +696,34 @@ def _render_fold_gap(
         f'<span class="fold-count">{label_html}</span>'
         '</span>'
         '</div>'
-        f'{payload_html}'
+    )
+
+
+def _render_virtual_gap(gap: DiffGap, fold_id: str, *, file_path: str) -> str:
+    count = gap.count
+    label = f"{count} unchanged line{'s' if count != 1 else ''} hidden"
+    old_end = gap.old_start + count - 1
+    new_end = gap.new_start + count - 1
+    title = html.escape(
+        f"{label} | old {_line_span_label([gap.old_start, old_end])} "
+        f"| new {_line_span_label([gap.new_start, new_end])}",
+        quote=True,
+    )
+    return (
+        f'<div class="line fold-gap" data-folded-lines="{count}" '
+        f'data-fold-file="{html.escape(file_path, quote=True)}" '
+        f'data-fold-start-index="{gap.start_index}" '
+        f'data-fold-end-index="{gap.end_index}" '
+        f'data-fold-old-start="{gap.old_start}" data-fold-old-end="{old_end}" '
+        f'data-fold-new-start="{gap.new_start}" data-fold-new-end="{new_end}" '
+        f'title="{title}">'
+        '<span class="ln old fold-marker">...</span>'
+        '<span class="ln new fold-marker">...</span>'
+        '<span class="content fold-summary">'
+        f'<button type="button" class="fold-toggle" '
+        f'data-fold-expand="{html.escape(fold_id, quote=True)}">Expand</button>'
+        f'<span class="fold-count">{html.escape(label)}</span>'
+        '</span></div>'
     )
 
 
@@ -724,7 +736,13 @@ def _should_highlight_file(fd: FileDiff, final_contents: list[str]) -> bool:
     )
 
 
-def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[Comment]]]) -> str:
+def _render_file(
+    fd: FileDiff,
+    threads_at_line: dict[tuple[str, int], list[list[Comment]]],
+    *,
+    row_budget: int,
+    highlight_budget: int,
+) -> tuple[str, int, int]:
     anchor = _file_anchor(fd.path)
     path_html = html.escape(fd.path)
     if fd.binary and not fd.lines:
@@ -734,85 +752,141 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
             f'<span class="status">[{html.escape(fd.status)}]</span>'
             f'<span class="path" title="{path_html}">{path_html}</span>'
             f'<span class="stats">(binary)</span>'
-            f'</div></div>'
+            f'</div></div>',
+            0,
+            0,
         )
 
-    ranges = _visible_line_ranges(fd, threads_at_line)
-    visible_indices = [
+    comment_lines = _thread_anchor_lines(fd.path, threads_at_line)
+    view_lines, virtual_gaps = materialized_view(fd, comment_lines)
+    ranges = _visible_line_ranges(fd, threads_at_line, view_lines)
+    visible_indices = {
         idx for start, end in ranges for idx in range(start, end)
-    ]
+    }
+    comment_anchor_indices = {
+        idx for idx, line in enumerate(view_lines)
+        if line.new_lineno in comment_lines
+    }
+    required_ranges = _ranges_for_anchors(
+        comment_anchor_indices,
+        len(view_lines),
+        DIFF_CONTEXT_LINES,
+        expand_edges=False,
+    )
+    required = {
+        idx for start, end in required_ranges for idx in range(start, end)
+    }
+    allowed = set(required)
+    remaining = max(0, row_budget - len(allowed))
+    for idx in sorted(visible_indices - allowed):
+        if remaining <= 0:
+            break
+        allowed.add(idx)
+        remaining -= 1
+    visible_indices = allowed
 
     # Highlight only the rendered final-file view (context + added lines).
-    final_contents = [
-        fd.lines[idx].content
-        for idx in visible_indices
-        if fd.lines[idx].kind != "deleted"
+    highlight_lines = [
+        view_lines[idx]
+        for idx in sorted(visible_indices)
+        if view_lines[idx].kind != "deleted"
     ]
-    hl = (
-        iter(_highlight_file(fd.path, final_contents))
-        if _should_highlight_file(fd, final_contents)
-        else iter([])
+    final_contents = [line.content for line in highlight_lines]
+    should_highlight = (
+        len(final_contents) <= highlight_budget
+        and _should_highlight_file(fd, final_contents)
     )
-    rows = []
-    rendered_until = 0
-    fold_index = 0
-    for start, end in ranges:
-        if start > rendered_until:
-            rows.append(_render_fold_gap(
-                fd.lines[rendered_until:start],
-                f"{anchor}-fold-{fold_index}",
-                file_path=fd.path,
-                start_index=rendered_until,
-            ))
-            fold_index += 1
-        for idx in range(start, end):
-            dl = fd.lines[idx]
-            old_ln = dl.old_lineno if dl.old_lineno is not None else ""
-            new_ln = dl.new_lineno if dl.new_lineno is not None else ""
-            if dl.kind == "deleted":
-                content_html = html.escape(dl.content)  # no highlight for deleted
-            else:
-                content_html = next(hl, html.escape(dl.content))
-
-            line_attr = (
-                f' data-line="{dl.new_lineno}"' if dl.new_lineno is not None
-                else f' data-line="{dl.old_lineno}"'
-            )
-            row_attrs = [f'class="line {dl.kind}"']
-            if dl.old_lineno is not None:
-                row_attrs.append(f'data-old-line="{dl.old_lineno}"')
-            if dl.new_lineno is not None:
-                row_attrs.append(f'data-new-line="{dl.new_lineno}"')
-            row = (
-                f'<div {" ".join(row_attrs)}>'
-                f'<span class="ln old">{old_ln}</span>'
-                f'<span class="ln new"{line_attr}>{new_ln}</span>'
-                f'<span class="content">{content_html}</span>'
-                f'</div>'
-            )
-            rows.append(row)
-
-            # Append the comment-thread row for threads anchored at this
-            # new-file line. Comments are stored with the source-file (new)
-            # line number. Multiple top-level threads can share the same line.
-            key = (fd.path, dl.new_lineno) if dl.new_lineno is not None else None
-            if key and key in threads_at_line:
-                inner = "".join(_render_thread(t) for t in threads_at_line[key])
-                rows.append(
-                    f'<div class="comment-thread" data-file="{html.escape(fd.path)}"'
-                    f' data-line="{dl.new_lineno}">{inner}</div>'
-                )
-        rendered_until = end
-    if rendered_until < len(fd.lines):
-        rows.append(_render_fold_gap(
-            fd.lines[rendered_until:],
-            f"{anchor}-fold-{fold_index}",
-            file_path=fd.path,
-            start_index=rendered_until,
+    highlighted = {}
+    if should_highlight:
+        highlighted = dict(zip(
+            (line.full_index for line in highlight_lines),
+            _highlight_file(fd.path, final_contents),
         ))
 
-    return (
-        f'<div class="file" id="{anchor}" data-file="{path_html}">'
+    rows = []
+    fold_index = 0
+    hidden: list[DiffLine] = []
+
+    def flush_hidden() -> None:
+        nonlocal fold_index
+        if hidden:
+            rows.append(_render_fold_gap(
+                list(hidden),
+                f"{anchor}-fold-{fold_index}",
+                file_path=fd.path,
+                start_index=hidden[0].full_index,
+            ))
+            fold_index += 1
+            hidden.clear()
+
+    events: list[tuple[int, int, int | DiffGap]] = [
+        (line.full_index, 1, idx) for idx, line in enumerate(view_lines)
+    ]
+    events.extend((gap.start_index, 0, gap) for gap in virtual_gaps)
+    events.sort(key=lambda item: (item[0], item[1]))
+
+    for _position, event_kind, payload in events:
+        if event_kind == 0:
+            flush_hidden()
+            gap = payload
+            assert isinstance(gap, DiffGap)
+            rows.append(_render_virtual_gap(
+                gap,
+                f"{anchor}-fold-{fold_index}",
+                file_path=fd.path,
+            ))
+            fold_index += 1
+            continue
+
+        idx = payload
+        assert isinstance(idx, int)
+        dl = view_lines[idx]
+        if idx not in visible_indices:
+            if hidden and dl.full_index != hidden[-1].full_index + 1:
+                flush_hidden()
+            hidden.append(dl)
+            continue
+        flush_hidden()
+        old_ln = dl.old_lineno if dl.old_lineno is not None else ""
+        new_ln = dl.new_lineno if dl.new_lineno is not None else ""
+        if dl.kind == "deleted":
+            content_html = html.escape(dl.content)
+        else:
+            content_html = highlighted.get(dl.full_index, html.escape(dl.content))
+
+        line_attr = (
+            f' data-line="{dl.new_lineno}"' if dl.new_lineno is not None
+            else f' data-line="{dl.old_lineno}"'
+        )
+        row_attrs = [f'class="line {dl.kind}"']
+        if dl.old_lineno is not None:
+            row_attrs.append(f'data-old-line="{dl.old_lineno}"')
+        if dl.new_lineno is not None:
+            row_attrs.append(f'data-new-line="{dl.new_lineno}"')
+        row = (
+            f'<div {" ".join(row_attrs)}>'
+            f'<span class="ln old">{old_ln}</span>'
+            f'<span class="ln new"{line_attr}>{new_ln}</span>'
+            f'<span class="content">{content_html}</span>'
+            f'</div>'
+        )
+        rows.append(row)
+
+        key = (fd.path, dl.new_lineno) if dl.new_lineno is not None else None
+        if key and key in threads_at_line:
+            inner = "".join(_render_thread(t) for t in threads_at_line[key])
+            rows.append(
+                f'<div class="comment-thread" data-file="{html.escape(fd.path)}"'
+                f' data-line="{dl.new_lineno}">{inner}</div>'
+            )
+
+    flush_hidden()
+
+    rendered_count = len(visible_indices)
+    intrinsic_height = max(80, 45 + len(rows) * 18)
+    file_html = (
+        f'<div class="file" id="{anchor}" data-file="{path_html}" '
+        f'style="--file-intrinsic-size:{intrinsic_height}px">'
         f'<div class="file-header">'
         f'<span class="status">[{html.escape(fd.status)}]</span>'
         f'<span class="path" title="{path_html}">{path_html}</span>'
@@ -824,6 +898,7 @@ def _render_file(fd: FileDiff, threads_at_line: dict[tuple[str, int], list[list[
         f'<div class="lines">{"".join(rows)}</div>'
         f'</div>'
     )
+    return file_html, rendered_count, len(final_contents) if should_highlight else 0
 
 
 def _render_sidebar(
@@ -1172,36 +1247,41 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     )
 
 
-def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") -> str:
+def render_index(
+    sessions: list[dict],
+    *,
+    roots: list[str],
+    base_url: str = "",
+    total_sessions: int | None = None,
+    has_more: bool = False,
+) -> str:
     """Session-picker page served at `/`.
 
     `base_url` is the path prefix the app is mounted under (e.g. `/pr` when
     fronted by `handle_path /pr/*` in caddy). Empty means root-mounted.
     """
-    assets = ASSETS_DIR
-    css = (assets / "style.css").read_text()
-    js = (assets / "index.js").read_text()
     roots_str = " · ".join(html.escape(r) for r in roots) or "(none)"
     base_url_js = json.dumps(base_url)
-    if sessions:
-        rows = "\n".join(_render_session_row(s, base_url) for s in sessions)
-        body = (
-            '<table class="sessions">'
-            '<thead><tr>'
-            '<th>Session</th><th>Progress</th><th>Change</th>'
-            '<th>Workspace</th><th>Comments</th><th>Updated</th>'
-            '</tr></thead>'
-            f'<tbody id="session-rows">{rows}</tbody>'
-            '</table>'
-        )
-    else:
-        body = (
-            '<div class="empty">'
-            f'No review sessions found under <span class="mono">{roots_str}</span>.'
-            '<br><br>Create one with:'
-            '<pre class="mono">peanut-review init --workspace . --base main --topic HEAD</pre>'
-            '</div>'
-        )
+    style_url = html.escape(_asset_url(base_url, "style.css"), quote=True)
+    script_url = html.escape(_asset_url(base_url, "index.js"), quote=True)
+    total = len(sessions) if total_sessions is None else total_sessions
+    rows = "\n".join(_render_session_row(s, base_url) for s in sessions)
+    body = (
+        f'<table class="sessions"{"" if sessions else " hidden"}>'
+        '<thead><tr>'
+        '<th>Session</th><th>Progress</th><th>Change</th>'
+        '<th>Workspace</th><th>Comments</th><th>Updated</th>'
+        '</tr></thead>'
+        f'<tbody id="session-rows">{rows}</tbody>'
+        '</table>'
+        f'<div id="session-empty" class="empty"{" hidden" if sessions else ""}>'
+        f'No review sessions found under <span class="mono">{roots_str}</span>.'
+        '<br><br>Create one with:'
+        '<pre class="mono">peanut-review init --workspace . --base main --topic HEAD</pre>'
+        '</div>'
+        f'<button id="load-more" type="button"'
+        f'{"" if has_more else " hidden"}>Load older sessions</button>'
+    )
 
     index_href = base_url if base_url else "/"
     return f"""<!doctype html>
@@ -1210,15 +1290,18 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
   <meta charset="utf-8">
   <title>peanut-review — sessions</title>
   <link rel="icon" href="{FAVICON_HREF}">
+  <link rel="stylesheet" href="{style_url}">
   {THEME_BOOTSTRAP}
-  <style>{css}</style>
 </head>
 <body class="index">
   <header>
     <h1><a href="{index_href}">🥜 peanut-review</a></h1>
-    <span class="meta">{len(sessions)} session{"s" if len(sessions) != 1 else ""}</span>
+    <span id="session-count" class="meta">{total} session{"s" if total != 1 else ""}</span>
     <span class="meta mono">{roots_str}</span>
     <span class="spacer"></span>
+    <input id="session-search" type="search" placeholder="Press / to search"
+           aria-label="Filter session names" aria-keyshortcuts="/ Escape"
+           title="Press / to search; Escape to leave">
     {THEME_TOGGLE_BUTTON}
     <button id="refresh" title="Rescan">Refresh</button>
   </header>
@@ -1227,8 +1310,8 @@ def render_index(sessions: list[dict], *, roots: list[str], base_url: str = "") 
   </main>
   <script>
     window.PR_BASE_URL = {base_url_js};
-    {js}
   </script>
+  <script src="{script_url}"></script>
 </body>
 </html>
 """
@@ -1244,6 +1327,7 @@ def render_page(
     head_shifted: bool = False,
     base_url: str = "",
     agent_runtime: dict[str, dict[str, str]] | None = None,
+    poll_etags: dict[str, str] | None = None,
 ) -> str:
     """Build the full HTML page for a session.
 
@@ -1253,7 +1337,20 @@ def render_page(
     """
     threads_at = _group_threads_by_anchor(comments)
     note_items = notes or []
-    file_html = "".join(_render_file(fd, threads_at) for fd in files)
+    file_parts: list[str] = []
+    remaining_rows = MAX_INITIAL_PAGE_LINES
+    remaining_highlight = MAX_INITIAL_PAGE_HIGHLIGHT_LINES
+    for fd in files:
+        rendered, used_rows, used_highlight = _render_file(
+            fd,
+            threads_at,
+            row_budget=remaining_rows,
+            highlight_budget=remaining_highlight,
+        )
+        file_parts.append(rendered)
+        remaining_rows = max(0, remaining_rows - used_rows)
+        remaining_highlight = max(0, remaining_highlight - used_highlight)
+    file_html = "".join(file_parts)
     global_html = _render_global_section(comments)
     report_html = render_report_section(note_items)
     sidebar = _render_sidebar(
@@ -1313,9 +1410,16 @@ def render_page(
     session_url_js = json.dumps(session_url)
     session_id_js = json.dumps(session_id)
     base_url_js = json.dumps(base_url)
+    known_comment_ids_js = json.dumps(
+        [comment.id for comment in comments if not comment.deleted],
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    poll_etags_js = json.dumps(
+        poll_etags or {}, separators=(",", ":"),
+    ).replace("</", "<\\/")
 
-    css = (ASSETS_DIR / "style.css").read_text()
-    js = (ASSETS_DIR / "app.js").read_text()
+    style_url = html.escape(_asset_url(base_url, "style.css"), quote=True)
+    script_url = html.escape(_asset_url(base_url, "app.js"), quote=True)
 
     index_href = base_url if base_url else "/"
     return f"""<!doctype html>
@@ -1324,8 +1428,8 @@ def render_page(
   <meta charset="utf-8">
   <title>peanut-review — {html.escape(title_label)}</title>
   <link rel="icon" href="{FAVICON_HREF}">
+  <link rel="stylesheet" href="{style_url}">
   {THEME_BOOTSTRAP}
-  <style>{css}</style>
 </head>
 <body>
   <header>
@@ -1373,8 +1477,10 @@ def render_page(
     window.PR_BASE_URL = {base_url_js};
     window.PR_SESSION_URL = {session_url_js};
     window.PR_SESSION_ID = {session_id_js};
-    {js}
+    window.PR_KNOWN_COMMENT_IDS = {known_comment_ids_js};
+    window.PR_POLL_ETAGS = {poll_etags_js};
   </script>
+  <script src="{script_url}"></script>
 </body>
 </html>
 """

@@ -6,11 +6,14 @@ review roots. Routes are session-indexed: each session is reachable at
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -32,10 +35,39 @@ from ..session import (
 from . import diff as diffmod
 from .progress import summarize_agent_progress
 from .push_activity import summarize_push_activity
-from .render import render_index, render_page
+from .render import ASSETS_DIR, asset_version, render_index, render_page
 
 
 DEFAULT_ROOT = Path("/tmp/peanut-review")
+
+
+def _paths_revision(paths: Iterable[Path], *, extra: str = "") -> str:
+    digest = hashlib.blake2s(digest_size=12)
+    for path in sorted(paths):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        digest.update(str(path).encode(errors="replace"))
+        digest.update(str(stat.st_mtime_ns).encode())
+        digest.update(str(stat.st_size).encode())
+    digest.update(extra.encode(errors="replace"))
+    return f'"{digest.hexdigest()}"'
+
+
+def _subdir_revision(session_dir: Path, subdir: str) -> str:
+    directory = session_dir / subdir
+    paths = list(directory.glob("*.jsonl")) if directory.is_dir() else []
+    return _paths_revision(paths)
+
+
+def _session_revision(session_dir: Path, *, workspace_head: str = "") -> str:
+    paths = [session_dir / "session.json"]
+    for subdir in ("comments", "notes", "signals"):
+        directory = session_dir / subdir
+        if directory.is_dir():
+            paths.extend(path for path in directory.iterdir() if path.is_file())
+    return _paths_revision(paths, extra=workspace_head)
 
 
 def _session_updated_at(session_dir: Path) -> tuple[int, str]:
@@ -61,8 +93,12 @@ class SessionRegistry:
     def __init__(self, roots: Iterable[str | Path] = ()) -> None:
         self._roots: list[Path] = [Path(r) for r in roots]
         self._by_id: dict[str, Path] = {}
+        self._search_index: dict[str, str] = {}
+        self._summary_cache: dict[str, tuple[tuple, dict]] = {}
+        self._last_scan = 0.0
+        self._lock = threading.RLock()
         if self._roots:
-            self.rescan()
+            self.rescan(force=True)
 
     @property
     def roots(self) -> list[Path]:
@@ -73,10 +109,27 @@ class SessionRegistry:
         sdir = Path(session_dir)
         s = load_session(sdir)
         self._by_id[s.id] = sdir
+        self._search_index[s.id] = self._search_text(s)
         return s.id
 
-    def rescan(self) -> None:
+    @staticmethod
+    def _search_text(session: Session) -> str:
+        fields = [session.id]
+        if session.github:
+            fields.extend([
+                str(session.github.number) if session.github.number else "",
+                f"#{session.github.number}" if session.github.number else "",
+                session.github.repo,
+                session.github.title,
+                session.github.url,
+            ])
+        return "\n".join(field.lower() for field in fields if field)
+
+    def rescan(self, *, force: bool = False) -> None:
         """Re-discover sessions under each root, preserving explicitly-bound orphans."""
+        now = time.monotonic()
+        if not force and now - self._last_scan < 2.0:
+            return
         root_resolved = [r.resolve() for r in self._roots if r.is_dir()]
 
         def _is_under_root(sd: Path) -> bool:
@@ -96,6 +149,9 @@ class SessionRegistry:
         new_by_id: dict[str, Path] = {
             sid: sd for sid, sd in self._by_id.items() if not _is_under_root(sd)
         }
+        new_search_index = {
+            sid: self._search_index.get(sid, sid.lower()) for sid in new_by_id
+        }
         for root in self._roots:
             if not root.is_dir():
                 continue
@@ -109,79 +165,156 @@ class SessionRegistry:
                 except (OSError, ValueError, json.JSONDecodeError):
                     continue
                 new_by_id[s.id] = sub
-        self._by_id = new_by_id
+                new_search_index[s.id] = self._search_text(s)
+        with self._lock:
+            self._by_id = new_by_id
+            self._search_index = new_search_index
+            self._summary_cache = {
+                sid: cached for sid, cached in self._summary_cache.items()
+                if sid in new_by_id
+            }
+            self._last_scan = now
 
     def get(self, session_id: str) -> Path | None:
         if session_id in self._by_id:
             return self._by_id[session_id]
         if self._roots:
-            self.rescan()
+            self.rescan(force=True)
         return self._by_id.get(session_id)
 
     def only(self) -> str | None:
         return next(iter(self._by_id)) if len(self._by_id) == 1 else None
 
-    def list_sessions(self) -> list[dict]:
-        """Summaries for every known session, most recently updated first."""
+    @staticmethod
+    def _summary_revision(session_dir: Path) -> tuple:
+        paths = [session_dir / "session.json"]
+        for subdir in ("comments", "notes", "signals"):
+            directory = session_dir / subdir
+            if directory.is_dir():
+                paths.extend(path for path in directory.iterdir() if path.is_file())
+        revision = []
+        for path in sorted(paths):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            revision.append((str(path), stat.st_mtime_ns, stat.st_size))
+        return tuple(revision)
+
+    def _summary(self, sid: str, sdir: Path) -> dict | None:
+        try:
+            revision = self._summary_revision(sdir)
+        except OSError:
+            return None
+        cached = self._summary_cache.get(sid)
+        if cached and cached[0] == revision:
+            return dict(cached[1])
+        try:
+            s = load_session(sdir)
+            comments = store.read_all_comments(sdir)
+            notes = store.read_all_notes(sdir)
+            updated_ns, updated_at = _session_updated_at(sdir)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        live = [c for c in comments if not c.deleted]
+        github_title = (
+            s.github.title.strip()
+            if s.github and s.github.title else ""
+        )
+        change_label = github_title or f"{s.base_ref} … {s.topic_ref}"
+        session_subtitle = (
+            f"{s.github.repo}#{s.github.number}"
+            if s.github and s.github.repo and s.github.number
+            else (s.current_head or "")[:12]
+        )
+        github_url = (
+            s.github.url.strip()
+            if s.github and s.github.url else ""
+        )
+        agents = _agent_payload(sdir, s)
+        summary = {
+            "id": sid,
+            "base_ref": s.base_ref,
+            "topic_ref": s.topic_ref,
+            "change_label": change_label,
+            "github_title": github_title,
+            "created_at": s.created_at,
+            "updated_at": updated_at,
+            "_updated_ns": updated_ns,
+            "workspace": s.workspace,
+            "session_subtitle": session_subtitle,
+            "github_url": github_url,
+            "comment_count": len(live),
+            "unresolved_count": sum(1 for c in live if not c.resolved),
+            "stale_count": sum(1 for c in live if c.stale),
+            "critical_count": sum(1 for c in live if c.severity == "critical"),
+            "deleted_count": len(comments) - len(live),
+            "note_count": len(notes),
+            "progress": summarize_agent_progress(agents),
+            "push_activity": summarize_push_activity(s, comments),
+        }
+        self._summary_cache[sid] = (revision, dict(summary))
+        return summary
+
+    def list_sessions(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        query: str = "",
+    ) -> list[dict]:
+        """Return newest-first summaries, materializing only the requested page."""
         if self._roots:
             self.rescan()
-        summaries: list[dict] = []
-        for sid, sdir in self._by_id.items():
-            try:
-                s = load_session(sdir)
-                comments = store.read_all_comments(sdir)
-                notes = store.read_all_notes(sdir)
-                updated_ns, updated_at = _session_updated_at(sdir)
-            except (OSError, ValueError, json.JSONDecodeError):
+        query_lower = query.strip().lower()
+        candidates: list[tuple[int, str, Path]] = []
+        with self._lock:
+            items = list(self._by_id.items())
+        for sid, sdir in items:
+            if query_lower and query_lower not in self._search_index.get(
+                sid, sid.lower(),
+            ):
                 continue
-            live = [c for c in comments if not c.deleted]
-            github_title = (
-                s.github.title.strip()
-                if s.github and s.github.title else ""
-            )
-            change_label = github_title or f"{s.base_ref} … {s.topic_ref}"
-            session_subtitle = (
-                f"{s.github.repo}#{s.github.number}"
-                if s.github and s.github.repo and s.github.number
-                else (s.current_head or "")[:12]
-            )
-            github_url = (
-                s.github.url.strip()
-                if s.github and s.github.url else ""
-            )
-            agents = _agent_payload(sdir, s)
-            summaries.append({
-                "id": sid,
-                "session_dir": str(sdir),
-                "base_ref": s.base_ref,
-                "topic_ref": s.topic_ref,
-                "change_label": change_label,
-                "github_title": github_title,
-                "created_at": s.created_at,
-                "updated_at": updated_at,
-                "_updated_ns": updated_ns,
-                "workspace": s.workspace,
-                "repo_relative": s.repo_relative,
-                "repo_path": repo_path(s),
-                "session_subtitle": session_subtitle,
-                "github_url": github_url,
-                "current_head": (s.current_head or "")[:12],
-                "comment_count": len(live),
-                "unresolved_count": sum(1 for c in live if not c.resolved),
-                "stale_count": sum(1 for c in live if c.stale),
-                "critical_count": sum(1 for c in live if c.severity == "critical"),
-                "deleted_count": len(comments) - len(live),
-                "note_count": len(notes),
-                "progress": summarize_agent_progress(agents),
-                "push_activity": summarize_push_activity(s, comments),
-            })
-        summaries.sort(
-            key=lambda d: (d["_updated_ns"], d["created_at"], d["id"]),
-            reverse=True,
-        )
+            try:
+                updated_ns, _updated_at = _session_updated_at(sdir)
+            except (OSError, ValueError):
+                continue
+            candidates.append((updated_ns, sid, sdir))
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        start = max(0, offset)
+        selected = candidates[start:] if limit is None else candidates[start:start + limit]
+        summaries = []
+        for _updated_ns, sid, sdir in selected:
+            summary = self._summary(sid, sdir)
+            if summary is not None:
+                summaries.append(summary)
+        summaries.sort(key=lambda item: (item["_updated_ns"], item["id"]), reverse=True)
         for summary in summaries:
             del summary["_updated_ns"]
         return summaries
+
+    def page_sessions(
+        self, *, limit: int = 50, offset: int = 0, query: str = "",
+    ) -> dict:
+        if self._roots:
+            self.rescan()
+        query_lower = query.strip().lower()
+        with self._lock:
+            ids = [
+                sid for sid in self._by_id
+                if not query_lower
+                or query_lower in self._search_index.get(sid, sid.lower())
+            ]
+        total = len(ids)
+        sessions = self.list_sessions(limit=limit, offset=offset, query=query)
+        return {
+            "sessions": sessions,
+            "total": total,
+            "offset": max(0, offset),
+            "limit": limit,
+            "has_more": max(0, offset) + len(sessions) < total,
+            "query": query,
+        }
 
 
 ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
@@ -191,6 +324,8 @@ RESERVED_ROOTS = {"api"}
 VALID_SEVERITIES = {s.value for s in Severity}
 VALID_CATEGORIES = {c.value for c in CommentCategory}
 MAX_DIFF_FOLD_FETCH_LINES = 200
+DEFAULT_SESSION_PAGE_SIZE = 50
+MAX_SESSION_PAGE_SIZE = 200
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -203,29 +338,66 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -------- helpers --------
 
-    def _json(self, code: int, data) -> None:
-        body = json.dumps(data).encode("utf-8")
+    def _body(
+        self,
+        code: int,
+        body: bytes,
+        *,
+        content_type: str,
+        etag: str = "",
+        cache_control: str = "",
+    ) -> None:
+        encoded = body
+        use_gzip = (
+            len(body) >= 1024
+            and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        )
+        if use_gzip:
+            encoded = gzip.compress(body, compresslevel=5, mtime=0)
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        if etag:
+            self.send_header("ETag", etag)
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
+        elif etag:
+            self.send_header("Cache-Control", "no-cache")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(encoded)
+
+    def _json(self, code: int, data, *, etag: str = "") -> None:
+        self._body(
+            code,
+            json.dumps(data).encode("utf-8"),
+            content_type="application/json",
+            etag=etag,
+        )
+
+    def _not_modified(self, etag: str) -> bool:
+        if self.headers.get("If-None-Match", "") != etag:
+            return False
+        self.send_response(304)
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
 
     def _html(self, code: int, text: str) -> None:
-        body = text.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._body(
+            code, text.encode("utf-8"),
+            content_type="text/html; charset=utf-8",
+        )
 
     def _text(self, code: int, text: str) -> None:
-        body = text.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._body(
+            code, text.encode("utf-8"),
+            content_type="text/plain; charset=utf-8",
+        )
 
     def _error(self, code: int, msg: str) -> None:
         self._json(code, {"error": msg})
@@ -242,6 +414,36 @@ class _Handler(BaseHTTPRequestHandler):
     def _resolve_session(self, session_id: str) -> Path | None:
         return self.registry.get(session_id)
 
+    def _serve_asset(self, name: str, query: str) -> None:
+        content_types = {
+            "style.css": "text/css; charset=utf-8",
+            "app.js": "text/javascript; charset=utf-8",
+            "index.js": "text/javascript; charset=utf-8",
+        }
+        if name not in content_types:
+            return self._error(404, f"unknown asset: {name}")
+        version = asset_version(name)
+        etag = f'"{version}"'
+        if self.headers.get("If-None-Match", "") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        requested_version = parse_qs(query).get("v", [""])[0]
+        cache_control = (
+            "public, max-age=31536000, immutable"
+            if requested_version == version else "no-cache"
+        )
+        self._body(
+            200,
+            (ASSETS_DIR / name).read_bytes(),
+            content_type=content_types[name],
+            etag=etag,
+            cache_control=cache_control,
+        )
+
     def log_message(self, fmt, *args):  # noqa: A003
         import sys
         sys.stderr.write("[pr-web] " + fmt % args + "\n")
@@ -250,15 +452,39 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
+        if url.path.startswith("/assets/"):
+            self._serve_asset(url.path.removeprefix("/assets/"), url.query)
+            return
         if url.path in ("", "/"):
-            sessions = self.registry.list_sessions()
+            page = self.registry.page_sessions(limit=DEFAULT_SESSION_PAGE_SIZE)
             self._html(200, render_index(
-                sessions, roots=[str(r) for r in self.registry.roots],
+                page["sessions"], roots=[str(r) for r in self.registry.roots],
                 base_url=self.base_url,
+                total_sessions=page["total"],
+                has_more=page["has_more"],
             ))
             return
         if url.path == "/api/sessions":
-            self._json(200, self.registry.list_sessions())
+            q = parse_qs(url.query)
+            try:
+                limit = int(q.get("limit", [str(DEFAULT_SESSION_PAGE_SIZE)])[0])
+                offset = int(q.get("offset", ["0"])[0])
+            except ValueError:
+                return self._error(400, "limit/offset must be integers")
+            limit = max(1, min(MAX_SESSION_PAGE_SIZE, limit))
+            offset = max(0, offset)
+            query = q.get("q", [""])[0]
+            page = self.registry.page_sessions(
+                limit=limit, offset=offset, query=query,
+            )
+            page_digest = hashlib.blake2s(
+                json.dumps(page, sort_keys=True, separators=(",", ":")).encode(),
+                digest_size=12,
+            ).hexdigest()
+            etag = f'"{page_digest}"'
+            if self._not_modified(etag):
+                return
+            self._json(200, page, etag=etag)
             return
 
         m = ROUTE_RE.match(url.path)
@@ -271,13 +497,29 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(404, f"unknown session: {session_id}")
             return
 
-        session = load_session(session_dir)
-        refresh_agent_statuses(session_dir, session)
-        workspace_mismatch, workspace_head = workspace_head_mismatch(session)
-
         if tail in ("/", ""):
+            session = load_session(session_dir)
+            refresh_agent_statuses(session_dir, session)
+            workspace_mismatch, workspace_head = workspace_head_mismatch(session)
+            comments_before = _subdir_revision(session_dir, "comments")
+            notes_before = _subdir_revision(session_dir, "notes")
+            session_before = _session_revision(
+                session_dir, workspace_head=workspace_head or "",
+            )
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
+            comments_after = _subdir_revision(session_dir, "comments")
+            notes_after = _subdir_revision(session_dir, "notes")
+            session_after = _session_revision(
+                session_dir, workspace_head=workspace_head or "",
+            )
+            poll_etags = {}
+            if comments_before == comments_after:
+                poll_etags["/api/comments"] = comments_after
+            if notes_before == notes_after:
+                poll_etags["/api/notes"] = notes_after
+            if session_before == session_after:
+                poll_etags["/api/session"] = session_after
             try:
                 files = diffmod.parse_diff(
                     repo_path(session), session.base_ref, session.topic_ref,
@@ -297,12 +539,18 @@ class _Handler(BaseHTTPRequestHandler):
                 notes=notes, head_shifted=workspace_mismatch,
                 base_url=self.base_url,
                 agent_runtime=agent_runtime,
+                poll_etags=poll_etags,
             )
             self._html(200, html_out)
             return
 
         if tail == "/api/session":
             session = load_session(session_dir)
+            refresh_agent_statuses(session_dir, session)
+            workspace_mismatch, workspace_head = workspace_head_mismatch(session)
+            etag = _session_revision(session_dir, workspace_head=workspace_head or "")
+            if self._not_modified(etag):
+                return
             comments = store.read_all_comments(session_dir)
             notes = store.read_all_notes(session_dir)
             live = [c for c in comments if not c.deleted]
@@ -344,10 +592,13 @@ class _Handler(BaseHTTPRequestHandler):
                     if session.github is not None else None
                 ),
             }
-            self._json(200, payload)
+            self._json(200, payload, etag=etag)
             return
 
         if tail == "/api/comments":
+            etag = _subdir_revision(session_dir, "comments")
+            if self._not_modified(etag):
+                return
             q = parse_qs(url.query)
             comments = store.read_all_comments(session_dir)
             try:
@@ -363,17 +614,20 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             except ValueError as e:
                 return self._error(400, str(e))
-            self._json(200, [_comment_to_dict(c) for c in filtered])
+            self._json(200, [_comment_to_dict(c) for c in filtered], etag=etag)
             return
 
         if tail == "/api/notes":
+            etag = _subdir_revision(session_dir, "notes")
+            if self._not_modified(etag):
+                return
             q = parse_qs(url.query)
             notes = store.filter_notes(
                 store.read_all_notes(session_dir),
                 agent=(q.get("agent", [None])[0]),
                 since=(q.get("since", [None])[0]),
             )
-            self._json(200, [_note_to_dict(n) for n in notes])
+            self._json(200, [_note_to_dict(n) for n in notes], etag=etag)
             return
 
         if tail == "/api/diff/fold":
@@ -719,13 +973,16 @@ class _Handler(BaseHTTPRequestHandler):
         if fd is None:
             return self._error(404, f"diff file not found: {file_path}")
 
-        end = min(end, len(fd.lines))
-        lines = fd.lines[start:end] if start < len(fd.lines) else []
+        end = min(end, fd.total_lines)
+        try:
+            lines = diffmod.slice_diff(fd, start, end)
+        except RuntimeError as e:
+            return self._error(409, f"cannot read pinned review context: {e}")
         self._json(200, {
             "file": fd.path,
             "start": start,
-            "end": start + len(lines),
-            "total": len(fd.lines),
+            "end": end,
+            "total": fd.total_lines,
             "lines": [_diff_line_to_dict(dl) for dl in lines],
         })
 
@@ -1065,7 +1322,7 @@ def serve(
         "roots": [str(r) for r in root_list],
     }) + "\n")
 
-    session_count = len(registry.list_sessions())
+    session_count = registry.page_sessions(limit=1)["total"]
     print(
         f"peanut-review web UI: {url} "
         f"({session_count} session{'s' if session_count != 1 else ''})",

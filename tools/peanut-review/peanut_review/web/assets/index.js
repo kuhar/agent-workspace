@@ -121,24 +121,96 @@
     `;
   }
 
+  const PAGE_SIZE = 50;
+  const pageEtags = new Map();
+  let loaded = document.querySelectorAll("#session-rows .session-row").length;
+  let activeQuery = "";
+  let refreshInFlight = false;
+
+  function applyPage(page, { append = false } = {}) {
+    const sessions = Array.isArray(page) ? page : (page.sessions || []);
+    const total = Array.isArray(page) ? sessions.length : Number(page.total || 0);
+    const tbody = document.getElementById("session-rows");
+    if (!tbody) return;
+    const rendered = sessions.map(rowHtml).join("");
+    if (append) tbody.insertAdjacentHTML("beforeend", rendered);
+    else tbody.innerHTML = rendered;
+    loaded = tbody.querySelectorAll(".session-row").length;
+    const table = tbody.closest("table");
+    const empty = document.getElementById("session-empty");
+    if (table) table.hidden = loaded === 0;
+    if (empty) empty.hidden = loaded !== 0;
+    const meta = document.getElementById("session-count");
+    if (meta) meta.textContent = `${total} session${total !== 1 ? "s" : ""}`;
+    const more = document.getElementById("load-more");
+    if (more) more.hidden = Array.isArray(page) || !page.has_more;
+  }
+
+  async function fetchPage(offset) {
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+    });
+    if (activeQuery) params.set("q", activeQuery);
+    const url = BASE + "/api/sessions?" + params.toString();
+    const headers = {};
+    const etag = pageEtags.get(url);
+    if (etag) headers["If-None-Match"] = etag;
+    const r = await fetch(url, {
+      headers,
+      cache: "no-store",
+    });
+    if (r.status === 304) return null;
+    if (!r.ok) return null;
+    const nextEtag = r.headers.get("ETag");
+    if (nextEtag) pageEtags.set(url, nextEtag);
+    return r.json();
+  }
+
   async function refresh() {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
     try {
-      const r = await fetch(BASE + "/api/sessions");
-      if (!r.ok) return;
-      const sessions = await r.json();
-      const tbody = document.getElementById("session-rows");
-      if (!tbody) {
-        // Empty-state → full reload so server renders the index view again.
-        location.reload();
-        return;
-      }
-      if (!sessions.length) { location.reload(); return; }
-      tbody.innerHTML = sessions.map(rowHtml).join("");
-      const meta = document.querySelector("header .meta:not(.mono)");
-      if (meta) meta.textContent = `${sessions.length} session${sessions.length !== 1 ? "s" : ""}`;
+      const page = await fetchPage(0);
+      if (page) applyPage(page);
     } catch { /* ignore */ }
+    finally { refreshInFlight = false; }
   }
 
   document.getElementById("refresh")?.addEventListener("click", refresh);
+  document.getElementById("load-more")?.addEventListener("click", async () => {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    try {
+      const page = await fetchPage(loaded);
+      if (page) applyPage(page, { append: true });
+    } catch { /* ignore */ }
+    finally { refreshInFlight = false; }
+  });
+  let searchTimer = null;
+  const sessionSearch = document.getElementById("session-search");
+  sessionSearch?.addEventListener("input", (event) => {
+    activeQuery = String(event.target.value || "").trim();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(refresh, 180);
+  });
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (event.key === "Escape" && target === sessionSearch) {
+      event.preventDefault();
+      sessionSearch.blur();
+      return;
+    }
+    const tagName = target?.tagName;
+    const isEditing = target?.isContentEditable
+      || tagName === "INPUT"
+      || tagName === "TEXTAREA"
+      || tagName === "SELECT";
+    if (event.key !== "/" || event.defaultPrevented || event.ctrlKey
+        || event.metaKey || event.altKey || isEditing || !sessionSearch) return;
+    event.preventDefault();
+    sessionSearch.focus();
+    sessionSearch.select();
+  });
   setInterval(refresh, 15000);
 })();

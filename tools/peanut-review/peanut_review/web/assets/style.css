@@ -404,6 +404,11 @@ main {
   border-radius: 6px;
   margin-bottom: 20px;
   overflow: visible;
+  /* Keep offscreen files out of initial style/layout/paint work. The renderer
+   * supplies a row-based estimate; `auto` lets the browser remember the real
+   * size after a file has been visited. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--file-intrinsic-size, 800px);
 }
 .file-header {
   position: sticky;

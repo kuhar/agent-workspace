@@ -12,6 +12,14 @@
     { value: "light", label: "light" },
   ];
   const COPY_SESSION_ICON = "▣";
+  let reviewTerminal = document.querySelector("header .review-progress")
+    ?.dataset.progressStatus === "done";
+  let knownCommentIds = new Set(window.PR_KNOWN_COMMENT_IDS || []);
+  if (!knownCommentIds.size) {
+    document.querySelectorAll(".comment[data-cid]").forEach((el) => {
+      if (el.dataset.cid) knownCommentIds.add(el.dataset.cid);
+    });
+  }
 
   // --- Utilities ---
   function esc(s) {
@@ -32,6 +40,32 @@
       if (cls.startsWith("progress-")) badge.classList.remove(cls);
     }
     badge.classList.add(`progress-${status}`);
+    reviewTerminal = status === "done";
+  }
+
+  function startPoll(task, delayForState) {
+    let timer = null;
+    let inFlight = false;
+    const schedule = (delay) => {
+      clearTimeout(timer);
+      timer = setTimeout(tick, delay);
+    };
+    const tick = async () => {
+      if (document.hidden) {
+        schedule(30000);
+        return;
+      }
+      if (!inFlight) {
+        inFlight = true;
+        try { await task(); }
+        finally { inFlight = false; }
+      }
+      schedule(delayForState());
+    };
+    document.addEventListener("visibilitychange", () => {
+      schedule(document.hidden ? 30000 : 0);
+    });
+    schedule(delayForState());
   }
   function themeConfig(value) {
     return THEMES.find((t) => t.value === value) || THEMES[0];
@@ -126,11 +160,29 @@
 
   function api(method, path, body) {
     const opts = { method, headers: { "Content-Type": "application/json" } };
+    if (method === "GET") opts.cache = "no-cache";
     if (body !== undefined) opts.body = JSON.stringify(body);
     return fetch(sessionUrl + path, opts).then((r) => {
       if (!r.ok) return r.text().then((t) => { throw new Error(t); });
       return r.json();
     });
+  }
+
+  const pollEtags = new Map(Object.entries(window.PR_POLL_ETAGS || {}));
+  async function pollJson(path) {
+    const headers = {};
+    const etag = pollEtags.get(path);
+    if (etag) headers["If-None-Match"] = etag;
+    const response = await fetch(sessionUrl + path, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+    });
+    if (response.status === 304) return { changed: false, data: null };
+    if (!response.ok) throw new Error(await response.text());
+    const nextEtag = response.headers.get("ETag");
+    if (nextEtag) pollEtags.set(path, nextEtag);
+    return { changed: true, data: await response.json() };
   }
 
   function cssPxVar(name, fallback = 0) {
@@ -1374,9 +1426,9 @@
   async function refreshComments() {
     let fetched;
     try {
-      const r = await fetch(sessionUrl + "/api/comments");
-      if (!r.ok) return;
-      fetched = await r.json();
+      const result = await pollJson("/api/comments");
+      if (!result.changed) return;
+      fetched = result.data;
     } catch { return; }
 
     updateFileCounts(fetched);
@@ -1390,7 +1442,7 @@
 
     // Nothing to change? Skip the scroll dance entirely.
     let anyNew = false;
-    for (const c of fetched) if (!domIds.has(c.id)) { anyNew = true; break; }
+    for (const c of fetched) if (!knownCommentIds.has(c.id)) { anyNew = true; break; }
     let anyGone = false;
     for (const el of domNodes) if (!fetchedById.has(el.dataset.cid)) { anyGone = true; break; }
     let anyStateChange = false;
@@ -1407,7 +1459,10 @@
         anyStateChange = true; break;
       }
     }
-    if (!anyNew && !anyGone && !anyStateChange) return;
+    if (!anyNew && !anyGone && !anyStateChange) {
+      knownCommentIds = new Set(fetchedById.keys());
+      return;
+    }
 
     withStableScroll(() => {
       // Removals first — a comment disappearing shifts content upward.
@@ -1438,12 +1493,13 @@
       }
       // Inserts last so new IDs don't collide with nodes we're about to drop.
       for (const c of fetched) {
-        if (domIds.has(c.id)) continue;
+        if (knownCommentIds.has(c.id)) continue;
         insertFetchedComment(c);
       }
     });
+    knownCommentIds = new Set(fetchedById.keys());
   }
-  setInterval(refreshComments, 3000);
+  startPoll(refreshComments, () => reviewTerminal ? 10000 : 3000);
 
   // --- Agent reports ---
   // Read-only notes for non-review output such as test execution and comment
@@ -1485,9 +1541,9 @@
     if (!list) return;
     let fetched;
     try {
-      const response = await fetch(sessionUrl + "/api/notes");
-      if (!response.ok) return;
-      fetched = await response.json();
+      const result = await pollJson("/api/notes");
+      if (!result.changed) return;
+      fetched = result.data;
     } catch { return; }
     fetched.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
     updateReportCounts(fetched);
@@ -1527,7 +1583,7 @@
       }
     });
   }
-  setInterval(refreshReports, 3000);
+  startPoll(refreshReports, () => reviewTerminal ? 10000 : 3000);
 
   function agentStateField(label, value, title, extraClass = "") {
     if (!value) return "";
@@ -1707,7 +1763,9 @@
   // --- Periodic session refresh (for progress/signals) ---
   async function refreshSidebar() {
     try {
-      const s = await api("GET", "/api/session");
+      const result = await pollJson("/api/session");
+      if (!result.changed) return;
+      const s = result.data;
       const set = (id, val) => {
         const el = document.querySelector(`#sidebar [data-k="${id}"] .v`);
         if (el) el.textContent = val;
@@ -1731,7 +1789,7 @@
   }
   // Faster than the original 15s so the push button reflects local edits
   // soon after they happen — `pending_push` is the main reason to poll.
-  setInterval(refreshSidebar, 5000);
+  startPoll(refreshSidebar, () => reviewTerminal ? 15000 : 5000);
 
   function updatePushButton(pending) {
     if (!ghPushBtn) return;

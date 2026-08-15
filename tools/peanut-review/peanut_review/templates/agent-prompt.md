@@ -45,7 +45,7 @@ to print. Always execute commands via the Shell tool.
 Read your persona file and adopt the expertise, review style, priorities,
 and feedback patterns described in it throughout your entire review:
 ```
-cat ${SESSION}/personas/${PERSONA}
+cat ${PERSONA_PATH}
 ```
 
 # Review target

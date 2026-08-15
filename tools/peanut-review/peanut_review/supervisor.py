@@ -122,6 +122,8 @@ def _runner_env_meta(env: dict[str, str]) -> dict[str, str]:
     cursor_home = env.get("PEANUT_CURSOR_HOME")
     if cursor_home:
         meta["cursor_home"] = cursor_home
+    if env.get("PEANUT_REMOTE_RUNNER"):
+        meta["transport"] = "ssh"
     return meta
 
 
@@ -133,6 +135,30 @@ def _final_status(session_dir: str | Path, agent_name: str) -> str:
         if agent.name == agent_name:
             return runtime.derive_agent_status(session_dir, agent)
     return AgentStatus.FAILED.value
+
+
+def _finish_remote_transport(
+    session_dir: str | Path,
+    agent_name: str,
+    env: dict[str, str],
+) -> None:
+    launch_id = env.get("PEANUT_SSH_LAUNCH_ID")
+    if not launch_id:
+        return
+    from . import gateway, ssh_transport
+    try:
+        ssh_transport.stop_remote_launch(
+            session_dir, agent_name, launch_id, grace_seconds=3,
+        )
+    except (OSError, ValueError):
+        # Persist the uncertain state; a later recovery can retry once the
+        # persistent channel is available again.
+        runtime.update_agent_meta(session_dir, agent_name, {
+            "remote_process_state": "unknown",
+            "ssh_cleanup_required": True,
+        })
+    finally:
+        gateway.revoke_capability(session_dir, launch_id)
 
 
 def _postprocess_codex_output(session_dir: str | Path, agent_name: str) -> None:
@@ -181,7 +207,7 @@ def supervise_agent(
     sdir = Path(session_dir)
     child_env = dict(os.environ if env is None else env)
     child_env["PEANUT_SUPERVISOR_PID"] = str(os.getpid())
-    runner = _runner_from_command(command)
+    runner = child_env.get("PEANUT_REMOTE_RUNNER") or _runner_from_command(command)
     runner_meta = _runner_env_meta(child_env)
     now = _now_iso()
     initial_round_done_mtime_ns = _round_done_signal_mtime_ns(sdir, agent_name)
@@ -230,6 +256,7 @@ def supervise_agent(
             },
         )
         update_agent_status(sdir, agent_name, AgentStatus.FAILED.value)
+        _finish_remote_transport(sdir, agent_name, child_env)
         return 127
 
     pgid = _get_pgid(proc.pid)
@@ -335,6 +362,7 @@ def supervise_agent(
     if termination_signal is None:
         termination_signal = _termination_signal_from_return_code(return_code)
 
+    _finish_remote_transport(sdir, agent_name, child_env)
     _postprocess_codex_output(sdir, agent_name)
     process_state = runtime.process_state_from_exit(
         return_code,

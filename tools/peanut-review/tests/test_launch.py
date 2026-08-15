@@ -44,6 +44,7 @@ def _make_session_dir(
     agents: list[AgentConfig],
     workspace: str | None = None,
     repo_relative: str | None = None,
+    ssh_targets: dict | None = None,
 ) -> str:
     from peanut_review.session import create_session
 
@@ -53,6 +54,7 @@ def _make_session_dir(
             workspace=workspace or _default_workspace(),
             repo_relative=repo_relative,
             agents=[a.to_dict() for a in agents],
+            ssh_targets=ssh_targets,
             session_dir=sd,
         )
     return sd
@@ -231,6 +233,81 @@ def test_launch_dry_run_mixed_runners():
     assert len(results) == 2
     assert results[0]["cmd"][0].endswith("cursor-agent-task.sh")
     assert results[1]["cmd"][0].endswith("opencode-agent-task.sh")
+
+
+def test_launch_dry_run_mixed_local_and_ssh_uses_remote_prompt_paths(tmp_path):
+    workspace = _workspace_with_cursor_config(tmp_path)
+    target = {
+        "host": "reviewer@docs-host",
+        "controlPath": "/tmp/peanut docs.sock",
+        "gatewayUrl": "http://127.0.0.1:27184",
+        "workspaceRoot": "/srv/review workspace",
+        "repoRelative": "source repo",
+        "buildRoots": ["/srv/review workspace/build"],
+        "peanutReviewBin": "/opt/peanut review/bin/peanut-review",
+        "runtimeRoot": "/srv/review workspace/runtime",
+    }
+    sd = _make_session_dir([
+        AgentConfig(name="local", model="gpt", persona="vera.md", runner="codex"),
+        AgentConfig(
+            name="remote", model="gpt", persona="felix.md", runner="codex",
+            ssh_target="docs-host",
+        ),
+    ], workspace=workspace, ssh_targets={"docs-host": target})
+    (Path(sd) / "personas").mkdir(exist_ok=True)
+    (Path(sd) / "personas" / "vera.md").write_text("local")
+    (Path(sd) / "personas" / "felix.md").write_text("remote")
+
+    results = launch.launch_agents(sd, dry_run=True)
+
+    assert results[0]["cmd"][0].endswith("codex-agent-task.sh")
+    assert results[1]["transport"] == "ssh"
+    assert results[1]["ssh_target"] == "docs-host"
+    assert "ssh-transport" in results[1]["cmd"]
+    assert not (Path(sd) / "runtime" / "gateway").exists()
+    local_prompt = (Path(sd) / "prompts" / "local.md").read_text()
+    remote_prompt = (Path(sd) / "prompts" / "remote.md").read_text()
+    assert f"--session {sd}" in local_prompt
+    assert "--session peanut://" in remote_prompt
+    assert "Workspace: `/srv/review workspace`" in remote_prompt
+    assert "Repository: `'/srv/review workspace/source repo'`" in remote_prompt
+    assert "Configured remote build roots:" in remote_prompt
+    assert "'/srv/review workspace/runtime/" in remote_prompt
+    assert "'/opt/peanut review/bin/peanut-review'" in remote_prompt
+    assert "PEANUT_REVIEW_GATEWAY_TOKEN" not in remote_prompt
+
+
+def test_launch_completes_all_remote_preflights_before_starting_any_agent(tmp_path):
+    workspace = _workspace_with_cursor_config(tmp_path)
+    target = {
+        "host": "reviewer@host",
+        "controlPath": "/tmp/master.sock",
+        "gatewayUrl": "http://127.0.0.1:27184",
+        "workspaceRoot": "/srv/project",
+        "repoRelative": ".",
+        "buildRoots": ["/srv/project/build"],
+    }
+    sd = _make_session_dir([
+        AgentConfig(
+            name="one", model="gpt", persona="vera.md", runner="codex",
+            ssh_target="docs-host",
+        ),
+        AgentConfig(
+            name="two", model="gpt", persona="felix.md", runner="codex",
+            ssh_target="docs-host",
+        ),
+    ], workspace=workspace, ssh_targets={"docs-host": target})
+
+    with patch(
+        "peanut_review.ssh_transport.preflight_agent",
+        side_effect=[{"ok": True}, ValueError("remote build missing")],
+    ) as preflight, patch("peanut_review.launch.subprocess.Popen") as popen:
+        with pytest.raises(ValueError, match="remote build missing"):
+            launch.launch_agents(sd)
+
+    assert preflight.call_count == 2
+    popen.assert_not_called()
+    assert not (Path(sd) / "runtime" / "gateway" / "capabilities").exists()
 
 
 def test_launch_dry_run_can_target_single_agent():

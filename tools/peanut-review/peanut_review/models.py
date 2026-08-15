@@ -84,6 +84,59 @@ class AgentRole(str, Enum):
 
 
 @dataclass
+class SshTarget:
+    """One pre-established SSH reviewer target.
+
+    The target describes paths that already exist on the remote host. Peanut
+    review verifies them before launch and never checks out, cleans, or builds
+    the remote repository.
+    """
+
+    host: str = ""
+    control_path: str = ""
+    gateway_url: str = ""
+    workspace_root: str = ""
+    repo_relative: str = ""
+    build_roots: list[str] = field(default_factory=list)
+    peanut_review_bin: str = "peanut-review"
+    runtime_root: str = "/tmp/peanut-review-ssh"
+
+    def repo_path(self) -> str:
+        if not self.repo_relative or self.repo_relative == ".":
+            return self.workspace_root
+        return str(Path(self.workspace_root) / self.repo_relative)
+
+    def to_dict(self) -> dict:
+        return {
+            "host": self.host,
+            "controlPath": self.control_path,
+            "gatewayUrl": self.gateway_url,
+            "workspaceRoot": self.workspace_root,
+            "repoRelative": self.repo_relative or ".",
+            "buildRoots": list(self.build_roots),
+            "peanutReviewBin": self.peanut_review_bin,
+            "runtimeRoot": self.runtime_root,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SshTarget:
+        raw = dict(data)
+        aliases = {
+            "controlPath": "control_path",
+            "gatewayUrl": "gateway_url",
+            "workspaceRoot": "workspace_root",
+            "repoRelative": "repo_relative",
+            "buildRoots": "build_roots",
+            "peanutReviewBin": "peanut_review_bin",
+            "runtimeRoot": "runtime_root",
+        }
+        for external, internal in aliases.items():
+            if external in raw:
+                raw.setdefault(internal, raw.pop(external))
+        return cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class Comment:
     id: str = field(default_factory=lambda: _short_id("c"))
     author: str = ""
@@ -193,11 +246,16 @@ class AgentConfig:
     # Backend runner: "cursor" (cursor-agent), "opencode" (opencode run),
     # or "codex" (codex exec).
     runner: str = "cursor"
+    # Optional name in Session.ssh_targets. Runner selection stays orthogonal:
+    # cursor/opencode/codex choose the model wrapper, ssh_target chooses where
+    # that wrapper runs.
+    ssh_target: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
         reasoning_effort = d.pop("reasoning_effort")
         fast_mode = d.pop("fast_mode")
+        ssh_target = d.pop("ssh_target")
         return (
             {
                 k: v
@@ -207,6 +265,7 @@ class AgentConfig:
             }
             | ({"reasoningEffort": reasoning_effort} if reasoning_effort else {})
             | ({"fastMode": fast_mode} if fast_mode is not None else {})
+            | ({"sshTarget": ssh_target} if ssh_target else {})
         )
 
     @classmethod
@@ -216,6 +275,8 @@ class AgentConfig:
             raw.setdefault("reasoning_effort", raw.pop("reasoningEffort"))
         if "fastMode" in raw:
             raw.setdefault("fast_mode", raw.pop("fastMode"))
+        if "sshTarget" in raw:
+            raw.setdefault("ssh_target", raw.pop("sshTarget"))
         return cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
 
 
@@ -259,6 +320,7 @@ class Session:
     diff_commands: list[str] = field(default_factory=list)
     diff_stat: str = ""
     agents: list[AgentConfig] = field(default_factory=list)
+    ssh_targets: dict[str, SshTarget] = field(default_factory=dict)
     timeout: int = 1200
     github: GitHubPR | None = None
     # Comment id used as the lower bound for the next curator run. Reviewer
@@ -277,6 +339,12 @@ class Session:
     def to_json(self) -> str:
         d = asdict(self)
         d["agents"] = [a.to_dict() for a in self.agents]
+        d["sshTargets"] = {
+            name: target.to_dict() for name, target in self.ssh_targets.items()
+        }
+        d.pop("ssh_targets", None)
+        if not d["sshTargets"]:
+            d.pop("sshTargets")
         if self.github is not None:
             d["github"] = self.github.to_dict()
         else:
@@ -288,10 +356,15 @@ class Session:
     def from_json(cls, text: str) -> Session:
         d = json.loads(text)
         agents = [AgentConfig.from_dict(a) for a in d.pop("agents", [])]
+        ssh_targets = {
+            name: SshTarget.from_dict(target)
+            for name, target in d.pop("sshTargets", {}).items()
+        }
         gh_raw = d.pop("github", None)
         filtered = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         s = cls(**filtered)
         s.agents = agents
+        s.ssh_targets = ssh_targets
         if gh_raw:
             s.github = GitHubPR.from_dict(gh_raw)
         return s

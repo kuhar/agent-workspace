@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from string import Template
 from typing import Sequence
@@ -150,6 +151,7 @@ def render_all_prompts(
     session_dir: str | Path,
     template_path: str | Path | None = None,
     agent_names: Sequence[str] | None = None,
+    remote_launch_ids: dict[str, str] | None = None,
 ) -> dict[str, Path]:
     """Render per-agent prompts and write to <session>/prompts/. Returns {agent: path}.
 
@@ -188,28 +190,55 @@ def render_all_prompts(
             f"{pr_bin} --session {sdir} comments --format json"
         )
     for agent in agents:
-        variables = {
-            "SESSION": str(sdir),
-            "WORKSPACE": session.workspace,
-            "REPO_PATH": repo,
-            "REPO_RELATIVE": session.repo_relative or ".",
-            "WORKSPACE_LAYOUT": _format_workspace_layout(
+        if agent.ssh_target:
+            target = session.ssh_targets[agent.ssh_target]
+            launch_id = (remote_launch_ids or {}).get(agent.name)
+            if not launch_id:
+                raise ValueError(f"remote launch id missing for agent {agent.name}")
+            agent_session = f"peanut://{session.id}"
+            agent_workspace = target.workspace_root
+            agent_repo = target.repo_path()
+            agent_pr_bin = target.peanut_review_bin
+            persona_path = str(
+                Path(target.runtime_root) / session.id / launch_id / "persona.md"
+            )
+            workspace_layout = _format_workspace_layout(
+                agent_workspace, agent_repo, target.repo_relative or ".",
+            )
+            workspace_artifacts = "Configured remote build roots:\n" + "\n".join(
+                f"- `{path}`" for path in target.build_roots
+            )
+        else:
+            agent_session = str(sdir)
+            agent_workspace = session.workspace
+            agent_repo = repo
+            agent_pr_bin = pr_bin
+            persona_path = str(sdir / "personas" / agent.persona)
+            workspace_layout = _format_workspace_layout(
                 session.workspace,
                 repo,
                 session.repo_relative or ".",
-            ),
-            "WORKSPACE_ARTIFACTS": _format_workspace_artifacts(session.workspace),
+            )
+            workspace_artifacts = _format_workspace_artifacts(session.workspace)
+        variables = {
+            "SESSION": shlex.quote(agent_session),
+            "WORKSPACE": agent_workspace,
+            "REPO_PATH": shlex.quote(agent_repo),
+            "REPO_RELATIVE": target.repo_relative if agent.ssh_target else session.repo_relative or ".",
+            "WORKSPACE_LAYOUT": workspace_layout,
+            "WORKSPACE_ARTIFACTS": workspace_artifacts,
             "AGENT": agent.name,
             "PERSONA": agent.persona,
+            "PERSONA_PATH": shlex.quote(persona_path),
             "REVIEWER_AGENTS": reviewer_names,
             "CURATION_SINCE_COMMENT_ID": curation_since,
             "CURATION_SCOPE": curation_scope,
             "CURATION_SINCE_COMMAND": curation_since_command,
             "DIFF_COMMANDS": " && ".join(session.diff_commands),
-            "GIT_DIFF_COMMANDS": _format_git_commands(repo, session.diff_commands),
+            "GIT_DIFF_COMMANDS": _format_git_commands(agent_repo, session.diff_commands),
             "BASE_REF": session.base_ref,
             "TOPIC_REF": session.topic_ref,
-            "PR_BIN": pr_bin,
+            "PR_BIN": shlex.quote(agent_pr_bin),
         }
         tpl = _resolve_template(template_path, agent)
         rendered = render_prompt(tpl, variables)
@@ -369,6 +398,8 @@ def _build_agent_cmd(
     prompt_path: Path,
 ) -> list[str]:
     """Build the launcher command for a single agent based on its runner."""
+    if agent.ssh_target:
+        raise ValueError("SSH agents require _build_ssh_transport_cmd")
     launcher = _find_launcher_script(agent.runner)
     cmd = [
         launcher,
@@ -393,6 +424,24 @@ def _build_agent_cmd(
             cmd += ["--reasoning-effort", agent.reasoning_effort]
         cmd.append("--fast-mode" if agent.fast_mode is True else "--no-fast-mode")
     return cmd
+
+
+def _build_ssh_transport_cmd(
+    agent,
+    *,
+    session_dir: Path,
+    prompt_path: Path,
+    launch_id: str,
+) -> list[str]:
+    pr_bin = str(Path(__file__).resolve().parent.parent / "bin" / "peanut-review")
+    return [
+        pr_bin,
+        "--session", str(session_dir),
+        "ssh-transport",
+        "--agent", agent.name,
+        "--launch-id", launch_id,
+        "--prompt-file", str(prompt_path),
+    ]
 
 
 def _build_supervisor_cmd(
@@ -434,6 +483,12 @@ def launch_agents(
     session = load_session(session_dir)
     sdir = Path(session_dir)
     agents = _select_agents(session.agents, agent_names)
+    remote_agents = [agent for agent in agents if agent.ssh_target]
+    for agent in remote_agents:
+        if agent.ssh_target not in session.ssh_targets:
+            raise ValueError(
+                f"agent {agent.name} references missing SSH target {agent.ssh_target!r}"
+            )
 
     # A PR session is a pinned snapshot. Agents run in the live workspace, so
     # launching them from a different checkout would review the wrong source
@@ -457,7 +512,25 @@ def launch_agents(
         cli_json=cli_json,
     )
 
-    prompts = render_all_prompts(session_dir, template_path, agent_names=agent_names)
+    if not dry_run:
+        from . import ssh_transport
+        # Complete every remote preflight before launching any reviewer so a
+        # bad host cannot consume model time in a partially started lineup.
+        for agent in remote_agents:
+            ssh_transport.preflight_agent(
+                sdir, agent, session.ssh_targets[agent.ssh_target]
+            )
+
+    remote_launch_ids = {
+        agent.name: uuid.uuid4().hex for agent in remote_agents
+    }
+
+    prompts = render_all_prompts(
+        session_dir,
+        template_path,
+        agent_names=agent_names,
+        remote_launch_ids=remote_launch_ids,
+    )
 
     if not dry_run:
         _prepare_curation_baseline(sdir, session, agents)
@@ -467,7 +540,17 @@ def launch_agents(
     for index, agent in enumerate(agents):
         prompt_path = prompts[agent.name]
         log_path = sdir / "log" / f"{agent.name}.log"
-        cmd = _build_agent_cmd(agent, session=session, session_dir=sdir, prompt_path=prompt_path)
+        if agent.ssh_target:
+            cmd = _build_ssh_transport_cmd(
+                agent,
+                session_dir=sdir,
+                prompt_path=prompt_path,
+                launch_id=remote_launch_ids[agent.name],
+            )
+        else:
+            cmd = _build_agent_cmd(
+                agent, session=session, session_dir=sdir, prompt_path=prompt_path
+            )
         supervisor_cmd = _build_supervisor_cmd(
             session_dir=sdir,
             agent_name=agent.name,
@@ -484,8 +567,27 @@ def launch_agents(
         env["GIT_COMMITTER_NAME"] = agent.name
         env["GIT_COMMITTER_EMAIL"] = f"{agent.name}@peanut-review.local"
         env["PEANUT_SESSION"] = str(sdir)
+        if agent.ssh_target and not dry_run:
+            from . import gateway, runtime
+            token = gateway.issue_capability(
+                sdir,
+                agent=agent.name,
+                launch_id=remote_launch_ids[agent.name],
+                ttl_seconds=session.timeout + 120,
+            )
+            env["PEANUT_REVIEW_GATEWAY_TOKEN"] = token
+            env["PEANUT_REMOTE_RUNNER"] = agent.runner
+            env["PEANUT_SSH_LAUNCH_ID"] = remote_launch_ids[agent.name]
+            runtime.update_agent_meta(sdir, agent.name, {
+                "transport": "ssh",
+                "ssh_target": agent.ssh_target,
+                "ssh_host": session.ssh_targets[agent.ssh_target].host,
+                "ssh_launch_id": remote_launch_ids[agent.name],
+                "ssh_channel_state": "pending",
+                "remote_process_state": "pending",
+            })
         cursor_runtime = None
-        if agent.runner == "cursor":
+        if agent.runner == "cursor" and not agent.ssh_target:
             cursor_runtime = _setup_cursor_runtime(
                 sdir,
                 agent.name,
@@ -504,18 +606,30 @@ def launch_agents(
             }
             if cursor_runtime:
                 result.update(cursor_runtime)
+            if agent.ssh_target:
+                result.update({
+                    "transport": "ssh",
+                    "ssh_target": agent.ssh_target,
+                    "ssh_host": session.ssh_targets[agent.ssh_target].host,
+                    "launch_id": remote_launch_ids[agent.name],
+                })
             results.append(result)
             continue
 
-        with open(log_path, "w") as log_file:
-            proc = subprocess.Popen(
-                supervisor_cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                env=env,
-                cwd=session.workspace,
-                start_new_session=True,
-            )
+        try:
+            with open(log_path, "w") as log_file:
+                proc = subprocess.Popen(
+                    supervisor_cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    cwd=session.workspace,
+                    start_new_session=True,
+                )
+        except OSError:
+            if agent.ssh_target:
+                gateway.revoke_capability(sdir, remote_launch_ids[agent.name])
+            raise
 
         update_agent_status(
             sdir,
@@ -531,6 +645,13 @@ def launch_agents(
             "cmd": cmd,
             "supervisor_cmd": supervisor_cmd,
         }
+        if agent.ssh_target:
+            result.update({
+                "transport": "ssh",
+                "ssh_target": agent.ssh_target,
+                "ssh_host": session.ssh_targets[agent.ssh_target].host,
+                "launch_id": remote_launch_ids[agent.name],
+            })
         if cursor_runtime:
             result.update(cursor_runtime)
         results.append(result)

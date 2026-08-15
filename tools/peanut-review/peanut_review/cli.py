@@ -181,6 +181,12 @@ def cmd_init(args: argparse.Namespace) -> int:
             agents = json.loads(args.agents)
         else:
             agents = json.loads(Path(args.agents).read_text())
+    ssh_targets = None
+    if args.ssh_targets:
+        if args.ssh_targets.startswith("{"):
+            ssh_targets = json.loads(args.ssh_targets)
+        else:
+            ssh_targets = json.loads(Path(args.ssh_targets).read_text())
 
     personas_dir = args.personas_dir or _default_personas_dir()
 
@@ -225,6 +231,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             base_ref=base_ref,
             topic_ref=topic_ref,
             agents=agents,
+            ssh_targets=ssh_targets,
             personas_dir=personas_dir if personas_dir else None,
             timeout=args.timeout,
             session_dir=args.session,
@@ -382,7 +389,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"Agents:   {len(agents)}")
         print()
         print("Init command:")
-        print(
+        init_command = (
             "  peanut-review --session "
             f"{shlex.quote(str(session_dir))} init --workspace "
             f"{shlex.quote(cfg['workspace'])} --repo-relative "
@@ -390,6 +397,11 @@ def cmd_start(args: argparse.Namespace) -> int:
             f"--gh-pr {pr_info.repo}#{pr_info.number} "
             f"--timeout {timeout} --agents {shlex.quote(json.dumps(agents))}"
         )
+        if cfg.get("sshTargets"):
+            init_command += " --ssh-targets " + shlex.quote(
+                json.dumps(cfg["sshTargets"])
+            )
+        print(init_command)
         print("Fetch comments command:")
         print(f"  peanut-review --session {shlex.quote(str(session_dir))} gh-pull")
         if not args.no_launch:
@@ -448,6 +460,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 base_ref=args.base if args.base is not None else pr_info.base_sha,
                 topic_ref=args.topic if args.topic is not None else pr_info.head_sha,
                 agents=agents,
+                ssh_targets=cfg.get("sshTargets"),
                 personas_dir=personas_dir if personas_dir else None,
                 timeout=timeout,
                 session_dir=str(session_dir),
@@ -1360,6 +1373,60 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gateway_serve(args: argparse.Namespace) -> int:
+    """Run the dedicated reviewer gateway in the foreground."""
+    from . import gateway
+    roots = args.root or ["/tmp/peanut-review"]
+    try:
+        gateway.serve(roots, host=args.host, port=args.port)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_ssh_probe(_args: argparse.Namespace) -> int:
+    from . import ssh_transport
+    return ssh_transport.main_probe()
+
+
+def cmd_ssh_run(_args: argparse.Namespace) -> int:
+    from . import ssh_transport
+    return ssh_transport.main_run()
+
+
+def cmd_ssh_stop(_args: argparse.Namespace) -> int:
+    from . import ssh_transport
+    return ssh_transport.main_stop()
+
+
+def cmd_ssh_recover(_args: argparse.Namespace) -> int:
+    from . import ssh_transport
+    return ssh_transport.main_recover()
+
+
+def cmd_ssh_transport(args: argparse.Namespace) -> int:
+    from . import ssh_transport
+    return ssh_transport.run_transport(args)
+
+
+def cmd_recover_ssh(args: argparse.Namespace) -> int:
+    session_dir = _get_session_dir(args)
+    from . import ssh_transport
+    failed = False
+    for agent in args.agent:
+        try:
+            result = ssh_transport.recover_agent(
+                session_dir, agent, grace_seconds=args.timeout,
+            )
+            count = len(result.get("recovered", []))
+            print(f"  {agent}: recovered {count} remote launch(es)")
+        except (OSError, ValueError) as exc:
+            failed = True
+            print(f"  {agent}: Error: {exc}", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def cmd_archive(args: argparse.Namespace) -> int:
     """Export comments to git notes for peanut-review archival."""
     session_dir = _get_session_dir(args)
@@ -1400,6 +1467,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--topic", default=None,
                     help="Topic ref (default: HEAD, or PR headRefOid with --gh-pr)")
     sp.add_argument("--agents", help="Agent config JSON array (inline or file path)")
+    sp.add_argument(
+        "--ssh-targets",
+        help="SSH target config JSON object (inline or file path)",
+    )
     sp.add_argument("--personas-dir", help="Source dir for persona files")
     sp.add_argument("--timeout", type=int, default=1200, help="Agent timeout (default: 1200)")
     sp.add_argument("--id", default=None, metavar="SLUG",
@@ -1718,6 +1789,36 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--root", action="append", metavar="PATH",
                     help="Review root whose server to stop (same default as serve)")
 
+    # gateway-serve
+    sp = sub.add_parser(
+        "gateway-serve",
+        help="Run the capability-scoped reviewer gateway",
+    )
+    sp.add_argument("--host", default="127.0.0.1", help="Loopback bind host")
+    sp.add_argument("--port", type=int, default=27184, help="Bind port")
+    sp.add_argument(
+        "--root", action="append", metavar="PATH",
+        help="Review root containing session directories (repeatable)",
+    )
+
+    # Internal SSH commands. Payloads, including capabilities, are read from
+    # stdin so secrets never appear in argv.
+    sub.add_parser("ssh-probe", help=argparse.SUPPRESS)
+    sub.add_parser("ssh-run", help=argparse.SUPPRESS)
+    sub.add_parser("ssh-stop", help=argparse.SUPPRESS)
+    sub.add_parser("ssh-recover", help=argparse.SUPPRESS)
+    sp = sub.add_parser("ssh-transport", help=argparse.SUPPRESS)
+    sp.add_argument("--agent", required=True)
+    sp.add_argument("--launch-id", required=True)
+    sp.add_argument("--prompt-file", required=True)
+
+    sp = sub.add_parser(
+        "recover-ssh",
+        help="Stop and clean uncertain remote reviewer launches",
+    )
+    sp.add_argument("--agent", action="append", required=True, metavar="NAME")
+    sp.add_argument("--timeout", type=float, default=3.0)
+
     return p
 
 
@@ -1728,6 +1829,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.command:
         parser.print_help()
         return 1
+
+    from . import gateway_cli
+    remote_result = gateway_cli.maybe_dispatch(args)
+    if remote_result is not None:
+        return remote_result
 
     handler = {
         "init": cmd_init,
@@ -1760,6 +1866,13 @@ def main(argv: list[str] | None = None) -> int:
         "archive": cmd_archive,
         "serve": cmd_serve,
         "stop": cmd_stop,
+        "gateway-serve": cmd_gateway_serve,
+        "ssh-probe": cmd_ssh_probe,
+        "ssh-run": cmd_ssh_run,
+        "ssh-stop": cmd_ssh_stop,
+        "ssh-recover": cmd_ssh_recover,
+        "ssh-transport": cmd_ssh_transport,
+        "recover-ssh": cmd_recover_ssh,
     }.get(args.command)
 
     if handler is None:

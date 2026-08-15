@@ -16,10 +16,24 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
-# O_APPEND writes are not strictly atomic on regular files (unlike pipes),
-# but since each agent writes to its own .jsonl file, concurrent interleaving
-# is not a concern. We warn on large lines as a safety check.
+# Gateway-backed reviewers can issue concurrent requests for the same author,
+# so append operations use an advisory lock in addition to O_APPEND.
 _PIPE_BUF = 4096
+
+
+def _locked_append(path: Path, line: str) -> None:
+    import fcntl
+
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, line.encode())
+        os.fsync(fd)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _comments_dir(session_dir: str | Path) -> Path:
@@ -59,12 +73,7 @@ def append_comment(session_dir: str | Path, comment: Comment) -> Comment:
     line = comment.to_json() + "\n"
     if len(line.encode()) > _PIPE_BUF:
         log.warning("Comment %s exceeds PIPE_BUF — write may not be atomic", comment.id)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        os.write(fd, line.encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _locked_append(path, line)
     return comment
 
 
@@ -93,12 +102,7 @@ def append_note(session_dir: str | Path, note: Note) -> Note:
     line = note.to_json() + "\n"
     if len(line.encode()) > _PIPE_BUF:
         log.warning("Note %s exceeds PIPE_BUF — write may not be atomic", note.id)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        os.write(fd, line.encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _locked_append(path, line)
     return note
 
 
@@ -373,31 +377,43 @@ def mark_stale(session_dir: str | Path) -> int:
 
 def _read_jsonl(path: Path) -> list[Comment]:
     """Read a JSONL file, skipping unparseable lines with a warning."""
+    import fcntl
+
     comments: list[Comment] = []
     with open(path) as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                comments.append(Comment.from_json(line))
-            except (json.JSONDecodeError, TypeError) as e:
-                log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        try:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    comments.append(Comment.from_json(line))
+                except (json.JSONDecodeError, TypeError) as e:
+                    log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     return comments
 
 
 def _read_note_jsonl(path: Path) -> list[Note]:
     """Read a note JSONL file, skipping unparseable lines with a warning."""
+    import fcntl
+
     notes: list[Note] = []
     with open(path) as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                notes.append(Note.from_json(line))
-            except (json.JSONDecodeError, TypeError) as e:
-                log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        try:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    notes.append(Note.from_json(line))
+                except (json.JSONDecodeError, TypeError) as e:
+                    log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     return notes
 
 

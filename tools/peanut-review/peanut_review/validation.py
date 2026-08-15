@@ -6,8 +6,9 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.parse import urlparse
 
-from .models import AgentConfig, AgentRole
+from .models import AgentConfig, AgentRole, SshTarget
 
 
 SUPPORTED_RUNNERS = {"cursor", "opencode", "codex"}
@@ -47,6 +48,7 @@ def _validate_agent_configs(
     raw_agents: Any,
     *,
     personas_dir: Path | None,
+    ssh_target_names: set[str],
     errors: list[str],
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_agents, list) or not raw_agents:
@@ -118,12 +120,112 @@ def _validate_agent_configs(
             elif runner != "codex":
                 errors.append(f"{label}.fastMode is only supported with runner 'codex'")
 
+        ssh_target = agent.get("sshTarget", agent.get("ssh_target"))
+        if ssh_target is not None:
+            if not isinstance(ssh_target, str) or not ssh_target.strip():
+                errors.append(f"{label}.sshTarget must be a non-empty string")
+            elif ssh_target not in ssh_target_names:
+                errors.append(f"{label}.sshTarget references unknown target {ssh_target!r}")
+            elif role == AgentRole.CURATOR.value:
+                errors.append(f"{label}.sshTarget is not supported for curator agents")
+
         try:
             agents.append(AgentConfig.from_dict(agent).to_dict())
         except TypeError as e:
             errors.append(f"{label} is not a valid agent config: {e}")
 
     return agents
+
+
+def _absolute_posix_path(value: Any, label: str, errors: list[str]) -> str:
+    path = _as_non_empty_string(value, label, errors)
+    if path and not path.startswith("/"):
+        errors.append(f"{label} must be an absolute remote POSIX path")
+    return path
+
+
+def _validate_ssh_targets(raw_targets: Any, errors: list[str]) -> dict[str, dict]:
+    if raw_targets is None:
+        return {}
+    targets = _require_object(raw_targets, "sshTargets", errors)
+    if targets is None:
+        return {}
+
+    normalized: dict[str, dict] = {}
+    for name, raw_target in targets.items():
+        label = f"sshTargets.{name}"
+        if not isinstance(name, str) or not AGENT_NAME_RE.match(name):
+            errors.append(f"SSH target name {name!r} must match {AGENT_NAME_RE.pattern}")
+            continue
+        target = _require_object(raw_target, label, errors)
+        if target is None:
+            continue
+
+        host = _as_non_empty_string(target.get("host"), f"{label}.host", errors)
+        control_path = _absolute_posix_path(
+            target.get("controlPath"), f"{label}.controlPath", errors
+        )
+        gateway_url = _as_non_empty_string(
+            target.get("gatewayUrl"), f"{label}.gatewayUrl", errors
+        )
+        if gateway_url:
+            parsed_gateway = urlparse(gateway_url)
+            try:
+                gateway_port = parsed_gateway.port
+            except ValueError:
+                gateway_port = None
+            if (
+                parsed_gateway.scheme != "http"
+                or parsed_gateway.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or gateway_port is None
+                or parsed_gateway.username is not None
+                or parsed_gateway.password is not None
+                or parsed_gateway.query
+                or parsed_gateway.fragment
+                or parsed_gateway.path not in {"", "/"}
+            ):
+                errors.append(f"{label}.gatewayUrl must use remote loopback HTTP with a port")
+        workspace_root = _absolute_posix_path(
+            target.get("workspaceRoot"), f"{label}.workspaceRoot", errors
+        )
+        repo_relative = _as_non_empty_string(
+            target.get("repoRelative"), f"{label}.repoRelative", errors
+        )
+        repo_path = Path(repo_relative) if repo_relative else Path()
+        if repo_relative and (repo_path.is_absolute() or ".." in repo_path.parts):
+            errors.append(f"{label}.repoRelative must stay under workspaceRoot")
+
+        raw_build_roots = target.get("buildRoots")
+        build_roots: list[str] = []
+        if not isinstance(raw_build_roots, list) or not raw_build_roots:
+            errors.append(f"{label}.buildRoots must be a non-empty array")
+        else:
+            for index, raw_build in enumerate(raw_build_roots):
+                build_roots.append(_absolute_posix_path(
+                    raw_build, f"{label}.buildRoots[{index}]", errors
+                ))
+
+        peanut_bin = _as_non_empty_string(
+            target.get("peanutReviewBin", "peanut-review"),
+            f"{label}.peanutReviewBin",
+            errors,
+        )
+        runtime_root = _absolute_posix_path(
+            target.get("runtimeRoot", "/tmp/peanut-review-ssh"),
+            f"{label}.runtimeRoot",
+            errors,
+        )
+        normalized[name] = SshTarget(
+            host=host,
+            control_path=control_path,
+            gateway_url=gateway_url,
+            workspace_root=workspace_root,
+            repo_relative=repo_relative,
+            build_roots=build_roots,
+            peanut_review_bin=peanut_bin,
+            runtime_root=runtime_root,
+        ).to_dict()
+    return normalized
 
 
 def validate_project_config(
@@ -189,9 +291,11 @@ def validate_project_config(
             if not personas_dir.is_dir():
                 errors.append(f"personasDir does not exist or is not a directory: {personas_dir}")
 
+    ssh_targets = _validate_ssh_targets(data.get("sshTargets"), errors)
     agents = _validate_agent_configs(
         data.get("agents"),
         personas_dir=personas_dir,
+        ssh_target_names=set(ssh_targets),
         errors=errors,
     )
 
@@ -206,6 +310,8 @@ def validate_project_config(
     cfg["repoPath"] = str(repo_path)
     cfg["reviewAgentTimeoutSeconds"] = timeout
     cfg["agents"] = agents
+    if ssh_targets:
+        cfg["sshTargets"] = ssh_targets
     if personas_dir is not None:
         cfg["personasDir"] = str(personas_dir)
     return cfg
@@ -288,7 +394,7 @@ def validate_launch_prerequisites(
             f"(expected one of {', '.join(sorted(SUPPORTED_RUNNERS))})"
         )
 
-    if any(agent.runner == "cursor" for agent in selected):
+    if any(agent.runner == "cursor" and not agent.ssh_target for agent in selected):
         try:
             validate_cursor_cli_json(workspace, cli_json=cli_json)
         except ValidationError as e:

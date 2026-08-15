@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AgentConfig, AgentStatus, GitHubPR, Session, _now_iso
+from .models import AgentConfig, AgentStatus, GitHubPR, Session, SshTarget, _now_iso
 from . import curator
 
 META_FILE = "__meta__"
@@ -144,6 +144,7 @@ def create_session(
     base_ref: str = "main",
     topic_ref: str = "HEAD",
     agents: list[dict] | None = None,
+    ssh_targets: dict[str, dict] | None = None,
     personas_dir: str | None = None,
     timeout: int = 1200,
     session_dir: str | None = None,
@@ -197,6 +198,17 @@ def create_session(
     if agents:
         for a in agents:
             agent_configs.append(AgentConfig.from_dict(a))
+    target_configs = {
+        name: SshTarget.from_dict(target)
+        for name, target in (ssh_targets or {}).items()
+    }
+    for agent in agent_configs:
+        if agent.ssh_target and agent.ssh_target not in target_configs:
+            raise ValueError(
+                f"agent {agent.name} references unknown SSH target {agent.ssh_target!r}"
+            )
+        if agent.ssh_target and curator.is_curator(agent):
+            raise ValueError("curator agents cannot use an SSH target")
     if include_curator:
         curator.ensure_curator_agent(agent_configs)
 
@@ -212,6 +224,7 @@ def create_session(
         diff_commands=[f"git diff {diff_range}"],
         diff_stat=diff_stat,
         agents=agent_configs,
+        ssh_targets=target_configs,
         timeout=timeout,
         github=github,
     )

@@ -58,6 +58,39 @@ def test_create_session(mock_git):
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_session_round_trip_preserves_ssh_targets_and_agent_reference(mock_git, tmp_path):
+    session_dir = tmp_path / "session"
+    session, _ = create_session(
+        workspace="/tmp/repo",
+        agents=[{
+            "name": "remote", "model": "gpt", "persona": "remote.md",
+            "runner": "codex", "sshTarget": "docs-host",
+        }],
+        ssh_targets={
+            "docs-host": {
+                "host": "reviewer@host",
+                "controlPath": "/tmp/review.sock",
+                "gatewayUrl": "http://127.0.0.1:27184",
+                "workspaceRoot": "/srv/project",
+                "repoRelative": "source",
+                "buildRoots": ["/srv/project/build"],
+                "peanutReviewBin": "/opt/peanut-review",
+                "runtimeRoot": "/srv/project/runtime",
+            },
+        },
+        session_dir=str(session_dir),
+    )
+    loaded = load_session(session_dir)
+    assert loaded == session
+    assert loaded.agents[0].ssh_target == "docs-host"
+    target = loaded.ssh_targets["docs-host"]
+    assert target.repo_path() == "/srv/project/source"
+    raw = json.loads((session_dir / "session.json").read_text())
+    assert raw["agents"][0]["sshTarget"] == "docs-host"
+    assert raw["sshTargets"]["docs-host"]["controlPath"] == "/tmp/review.sock"
+
+
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
 def test_load_session(mock_git):
     sd = tempfile.mkdtemp(prefix="pr-test-")
     session_dir = os.path.join(sd, "session")

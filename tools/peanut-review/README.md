@@ -125,6 +125,12 @@ cp "$PEANUT_REVIEW_DIR/peanut_review/templates/cli.sample.json" \
   "$WORKSPACE/.cursor/cli.json"
 ```
 
+Selected reviewer agents can instead use an existing persistent SSH
+ControlMaster, an independent remote checkout/build tree, and a reverse-forwarded
+capability gateway while retaining the same reviewer CLI. Curator, web, and
+GitHub operations remain local. See [SSH reviewers](docs/ssh-reviewers.md) for
+the configuration, security boundary, lifecycle, and real localhost validation.
+
 ## Flow: GitHub PR
 
 Use this for changes that came from GitHub.

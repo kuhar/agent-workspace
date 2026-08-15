@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from peanut_review import validation
 from peanut_review.models import AgentConfig
 
@@ -209,3 +211,115 @@ def test_validate_launch_prerequisites_checks_cursor_config(tmp_path: Path):
 
     _write_cli_json(tmp_path)
     validation.validate_launch_prerequisites(workspace=tmp_path, agents=agents)
+
+
+def test_validate_project_config_normalizes_ssh_targets(tmp_path: Path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    personas = tmp_path / "personas"
+    personas.mkdir()
+    (personas / "remote.md").write_text("persona\n")
+    config = validation.validate_project_config(
+        {
+            "reviewRoot": "reviews",
+            "workspaceRoot": ".",
+            "repoRelative": "repo",
+            "personasDir": "personas",
+            "sshTargets": {
+                "docs-host": {
+                    "host": "reviewer@docs-host",
+                    "controlPath": "/run/user/1000/peanut-docs.sock",
+                    "gatewayUrl": "http://127.0.0.1:27184",
+                    "workspaceRoot": "/srv/reviews/project",
+                    "repoRelative": "source",
+                    "buildRoots": ["/srv/reviews/project/build"],
+                    "peanutReviewBin": "/opt/peanut/bin/peanut-review",
+                },
+            },
+            "agents": [{
+                "name": "remote",
+                "model": "gpt",
+                "persona": "remote.md",
+                "runner": "codex",
+                "sshTarget": "docs-host",
+            }],
+        },
+        config_path=tmp_path / ".peanut-review.json",
+    )
+    assert config["agents"][0]["runner"] == "codex"
+    assert config["agents"][0]["sshTarget"] == "docs-host"
+    assert config["sshTargets"]["docs-host"] == {
+        "host": "reviewer@docs-host",
+        "controlPath": "/run/user/1000/peanut-docs.sock",
+        "gatewayUrl": "http://127.0.0.1:27184",
+        "workspaceRoot": "/srv/reviews/project",
+        "repoRelative": "source",
+        "buildRoots": ["/srv/reviews/project/build"],
+        "peanutReviewBin": "/opt/peanut/bin/peanut-review",
+        "runtimeRoot": "/tmp/peanut-review-ssh",
+    }
+
+
+@pytest.mark.parametrize("mutation, expected", [
+    (("agent", "missing"), "references unknown target"),
+    (("curator", "docs-host"), "not supported for curator"),
+    (("gateway", "http://example.com:1234"), "remote loopback"),
+    (("gateway", "http://127.0.0.1:80@outside.example"), "remote loopback"),
+    (("control", "relative.sock"), "absolute remote POSIX path"),
+    (("repo", "../source"), "stay under workspaceRoot"),
+    (("build", []), "non-empty array"),
+])
+def test_validate_project_config_rejects_invalid_ssh_target(
+    tmp_path: Path, mutation, expected: str,
+):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    personas = tmp_path / "personas"
+    personas.mkdir()
+    (personas / "remote.md").write_text("persona\n")
+    target = {
+        "host": "reviewer@host",
+        "controlPath": "/tmp/control.sock",
+        "gatewayUrl": "http://127.0.0.1:27184",
+        "workspaceRoot": "/srv/project",
+        "repoRelative": "source",
+        "buildRoots": ["/srv/project/build"],
+    }
+    role = "reviewer"
+    target_name = "docs-host"
+    kind, value = mutation
+    if kind == "agent":
+        target_name = value
+    elif kind == "curator":
+        role = kind
+    elif kind == "gateway":
+        target["gatewayUrl"] = value
+    elif kind == "control":
+        target["controlPath"] = value
+    elif kind == "repo":
+        target["repoRelative"] = value
+    elif kind == "build":
+        target["buildRoots"] = value
+    with pytest.raises(validation.ValidationError, match=expected):
+        validation.validate_project_config(
+            {
+                "reviewRoot": "reviews",
+                "workspaceRoot": ".",
+                "repoRelative": "repo",
+                "personasDir": "personas",
+                "sshTargets": {"docs-host": target},
+                "agents": [{
+                    "name": "remote", "model": "gpt", "persona": "remote.md",
+                    "runner": "codex", "role": role, "sshTarget": target_name,
+                }],
+            },
+            config_path=tmp_path / ".peanut-review.json",
+        )
+
+
+def test_remote_cursor_does_not_require_local_cursor_permissions(tmp_path: Path):
+    agent = AgentConfig(
+        name="remote", model="cursor", persona="remote.md",
+        runner="cursor", ssh_target="docs-host",
+    )
+    validation.validate_launch_prerequisites(workspace=tmp_path, agents=[agent])

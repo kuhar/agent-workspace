@@ -58,14 +58,22 @@ def update_agent_meta(
     updates: dict[str, Any],
 ) -> dict[str, Any]:
     """Merge runtime fields into log/<agent>/meta.json atomically."""
+    import fcntl
+
     path = agent_meta_path(session_dir, agent_name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = read_agent_meta(session_dir, agent_name)
-    data.update(updates)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    tmp.replace(path)
-    return data
+    lock_path = path.with_suffix(".json.lock")
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            data = read_agent_meta(session_dir, agent_name)
+            data.update(updates)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            tmp.replace(path)
+            return data
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _as_int(value: Any) -> int | None:
@@ -257,6 +265,18 @@ def compact_model(model: str, width: int = 22) -> str:
 
 def status_detail_parts(snapshot: dict[str, Any], status: str) -> list[str]:
     parts: list[str] = []
+    meta = snapshot["meta"]
+    if meta.get("transport") == "ssh":
+        target = meta.get("ssh_target") or "?"
+        channel = meta.get("ssh_channel_state") or "unknown"
+        remote = meta.get("remote_process_state") or "unknown"
+        parts.extend([
+            f"transport=ssh:{target}",
+            f"channel={channel}",
+            f"remote={remote}",
+        ])
+        if meta.get("ssh_cleanup_required"):
+            parts.append("cleanup=required")
     if snapshot["pid"] and (snapshot["reviewer_live"] or status == AgentStatus.RUNNING.value):
         parts.append(f"pid={snapshot['pid']}")
     if snapshot["pgid"] and (snapshot["reviewer_live"] or status == AgentStatus.RUNNING.value):

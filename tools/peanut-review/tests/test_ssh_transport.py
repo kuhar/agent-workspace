@@ -167,6 +167,65 @@ def test_remote_probe_reports_each_pre_model_failure(
     assert expected in joined
 
 
+@pytest.mark.parametrize(
+    "missing_field", ["agent", "pid", "pgid", "start_ticks", "launch_id"],
+)
+def test_remote_probe_rejects_each_incomplete_process_identity(
+    tmp_path: Path, monkeypatch, missing_field: str,
+):
+    _session_dir, payload, server, thread = _probe_fixture(tmp_path, monkeypatch)
+    run_dir = (
+        Path(payload["runtime_root"]) / payload["session_id"] / "incomplete-launch"
+    )
+    run_dir.mkdir(parents=True)
+    (run_dir / "owner.json").write_text(json.dumps({
+        "agent": "remote", "launch_id": "incomplete-launch",
+    }))
+    identity = {
+        "agent": "remote",
+        "pid": 999999,
+        "pgid": 999999,
+        "start_ticks": 1,
+        "launch_id": "incomplete-launch",
+    }
+    identity.pop(missing_field)
+    (run_dir / "process.json").write_text(json.dumps(identity))
+    (run_dir / "prompt.md").write_text("staged prompt")
+    try:
+        result = ssh_transport.remote_probe(payload)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert not result["ok"]
+    assert "unverifiable remote launch incomplete-launch" in "\n".join(result["errors"])
+
+
+@pytest.mark.parametrize("owner", [
+    [],
+    {},
+    {"agent": "remote"},
+    {"agent": "remote", "launch_id": "other-launch"},
+])
+def test_remote_probe_rejects_malformed_launch_owner(
+    tmp_path: Path, monkeypatch, owner,
+):
+    _session_dir, payload, server, thread = _probe_fixture(tmp_path, monkeypatch)
+    run_dir = Path(payload["runtime_root"]) / payload["session_id"] / "launch"
+    run_dir.mkdir(parents=True)
+    (run_dir / "owner.json").write_text(json.dumps(owner))
+    try:
+        result = ssh_transport.remote_probe(payload)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert not result["ok"]
+    assert "unverifiable remote launch launch" in "\n".join(result["errors"])
+
+
 def test_remote_run_uses_same_cli_and_cleans_staged_secrets(tmp_path: Path, monkeypatch):
     session_dir, payload, server, thread = _probe_fixture(tmp_path, monkeypatch)
     token = gateway.issue_capability(

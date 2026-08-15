@@ -260,37 +260,62 @@ def remote_probe(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             identity_path = run_dir / "process.json"
             owner_path = run_dir / "owner.json"
-            sensitive = [run_dir / "prompt.md", run_dir / "persona.md"]
-            owner: dict[str, Any] = {}
-            try:
-                owner = json.loads(owner_path.read_text())
-            except (FileNotFoundError, ValueError):
-                pass
-            if owner and owner.get("agent") != agent_name:
-                continue
+            staged_paths = [
+                owner_path,
+                run_dir / "prompt.md",
+                run_dir / "persona.md",
+                run_dir / "cursor-home",
+            ]
+            owner: dict[str, Any] | None = None
+            if owner_path.is_file():
+                try:
+                    raw_owner = json.loads(owner_path.read_text())
+                    if not isinstance(raw_owner, dict):
+                        raise ValueError("launch owner must be an object")
+                    if (
+                        not isinstance(raw_owner.get("agent"), str)
+                        or not raw_owner["agent"]
+                        or raw_owner.get("launch_id") != run_dir.name
+                    ):
+                        raise ValueError("launch owner is incomplete")
+                    owner = raw_owner
+                except (OSError, ValueError):
+                    errors.append(
+                        f"unverifiable remote launch {run_dir.name} requires "
+                        f"local recover-ssh --agent {agent_name}"
+                    )
+                    continue
+                if owner["agent"] != agent_name:
+                    continue
             if identity_path.is_file():
                 try:
                     identity = json.loads(identity_path.read_text())
-                    if not isinstance(identity, dict):
-                        raise ValueError("process identity must be an object")
-                    if identity.get("agent") == agent_name:
-                        pid = int(identity["pid"])
-                        live = (
-                            runtime.is_process_live(pid)
-                            and _proc_start_ticks(pid) == int(identity["start_ticks"])
-                            and os.getpgid(pid) == int(identity["pgid"])
-                        )
-                        state = "active" if live else "stale"
-                        errors.append(
-                            f"{state} remote launch {run_dir.name} requires "
-                            f"local recover-ssh --agent {agent_name}"
-                        )
+                    identity_agent = (
+                        identity.get("agent") if isinstance(identity, dict) else None
+                    )
+                    if owner is None and identity_agent not in {None, "", agent_name}:
+                        continue
+                    pid, expected_pgid, expected_start = _validated_process_identity(
+                        identity,
+                        expected_launch_id=run_dir.name,
+                        expected_agent=agent_name,
+                    )
+                    live = (
+                        runtime.is_process_live(pid)
+                        and _proc_start_ticks(pid) == expected_start
+                        and os.getpgid(pid) == expected_pgid
+                    )
+                    state = "active" if live else "stale"
+                    errors.append(
+                        f"{state} remote launch {run_dir.name} requires "
+                        f"local recover-ssh --agent {agent_name}"
+                    )
                 except (OSError, ValueError, KeyError, ProcessLookupError):
                     errors.append(
                         f"unverifiable remote launch {run_dir.name} requires "
                         f"local recover-ssh --agent {agent_name}"
                     )
-            elif any(path.exists() for path in sensitive):
+            elif any(path.exists() for path in staged_paths):
                 errors.append(
                     f"stale remote launch files in {run_dir.name} require "
                     f"local recover-ssh --agent {agent_name}"
@@ -373,6 +398,7 @@ def _validated_process_identity(
     identity: Any,
     *,
     expected_launch_id: str,
+    expected_agent: str | None = None,
 ) -> tuple[int, int, int]:
     if not isinstance(identity, dict):
         raise SshTransportError("remote process identity must be a JSON object")
@@ -380,6 +406,8 @@ def _validated_process_identity(
         raise SshTransportError("remote launch identity mismatch")
     if not isinstance(identity.get("agent"), str) or not identity["agent"]:
         raise SshTransportError("remote process identity is missing agent")
+    if expected_agent is not None and identity["agent"] != expected_agent:
+        raise SshTransportError("remote process identity agent mismatch")
     values: list[int] = []
     for field in ("pid", "pgid", "start_ticks"):
         raw = identity.get(field)

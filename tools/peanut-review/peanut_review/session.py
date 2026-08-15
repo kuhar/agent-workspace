@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import AgentConfig, AgentStatus, GitHubPR, Session, SshTarget, _now_iso
-from . import curator
+from . import curator, validation
 
 META_FILE = "__meta__"
 # Sentinel for "high-level / global" comments not tied to any file or line.
@@ -169,6 +169,18 @@ def create_session(
         session_dir = f"/tmp/peanut-review/{sid}"
     sdir = Path(session_dir)
 
+    # Validate the same SSH schema whether the session came from project
+    # configuration or the lower-level `init --ssh-targets` interface.
+    agent_configs = [AgentConfig.from_dict(a) for a in (agents or [])]
+    normalized_targets = validation.validate_ssh_targets(ssh_targets)
+    target_configs = {
+        name: SshTarget.from_dict(target)
+        for name, target in normalized_targets.items()
+    }
+    validation.validate_ssh_agent_references(agent_configs, target_configs)
+    if include_curator:
+        curator.ensure_curator_agent(agent_configs)
+
     # Create directory structure
     for subdir in ["comments", "notes", "signals", "prompts", "log"]:
         (sdir / subdir).mkdir(parents=True, exist_ok=True)
@@ -192,25 +204,6 @@ def create_session(
     head_sha = resolve_git_ref(repo, topic_ref)
     diff_range = f"{base_sha}...{head_sha}"
     diff_stat = _run_git(repo, "diff", "--stat", diff_range)
-
-    # Build agent configs
-    agent_configs = []
-    if agents:
-        for a in agents:
-            agent_configs.append(AgentConfig.from_dict(a))
-    target_configs = {
-        name: SshTarget.from_dict(target)
-        for name, target in (ssh_targets or {}).items()
-    }
-    for agent in agent_configs:
-        if agent.ssh_target and agent.ssh_target not in target_configs:
-            raise ValueError(
-                f"agent {agent.name} references unknown SSH target {agent.ssh_target!r}"
-            )
-        if agent.ssh_target and curator.is_curator(agent):
-            raise ValueError("curator agents cannot use an SSH target")
-    if include_curator:
-        curator.ensure_curator_agent(agent_configs)
 
     session = Session(
         id=sid,
@@ -247,6 +240,12 @@ def ensure_curator(session: Session) -> AgentConfig:
 
 def save_session(session_dir: str | Path, session: Session) -> None:
     """Write session.json atomically."""
+    validation.validate_ssh_targets({
+        name: target.to_dict() for name, target in session.ssh_targets.items()
+    })
+    validation.validate_ssh_agent_references(
+        session.agents, session.ssh_targets,
+    )
     sdir = Path(session_dir)
     tmp = sdir / "session.json.tmp"
     dst = sdir / "session.json"
@@ -257,7 +256,14 @@ def save_session(session_dir: str | Path, session: Session) -> None:
 def load_session(session_dir: str | Path) -> Session:
     """Load session.json from a session directory."""
     path = Path(session_dir) / "session.json"
-    return Session.from_json(path.read_text())
+    text = path.read_text()
+    raw = json.loads(text)
+    validation.validate_ssh_targets(raw.get("sshTargets"))
+    session = Session.from_json(text)
+    validation.validate_ssh_agent_references(
+        session.agents, session.ssh_targets,
+    )
+    return session
 
 
 @contextmanager

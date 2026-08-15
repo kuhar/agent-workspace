@@ -94,8 +94,17 @@ def test_remote_command_requires_configured_master_socket():
     assert "ProxyCommand=false" in command
     assert "ControlMaster=no" in command
     assert "ControlPersist=no" in command
+    assert command[-3] == "--"
     assert command[-2] == "reviewer@example"
     assert command[-1] == "'/opt/peanut review/bin/peanut-review' ssh-probe"
+
+
+def test_proc_start_ticks_allows_spaces_in_process_name(monkeypatch):
+    fields_after_name = ["S", *[str(field) for field in range(4, 23)]]
+    stat_text = f"123 (remote reviewer) {' '.join(fields_after_name)}\n"
+    monkeypatch.setattr(Path, "read_text", lambda _self: stat_text)
+
+    assert ssh_transport._proc_start_ticks(123) == 22
 
 
 def test_remote_probe_validates_checkout_build_runner_and_gateway(tmp_path: Path, monkeypatch):
@@ -209,6 +218,58 @@ def test_remote_run_uses_same_cli_and_cleans_staged_secrets(tmp_path: Path, monk
     assert not (run_dir / "process.json").exists()
 
 
+def test_remote_cursor_uses_launch_private_runtime(tmp_path: Path, monkeypatch):
+    session_dir, payload, server, thread = _probe_fixture(tmp_path, monkeypatch)
+    token = gateway.issue_capability(
+        session_dir, agent="remote", launch_id="cursor-run", ttl_seconds=300,
+    )
+    fake_wrapper = tmp_path / "capture cursor env.py"
+    fake_wrapper.write_text(
+        "#!" + sys.executable + "\n"
+        "import json, os, pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
+        "keys = ['HOME', 'CURSOR_CONFIG_DIR', 'CURSOR_DATA_DIR', "
+        "'XDG_CONFIG_HOME', 'PEANUT_CURSOR_HOME']\n"
+        "(out / 'cursor-env.json').write_text(json.dumps({k: os.environ[k] for k in keys}))\n"
+    )
+    fake_wrapper.chmod(0o755)
+    monkeypatch.setattr(
+        ssh_transport.launch, "_find_launcher_script", lambda _runner: str(fake_wrapper),
+    )
+    run_payload = {
+        **payload,
+        "launch_id": "cursor-run",
+        "runner": "cursor",
+        "model": "fake",
+        "reasoning_effort": "",
+        "fast_mode": False,
+        "timeout": 30,
+        "gateway_token": token,
+        "prompt": "prompt",
+        "persona": "persona",
+    }
+    original_home = os.environ.get("HOME", str(Path.home()))
+    expected_xdg = os.environ.get(
+        "XDG_CONFIG_HOME", str(Path(original_home) / ".config"),
+    )
+    try:
+        assert ssh_transport.remote_run(run_payload) == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    run_dir = Path(payload["runtime_root"]) / payload["session_id"] / "cursor-run"
+    captured = json.loads((run_dir / "log" / "cursor-env.json").read_text())
+    cursor_home = run_dir / "cursor-home"
+    assert captured["HOME"] == str(cursor_home)
+    assert captured["CURSOR_CONFIG_DIR"] == str(cursor_home / ".cursor")
+    assert captured["CURSOR_DATA_DIR"] == captured["CURSOR_CONFIG_DIR"]
+    assert captured["PEANUT_CURSOR_HOME"] == str(cursor_home)
+    assert captured["XDG_CONFIG_HOME"] == expected_xdg
+    assert not cursor_home.exists()
+
+
 def test_remote_stop_checks_process_start_identity(tmp_path: Path):
     runtime_root = tmp_path / "runtime"
     run_dir = runtime_root / "session" / "launch"
@@ -257,3 +318,64 @@ def test_remote_recover_removes_stale_sensitive_files(tmp_path: Path):
     assert result["ok"]
     assert set(result["recovered"][0]["removed"]) == {"prompt.md", "persona.md"}
     assert not (run_dir / "prompt.md").exists()
+
+
+def test_remote_recover_continues_across_partial_launch_metadata(tmp_path: Path):
+    session_root = tmp_path / "runtime" / "session"
+    first = session_root / "first"
+    second = session_root / "second"
+    first.mkdir(parents=True)
+    second.mkdir()
+    (first / "owner.json").write_text(json.dumps({
+        "agent": "remote", "launch_id": "first",
+    }))
+    (first / "process.json").write_text(json.dumps({
+        "agent": "remote", "launch_id": "first",
+    }))
+    (first / "prompt.md").write_text("first prompt")
+    (second / "owner.json").write_text(json.dumps({
+        "agent": "remote", "launch_id": "second",
+    }))
+    (second / "process.json").write_text("not json")
+    (second / "persona.md").write_text("second persona")
+
+    result = ssh_transport.remote_recover({
+        "runtime_root": str(tmp_path / "runtime"),
+        "session_id": "session",
+        "agent": "remote",
+    })
+
+    assert result["ok"]
+    assert [item["launch_id"] for item in result["recovered"]] == ["first", "second"]
+    assert not (first / "process.json").exists()
+    assert not (first / "prompt.md").exists()
+    assert not (second / "process.json").exists()
+    assert not (second / "persona.md").exists()
+
+
+def test_remote_recover_preserves_active_process_with_partial_identity(tmp_path: Path):
+    run_dir = tmp_path / "runtime" / "session" / "launch"
+    run_dir.mkdir(parents=True)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        (run_dir / "owner.json").write_text(json.dumps({
+            "agent": "remote", "launch_id": "launch",
+        }))
+        (run_dir / "process.json").write_text(json.dumps({
+            "agent": "remote", "launch_id": "launch", "pid": proc.pid,
+        }))
+        (run_dir / "prompt.md").write_text("still in use")
+
+        result = ssh_transport.remote_recover({
+            "runtime_root": str(tmp_path / "runtime"),
+            "session_id": "session",
+            "agent": "remote",
+        })
+
+        assert not result["ok"]
+        assert result["recovered"][0]["cleanup_required"]
+        assert (run_dir / "prompt.md").exists()
+        assert proc.poll() is None
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

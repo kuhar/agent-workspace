@@ -5,6 +5,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from peanut_review import validation
 from peanut_review.models import AgentConfig, Session
 from peanut_review.session import (
     create_session,
@@ -88,6 +91,62 @@ def test_session_round_trip_preserves_ssh_targets_and_agent_reference(mock_git, 
     raw = json.loads((session_dir / "session.json").read_text())
     assert raw["agents"][0]["sshTarget"] == "docs-host"
     assert raw["sshTargets"]["docs-host"]["controlPath"] == "/tmp/review.sock"
+
+
+@pytest.mark.parametrize("field, value, expected", [
+    ("host", "-V", "without leading options"),
+    ("controlPath", "relative.sock", "absolute local POSIX path"),
+    ("gatewayUrl", "http://example.com:27184", "IPv4 loopback"),
+])
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_create_session_validates_direct_ssh_targets(
+    mock_git, tmp_path, field, value, expected,
+):
+    target = {
+        "host": "reviewer@host",
+        "controlPath": "/tmp/review.sock",
+        "gatewayUrl": "http://127.0.0.1:27184",
+        "workspaceRoot": "/srv/project",
+        "repoRelative": "source",
+        "buildRoots": ["/srv/project/build"],
+    }
+    target[field] = value
+    with pytest.raises(validation.ValidationError, match=expected):
+        create_session(
+            workspace="/tmp/repo",
+            agents=[{
+                "name": "remote", "model": "gpt", "persona": "remote.md",
+                "runner": "codex", "sshTarget": "docs-host",
+            }],
+            ssh_targets={"docs-host": target},
+            session_dir=str(tmp_path / "session"),
+        )
+    assert not (tmp_path / "session").exists()
+
+
+@patch("peanut_review.session._run_git", side_effect=_mock_git)
+def test_load_session_revalidates_persisted_ssh_targets(mock_git, tmp_path):
+    session_dir = tmp_path / "session"
+    create_session(
+        workspace="/tmp/repo",
+        ssh_targets={
+            "docs-host": {
+                "host": "reviewer@host",
+                "controlPath": "/tmp/review.sock",
+                "gatewayUrl": "http://127.0.0.1:27184",
+                "workspaceRoot": "/srv/project",
+                "repoRelative": "source",
+                "buildRoots": ["/srv/project/build"],
+            },
+        },
+        session_dir=str(session_dir),
+    )
+    raw = json.loads((session_dir / "session.json").read_text())
+    raw["sshTargets"]["docs-host"]["host"] = "-V"
+    (session_dir / "session.json").write_text(json.dumps(raw))
+
+    with pytest.raises(validation.ValidationError, match="without leading options"):
+        load_session(session_dir)
 
 
 @patch("peanut_review.session._run_git", side_effect=_mock_git)

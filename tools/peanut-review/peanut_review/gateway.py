@@ -464,8 +464,8 @@ class _GatewayHandler(BaseHTTPRequestHandler):
 
 def serve(roots: list[str | Path], host: str = "127.0.0.1", port: int = 0) -> None:
     """Run a foreground reviewer gateway."""
-    if host not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("reviewer gateway must bind to loopback")
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("reviewer gateway must bind to IPv4 loopback")
     resolved_roots = [Path(root).resolve() for root in roots]
     for root in resolved_roots:
         root.mkdir(parents=True, exist_ok=True)

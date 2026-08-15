@@ -60,6 +60,7 @@ def _remote_command(target: SshTarget, command: str) -> list[str]:
         "-o", "ProxyCommand=false",
         "-o", "RequestTTY=no",
         "-T", "-a", "-x",
+        "--",
         target.host,
         command,
     ]
@@ -91,7 +92,7 @@ def check_control_master(target: SshTarget, timeout: float = 5.0) -> None:
     command = [
         "ssh", "-S", target.control_path,
         "-o", "BatchMode=yes",
-        "-O", "check", target.host,
+        "-O", "check", "--", target.host,
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
@@ -270,6 +271,8 @@ def remote_probe(payload: dict[str, Any]) -> dict[str, Any]:
             if identity_path.is_file():
                 try:
                     identity = json.loads(identity_path.read_text())
+                    if not isinstance(identity, dict):
+                        raise ValueError("process identity must be an object")
                     if identity.get("agent") == agent_name:
                         pid = int(identity["pid"])
                         live = (
@@ -357,8 +360,51 @@ def remote_probe(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _proc_start_ticks(pid: int) -> int:
-    fields = (Path("/proc") / str(pid) / "stat").read_text().split()
-    return int(fields[21])
+    stat_text = (Path("/proc") / str(pid) / "stat").read_text()
+    try:
+        fields_after_comm = stat_text.rsplit(")", 1)[1].split()
+        # Field 3 (`state`) is index zero here; starttime is field 22.
+        return int(fields_after_comm[19])
+    except (IndexError, ValueError) as exc:
+        raise SshTransportError(f"could not parse process identity for PID {pid}") from exc
+
+
+def _validated_process_identity(
+    identity: Any,
+    *,
+    expected_launch_id: str,
+) -> tuple[int, int, int]:
+    if not isinstance(identity, dict):
+        raise SshTransportError("remote process identity must be a JSON object")
+    if identity.get("launch_id") != expected_launch_id:
+        raise SshTransportError("remote launch identity mismatch")
+    if not isinstance(identity.get("agent"), str) or not identity["agent"]:
+        raise SshTransportError("remote process identity is missing agent")
+    values: list[int] = []
+    for field in ("pid", "pgid", "start_ticks"):
+        raw = identity.get(field)
+        if isinstance(raw, bool):
+            raise SshTransportError(f"remote process identity has invalid {field}")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise SshTransportError(
+                f"remote process identity is missing or has invalid {field}"
+            ) from exc
+        if value <= 0:
+            raise SshTransportError(f"remote process identity has invalid {field}")
+        values.append(value)
+    return values[0], values[1], values[2]
+
+
+def _identity_pid(identity: Any) -> int | None:
+    if not isinstance(identity, dict) or isinstance(identity.get("pid"), bool):
+        return None
+    try:
+        pid = int(identity.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
 
 
 def _write_private_json(path: Path, value: dict[str, Any]) -> None:
@@ -403,6 +449,21 @@ def _remote_wrapper_command(payload: dict[str, Any], run_dir: Path) -> list[str]
     return command
 
 
+def _scrub_remote_launch(run_dir: Path) -> list[str]:
+    removed: list[str] = []
+    for name in ("process.json", "owner.json", "prompt.md", "persona.md"):
+        try:
+            (run_dir / name).unlink()
+            removed.append(name)
+        except FileNotFoundError:
+            pass
+    cursor_home = run_dir / "cursor-home"
+    if cursor_home.exists():
+        shutil.rmtree(cursor_home)
+        removed.append("cursor-home")
+    return removed
+
+
 def remote_run(payload: dict[str, Any]) -> int:
     """Run one reviewer remotely and guarantee group cleanup on termination."""
     run_dir = _remote_run_dir(payload)
@@ -431,14 +492,15 @@ def remote_run(payload: dict[str, Any]) -> int:
         "PEANUT_REVIEW_GATEWAY_URL": str(payload["gateway_url"]),
         "PEANUT_REVIEW_GATEWAY_TOKEN": str(payload["gateway_token"]),
     })
+    if payload["runner"] == "cursor":
+        cursor_home = run_dir / "cursor-home"
+        (cursor_home / ".cursor").mkdir(parents=True, mode=0o700)
+        cursor_home.chmod(0o700)
+        launch._apply_cursor_env(env, {"cursor_home": str(cursor_home)})
     try:
         command = _remote_wrapper_command(payload, run_dir)
     except Exception:
-        for path in (owner_path, prompt_path, persona_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _scrub_remote_launch(run_dir)
         raise
     proc: subprocess.Popen | None = None
 
@@ -503,11 +565,7 @@ def remote_run(payload: dict[str, Any]) -> int:
                 except ProcessLookupError:
                     pass
                 proc.wait()
-        for path in (run_dir / "process.json", owner_path, prompt_path, persona_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _scrub_remote_launch(run_dir)
 
 
 def remote_stop(payload: dict[str, Any]) -> dict[str, Any]:
@@ -517,15 +575,18 @@ def remote_stop(payload: dict[str, Any]) -> dict[str, Any]:
         identity = json.loads(identity_path.read_text())
     except FileNotFoundError:
         return {"ok": True, "stopped": False, "reason": "not running"}
-    pid = int(identity["pid"])
-    if identity.get("launch_id") != payload.get("launch_id"):
-        raise SshTransportError("remote launch identity mismatch")
+    except ValueError as exc:
+        raise SshTransportError("remote process identity is not valid JSON") from exc
+    pid, expected_pgid, expected_start = _validated_process_identity(
+        identity,
+        expected_launch_id=str(payload.get("launch_id", "")),
+    )
     try:
         current_start = _proc_start_ticks(pid)
         current_pgid = os.getpgid(pid)
     except (FileNotFoundError, ProcessLookupError):
         return {"ok": True, "stopped": False, "reason": "not running"}
-    if current_start != int(identity["start_ticks"]) or current_pgid != int(identity["pgid"]):
+    if current_start != expected_start or current_pgid != expected_pgid:
         raise SshTransportError("remote process identity changed; refusing to signal")
     os.killpg(current_pgid, signal.SIGTERM)
     deadline = time.monotonic() + float(payload.get("grace_seconds", 5))
@@ -534,7 +595,7 @@ def remote_stop(payload: dict[str, Any]) -> dict[str, Any]:
             return {"ok": True, "stopped": True, "signal": "SIGTERM"}
         time.sleep(0.05)
     try:
-        if _proc_start_ticks(pid) != int(identity["start_ticks"]):
+        if _proc_start_ticks(pid) != expected_start:
             raise SshTransportError("remote process identity changed before SIGKILL")
         os.killpg(current_pgid, signal.SIGKILL)
     except (FileNotFoundError, ProcessLookupError):
@@ -548,6 +609,7 @@ def remote_recover(payload: dict[str, Any]) -> dict[str, Any]:
     agent_name = str(payload["agent"])
     session_runtime = runtime_root / session_id
     recovered: list[dict[str, Any]] = []
+    errors: list[str] = []
     if not session_runtime.is_dir():
         return {"ok": True, "recovered": recovered}
     for run_dir in sorted(session_runtime.iterdir()):
@@ -556,39 +618,62 @@ def remote_recover(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         owner: dict[str, Any] = {}
         try:
-            owner = json.loads((run_dir / "owner.json").read_text())
+            raw_owner = json.loads((run_dir / "owner.json").read_text())
+            if isinstance(raw_owner, dict):
+                owner = raw_owner
         except (FileNotFoundError, ValueError):
             pass
         if owner and owner.get("agent") != agent_name:
             continue
-        identity: dict[str, Any] = {}
+        identity_present = identity_path.exists()
+        identity: Any = None
         try:
             identity = json.loads(identity_path.read_text())
         except (FileNotFoundError, ValueError):
             pass
-        if identity and identity.get("agent") != agent_name:
+        if isinstance(identity, dict) and identity.get("agent") not in {None, agent_name}:
             continue
-        sensitive_paths = [run_dir / "prompt.md", run_dir / "persona.md"]
-        if not identity and not any(path.exists() for path in sensitive_paths):
+        sensitive_paths = [
+            run_dir / "prompt.md",
+            run_dir / "persona.md",
+            run_dir / "cursor-home",
+        ]
+        if not identity_present and not any(path.exists() for path in sensitive_paths):
             continue
-        if identity:
-            result = remote_stop({
-                "runtime_root": str(runtime_root),
-                "session_id": session_id,
-                "launch_id": run_dir.name,
-                "grace_seconds": payload.get("grace_seconds", 3),
-            })
+        if identity is not None:
+            try:
+                result = remote_stop({
+                    "runtime_root": str(runtime_root),
+                    "session_id": session_id,
+                    "launch_id": run_dir.name,
+                    "grace_seconds": payload.get("grace_seconds", 3),
+                })
+            except SshTransportError as exc:
+                pid = _identity_pid(identity)
+                if pid is not None and runtime.is_process_live(pid):
+                    message = (
+                        f"remote launch {run_dir.name} has an active process but "
+                        f"unverifiable identity: {exc}"
+                    )
+                    errors.append(message)
+                    recovered.append({
+                        "launch_id": run_dir.name,
+                        "removed": [],
+                        "ok": False,
+                        "cleanup_required": True,
+                        "error": str(exc),
+                    })
+                    continue
+                result = {
+                    "ok": True,
+                    "stopped": False,
+                    "reason": "scrubbed stale incomplete identity",
+                }
         else:
             result = {"ok": True, "stopped": False, "reason": "no identity"}
-        removed: list[str] = []
-        for name in ("process.json", "owner.json", "prompt.md", "persona.md"):
-            try:
-                (run_dir / name).unlink()
-                removed.append(name)
-            except FileNotFoundError:
-                pass
+        removed = _scrub_remote_launch(run_dir)
         recovered.append({"launch_id": run_dir.name, "removed": removed, **result})
-    return {"ok": True, "recovered": recovered}
+    return {"ok": not errors, "recovered": recovered, "errors": errors}
 
 
 def recover_agent(

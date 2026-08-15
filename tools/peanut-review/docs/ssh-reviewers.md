@@ -162,7 +162,8 @@ Target fields:
 
 - `host`: the exact OpenSSH destination used by the master.
 - `controlPath`: absolute local path to the existing master socket.
-- `gatewayUrl`: remote-loopback HTTP URL for the reverse forward.
+- `gatewayUrl`: remote IPv4-loopback HTTP URL for the reverse forward
+  (`127.0.0.1` or `localhost`, with an explicit port).
 - `workspaceRoot`: absolute remote runner/build/tool root.
 - `repoRelative`: repository path below that workspace, or `.`.
 - `buildRoots`: one or more absolute remote build directories.

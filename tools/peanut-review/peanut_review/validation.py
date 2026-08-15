@@ -137,10 +137,16 @@ def _validate_agent_configs(
     return agents
 
 
-def _absolute_posix_path(value: Any, label: str, errors: list[str]) -> str:
+def _absolute_posix_path(
+    value: Any,
+    label: str,
+    errors: list[str],
+    *,
+    location: str = "remote",
+) -> str:
     path = _as_non_empty_string(value, label, errors)
     if path and not path.startswith("/"):
-        errors.append(f"{label} must be an absolute remote POSIX path")
+        errors.append(f"{label} must be an absolute {location} POSIX path")
     return path
 
 
@@ -162,8 +168,14 @@ def _validate_ssh_targets(raw_targets: Any, errors: list[str]) -> dict[str, dict
             continue
 
         host = _as_non_empty_string(target.get("host"), f"{label}.host", errors)
+        if host and (host.startswith("-") or any(ch.isspace() for ch in host)):
+            errors.append(
+                f"{label}.host must be an SSH destination without leading options "
+                "or whitespace"
+            )
         control_path = _absolute_posix_path(
-            target.get("controlPath"), f"{label}.controlPath", errors
+            target.get("controlPath"), f"{label}.controlPath", errors,
+            location="local",
         )
         gateway_url = _as_non_empty_string(
             target.get("gatewayUrl"), f"{label}.gatewayUrl", errors
@@ -176,7 +188,7 @@ def _validate_ssh_targets(raw_targets: Any, errors: list[str]) -> dict[str, dict
                 gateway_port = None
             if (
                 parsed_gateway.scheme != "http"
-                or parsed_gateway.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or parsed_gateway.hostname not in {"127.0.0.1", "localhost"}
                 or gateway_port is None
                 or parsed_gateway.username is not None
                 or parsed_gateway.password is not None
@@ -184,7 +196,10 @@ def _validate_ssh_targets(raw_targets: Any, errors: list[str]) -> dict[str, dict
                 or parsed_gateway.fragment
                 or parsed_gateway.path not in {"", "/"}
             ):
-                errors.append(f"{label}.gatewayUrl must use remote loopback HTTP with a port")
+                errors.append(
+                    f"{label}.gatewayUrl must use remote IPv4 loopback HTTP "
+                    "with a port"
+                )
         workspace_root = _absolute_posix_path(
             target.get("workspaceRoot"), f"{label}.workspaceRoot", errors
         )
@@ -226,6 +241,38 @@ def _validate_ssh_targets(raw_targets: Any, errors: list[str]) -> dict[str, dict
             runtime_root=runtime_root,
         ).to_dict()
     return normalized
+
+
+def validate_ssh_targets(raw_targets: Any) -> dict[str, dict]:
+    """Validate and normalize SSH targets at any session entry point."""
+    errors: list[str] = []
+    normalized = _validate_ssh_targets(raw_targets, errors)
+    if errors:
+        raise ValidationError(_format_errors("SSH target validation failed", errors))
+    return normalized
+
+
+def validate_ssh_agent_references(
+    agents: Iterable[AgentConfig],
+    target_names: Iterable[str],
+) -> None:
+    """Ensure persisted agent-to-target links are complete and safe."""
+    available = set(target_names)
+    errors: list[str] = []
+    for agent in agents:
+        if not agent.ssh_target:
+            continue
+        if agent.ssh_target not in available:
+            errors.append(
+                f"agent {agent.name} references unknown SSH target "
+                f"{agent.ssh_target!r}"
+            )
+        if agent.role == AgentRole.CURATOR.value:
+            errors.append(f"curator agent {agent.name} cannot use an SSH target")
+    if errors:
+        raise ValidationError(
+            _format_errors("Session SSH configuration validation failed", errors)
+        )
 
 
 def validate_project_config(

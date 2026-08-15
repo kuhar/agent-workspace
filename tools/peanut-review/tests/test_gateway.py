@@ -292,6 +292,16 @@ def test_gateway_bounds_and_unavailable_errors(live_gateway):
         client.request("GET", "hello")
 
 
-def test_gateway_refuses_non_loopback_listener(tmp_path: Path):
+@pytest.mark.parametrize("host", ["0.0.0.0", "::1"])
+def test_gateway_refuses_unsupported_listener(tmp_path: Path, host: str):
     with pytest.raises(ValueError, match="loopback"):
-        gateway.serve([tmp_path], host="0.0.0.0", port=0)
+        gateway.serve([tmp_path], host=host, port=0)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_gateway_binds_every_accepted_loopback_form(tmp_path: Path, host: str):
+    server = gateway._GatewayServer((host, 0), [tmp_path.resolve()])
+    try:
+        assert server.server_port > 0
+    finally:
+        server.server_close()

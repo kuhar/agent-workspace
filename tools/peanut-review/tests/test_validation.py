@@ -263,9 +263,12 @@ def test_validate_project_config_normalizes_ssh_targets(tmp_path: Path):
 @pytest.mark.parametrize("mutation, expected", [
     (("agent", "missing"), "references unknown target"),
     (("curator", "docs-host"), "not supported for curator"),
-    (("gateway", "http://example.com:1234"), "remote loopback"),
-    (("gateway", "http://127.0.0.1:80@outside.example"), "remote loopback"),
-    (("control", "relative.sock"), "absolute remote POSIX path"),
+    (("gateway", "http://example.com:1234"), "IPv4 loopback"),
+    (("gateway", "http://127.0.0.1:80@outside.example"), "IPv4 loopback"),
+    (("gateway", "http://[::1]:27184"), "IPv4 loopback"),
+    (("control", "relative.sock"), "absolute local POSIX path"),
+    (("host", "-V"), "without leading options"),
+    (("host", "reviewer@host name"), "without leading options"),
     (("repo", "../source"), "stay under workspaceRoot"),
     (("build", []), "non-empty array"),
 ])
@@ -296,6 +299,8 @@ def test_validate_project_config_rejects_invalid_ssh_target(
         target["gatewayUrl"] = value
     elif kind == "control":
         target["controlPath"] = value
+    elif kind == "host":
+        target["host"] = value
     elif kind == "repo":
         target["repoRelative"] = value
     elif kind == "build":

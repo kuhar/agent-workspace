@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import (
@@ -16,22 +17,38 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
-# Gateway-backed reviewers can issue concurrent requests for the same author,
-# so append operations use an advisory lock in addition to O_APPEND.
+# Gateway-backed reviewers can issue concurrent requests for the same author.
+# Use a stable sibling lock rather than locking the JSONL inode: atomic rewrites
+# replace that inode, so an inode lock cannot serialize appends with mutations.
 _PIPE_BUF = 4096
 
 
-def _locked_append(path: Path, line: str) -> None:
+def _lock_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.lock")
+
+
+@contextmanager
+def _store_lock(path: Path, *, exclusive: bool):
     import fcntl
 
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(_lock_path(path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, line.encode())
-        os.fsync(fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def _locked_append(path: Path, line: str) -> None:
+    with _store_lock(path, exclusive=True):
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line.encode())
+            os.fsync(fd)
         finally:
             os.close(fd)
 
@@ -206,12 +223,13 @@ def _mutate_comment(
     """
     cdir = _comments_dir(session_dir)
     for f in cdir.glob("*.jsonl"):
-        comments = _read_jsonl(f)
-        for c in comments:
-            if c.id == comment_id:
-                mutator(c)
-                _write_jsonl(f, comments)
-                return True
+        with _store_lock(f, exclusive=True):
+            comments = _read_jsonl_unlocked(f)
+            for c in comments:
+                if c.id == comment_id:
+                    mutator(c)
+                    _write_jsonl_unlocked(f, comments)
+                    return True
     return False
 
 
@@ -363,62 +381,68 @@ def mark_stale(session_dir: str | Path) -> int:
     cdir = _comments_dir(session_dir)
     count = 0
     for f in cdir.glob("*.jsonl"):
-        comments = _read_jsonl(f)
-        changed = False
-        for c in comments:
-            if not c.resolved and not c.stale and not c.deleted:
-                c.stale = True
-                changed = True
-                count += 1
-        if changed:
-            _write_jsonl(f, comments)
+        with _store_lock(f, exclusive=True):
+            comments = _read_jsonl_unlocked(f)
+            changed = False
+            for c in comments:
+                if not c.resolved and not c.stale and not c.deleted:
+                    c.stale = True
+                    changed = True
+                    count += 1
+            if changed:
+                _write_jsonl_unlocked(f, comments)
     return count
 
 
 def _read_jsonl(path: Path) -> list[Comment]:
     """Read a JSONL file, skipping unparseable lines with a warning."""
-    import fcntl
+    with _store_lock(path, exclusive=False):
+        return _read_jsonl_unlocked(path)
 
+
+def _read_jsonl_unlocked(path: Path) -> list[Comment]:
     comments: list[Comment] = []
-    with open(path) as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-        try:
-            for lineno, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    comments.append(Comment.from_json(line))
-                except (json.JSONDecodeError, TypeError) as e:
-                    log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    try:
+        source = open(path)
+    except FileNotFoundError:
+        return comments
+    with source:
+        for lineno, line in enumerate(source, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                comments.append(Comment.from_json(line))
+            except (json.JSONDecodeError, TypeError) as e:
+                log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
     return comments
 
 
 def _read_note_jsonl(path: Path) -> list[Note]:
     """Read a note JSONL file, skipping unparseable lines with a warning."""
-    import fcntl
+    with _store_lock(path, exclusive=False):
+        return _read_note_jsonl_unlocked(path)
 
+
+def _read_note_jsonl_unlocked(path: Path) -> list[Note]:
     notes: list[Note] = []
-    with open(path) as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-        try:
-            for lineno, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    notes.append(Note.from_json(line))
-                except (json.JSONDecodeError, TypeError) as e:
-                    log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    try:
+        source = open(path)
+    except FileNotFoundError:
+        return notes
+    with source:
+        for lineno, line in enumerate(source, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                notes.append(Note.from_json(line))
+            except (json.JSONDecodeError, TypeError) as e:
+                log.warning("Skipping corrupt line %d in %s: %s", lineno, path, e)
     return notes
 
 
-def _write_jsonl(path: Path, comments: list[Comment]) -> None:
-    """Rewrite a JSONL file atomically."""
+def _write_jsonl_unlocked(path: Path, comments: list[Comment]) -> None:
     tmp = path.with_suffix(".jsonl.tmp")
     with open(tmp, "w") as f:
         for c in comments:

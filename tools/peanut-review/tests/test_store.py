@@ -1,8 +1,10 @@
 """Tests for the JSONL comment store."""
 import json
 import tempfile
+import threading
 from pathlib import Path
 
+from peanut_review import store as store_module
 from peanut_review.models import Comment, Note
 from peanut_review.store import (
     append_comment,
@@ -125,6 +127,45 @@ def test_resolve_comment():
     assert comments[0].resolved is True
     assert comments[0].resolved_by == "jakub"
     assert comments[0].resolved_at is not None
+
+
+def test_append_waits_for_atomic_comment_rewrite(monkeypatch):
+    sd = _make_session()
+    original = Comment(author="vera", file="a.py", line=1, body="original")
+    appended = Comment(author="vera", file="b.py", line=2, body="appended")
+    append_comment(sd, original)
+
+    rewrite_started = threading.Event()
+    allow_rewrite = threading.Event()
+    append_finished = threading.Event()
+    write_unlocked = store_module._write_jsonl_unlocked
+
+    def paused_write(path, comments):
+        rewrite_started.set()
+        assert allow_rewrite.wait(timeout=2)
+        write_unlocked(path, comments)
+
+    monkeypatch.setattr(store_module, "_write_jsonl_unlocked", paused_write)
+    rewrite_thread = threading.Thread(
+        target=resolve_comment, args=(sd, original.id), daemon=True,
+    )
+    rewrite_thread.start()
+    assert rewrite_started.wait(timeout=2)
+
+    def append_during_rewrite():
+        append_comment(sd, appended)
+        append_finished.set()
+
+    append_thread = threading.Thread(target=append_during_rewrite, daemon=True)
+    append_thread.start()
+    assert not append_finished.wait(timeout=0.1)
+    allow_rewrite.set()
+    rewrite_thread.join(timeout=2)
+    append_thread.join(timeout=2)
+
+    comments = read_agent_comments(sd, "vera")
+    assert [comment.id for comment in comments] == [original.id, appended.id]
+    assert comments[0].resolved
 
 
 def test_resolve_nonexistent():

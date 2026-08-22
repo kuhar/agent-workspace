@@ -233,11 +233,15 @@ def pull_comments(
     review_threads = gh.fetch_review_thread_resolutions(ghpr.repo, ghpr.number)
     resolution_by_ext = _thread_resolution_by_comment_id(review_threads)
 
-    local_by_ext: dict[str, models.Comment] = {
-        _external_key(c.external_source, c.external_id): c
-        for c in store.read_all_comments(session_dir)
-        if c.external_id and c.external_source in {"github", "github-review"}
-    }
+    local_by_ext: dict[str, models.Comment] = {}
+    for c in store.read_all_comments(session_dir):
+        if c.external_id and c.external_source in {"github", "github-review"}:
+            # One GitHub review body can represent several local global
+            # comments. Keep the earliest component as the stable pull target
+            # instead of replacing it with each later member of the group.
+            local_by_ext.setdefault(
+                _external_key(c.external_source, c.external_id), c,
+            )
 
     result = PullResult()
     new_root_ext_ids: set[str] = set()

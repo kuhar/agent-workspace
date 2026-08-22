@@ -984,8 +984,8 @@ def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     assert cs["anchored"].external_id == "100"
     assert cs["anchored"].external_url == "https://h/c/100"
     assert cs["anchored"].external_synced_body == "anchored"
-    assert cs["global"].deleted is True
-    assert cs["global"].deleted_by == "github-push"
+    assert cs["global"].deleted is False
+    assert cs["global"].deleted_by is None
     assert cs["global"].external_source == "github-review"
     assert cs["global"].external_id == "300"
     assert cs["global"].external_url == "https://h/r/300"
@@ -1013,7 +1013,7 @@ def test_gh_push_anchored_and_global(gh_shim, tmp_path):
     )
 
 
-def test_gh_push_concats_global_comments_and_deletes_individuals(gh_shim, tmp_path):
+def test_gh_push_concats_global_comments_and_preserves_individuals(gh_shim, tmp_path):
     sd = _make_gh_session(tmp_path)
     store.append_comment(sd, models.Comment(
         author="vera", file="", line=0, body="first overall",
@@ -1035,8 +1035,38 @@ def test_gh_push_concats_global_comments_and_deletes_individuals(gh_shim, tmp_pa
     }
 
     comments = store.read_all_comments(sd)
-    assert [c.deleted for c in comments] == [True, True]
+    assert [c.deleted for c in comments] == [False, False]
+    assert [c.external_source for c in comments] == [
+        "github-review", "github-review",
+    ]
+    assert [c.external_id for c in comments] == ["300", "300"]
+    assert [c.external_synced_body for c in comments] == [
+        payload["body"], payload["body"],
+    ]
+    assert len(store.filter_comments(comments)) == 2
     assert gh_push.plan_push(comments).total == 0
+
+    # Pulling the aggregate review back must not replace either local
+    # component with the combined body or import a third global comment.
+    gh_shim.set_fixtures([
+        {"match": ["api", "repos/acme/foo/pulls/42/comments"], "stdout": "[]"},
+        {"match": ["api", "repos/acme/foo/issues/42/comments"], "stdout": "[]"},
+        {
+            "match": ["api", "repos/acme/foo/pulls/42/reviews"],
+            "stdout": json.dumps([{
+                "id": 300,
+                "user": {"login": "jakub"},
+                "body": payload["body"],
+                "state": "COMMENTED",
+                "html_url": "https://h/r/300",
+                "submitted_at": "2026-08-22T18:00:00Z",
+            }]),
+        },
+    ])
+    assert main(["--session", sd, "gh-pull"]) == 0
+    comments = store.read_all_comments(sd)
+    assert [c.body for c in comments] == ["first overall", "second overall"]
+    assert [c.external_id for c in comments] == ["300", "300"]
 
 
 def test_gh_push_promotes_unreviewable_anchor_to_global(gh_shim, tmp_path):
@@ -1062,8 +1092,8 @@ def test_gh_push_promotes_unreviewable_anchor_to_global(gh_shim, tmp_path):
     }
 
     [stored] = store.read_all_comments(sd)
-    assert stored.deleted is True
-    assert stored.deleted_by == "github-push"
+    assert stored.deleted is False
+    assert stored.deleted_by is None
     assert stored.external_source == "github-review"
     assert stored.external_id == "300"
     assert stored.external_synced_body == payload["body"]
@@ -1093,8 +1123,8 @@ def test_gh_push_global_approval_posts_pr_review(gh_shim, tmp_path):
     [stored] = store.read_all_comments(sd)
     assert stored.external_source == "github-review"
     assert stored.external_id == "300"
-    assert stored.deleted is True
-    assert stored.deleted_by == "github-push"
+    assert stored.deleted is False
+    assert stored.deleted_by is None
 
 
 def test_gh_push_global_request_changes_posts_blocking_review(gh_shim, tmp_path):

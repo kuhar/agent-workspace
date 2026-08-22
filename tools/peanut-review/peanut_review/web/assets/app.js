@@ -524,9 +524,8 @@
       if (isRange) payload.end_line = hi;
       try {
         const c = await api("POST", "/api/comments", payload);
-        const rendered = document.createElement("div");
-        rendered.innerHTML = renderThread(c);
-        thread.insertBefore(rendered.firstElementChild, form);
+        insertFetchedComment(c);
+        knownCommentIds.add(c.id);
         cleanup();
         form.remove();
       } catch (e) {
@@ -558,9 +557,8 @@
       try {
         const c = await api("POST", "/api/comments",
                             { reply_to: parentId, body });
-        const rendered = document.createElement("div");
-        rendered.innerHTML = renderComment(c, { isReply: true });
-        threadEl.insertBefore(rendered.firstElementChild, form);
+        insertFetchedComment(c);
+        knownCommentIds.add(c.id);
         form.remove();
       } catch (e) {
         alert("Reply failed: " + e.message);
@@ -728,9 +726,8 @@
       try {
         const c = await api("POST", "/api/comments",
                             { scope: "global", body, severity, category });
-        const rendered = document.createElement("div");
-        rendered.innerHTML = renderThread(c);
-        container.insertBefore(rendered.firstElementChild, form);
+        insertFetchedComment(c);
+        knownCommentIds.add(c.id);
         form.remove();
       } catch (e) {
         alert("Post failed: " + e.message);
@@ -1331,6 +1328,12 @@
   }
 
   function insertFetchedComment(c) {
+    // A local POST and the background poll can observe the same new comment
+    // in either order. Keep insertion idempotent so that race cannot create a
+    // second DOM copy of one stored record.
+    if (!c?.id || document.querySelector(
+      `.comment[data-cid="${cssEsc(c.id)}"]`,
+    )) return;
     if (c.reply_to) {
       const threadEl = findThreadEl(c.reply_to);
       if (threadEl) insertReplyIntoThread(threadEl, c);

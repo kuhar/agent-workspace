@@ -777,19 +777,19 @@ def execute_push(
                     result.failed += len(inline_top)
 
             failed_new_ids = {i.id for i in result.items if i.error}
-            stamped_review_summary = False
             for c in plan.new_top:
                 if c.file == sess.GLOBAL_FILE:
-                    if not stamped_review_summary:
-                        store.update_comment_external(
-                            session_dir, c.id,
-                            external_source="github-review",
-                            external_id=review_id,
-                            external_url=review_url,
-                            external_synced_body=review_body,
-                        )
-                        stamped_review_summary = True
-                    store.delete_comment(session_dir, c.id, deleted_by="github-push")
+                    # GitHub folds every selected global comment into one
+                    # review body. Stamp each local component with that review
+                    # identity so it is not offered again, but keep the local
+                    # records visible in peanut-review.
+                    store.update_comment_external(
+                        session_dir, c.id,
+                        external_source="github-review",
+                        external_id=review_id,
+                        external_url=review_url,
+                        external_synced_body=review_body,
+                    )
                     result.items.append(PushItemResult(
                         id=c.id, action="new",
                         external_id=review_id, external_url=review_url,

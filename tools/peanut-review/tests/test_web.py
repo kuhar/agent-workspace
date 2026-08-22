@@ -2344,6 +2344,20 @@ def test_client_polling_is_single_flight_and_visibility_aware():
     assert "knownCommentIds.has(c.id)" in text
 
 
+def test_client_comment_insertion_deduplicates_post_poll_races():
+    text = (Path(web_app.__file__).parent / "assets" / "app.js").read_text()
+    start = text.index("  function insertFetchedComment(c)")
+    end = text.index("  function pickScrollAnchor()", start)
+    block = text[start:end]
+
+    assert 'document.querySelector(' in block
+    assert '.comment[data-cid="${cssEsc(c.id)}"]' in block
+    # Anchored, reply, and global POST handlers all share the guarded insert
+    # and advance the client-side known-ID set.
+    assert text.count("knownCommentIds.add(c.id)") == 3
+    assert text.count("insertFetchedComment(c);") == 4
+
+
 def test_server_edit_endpoint_updates_body_and_history(session_dir: Path):
     c = Comment(author="vera", file="foo.py", line=1, body="v1", severity="nit")
     store.append_comment(session_dir, c)

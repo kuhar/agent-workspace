@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: review-pr.sh [--no-build] [--no-pytest] [--no-launch] <pr-number|github-pr-url|owner/repo#number>
+       review-pr.sh queue <protocol|prepare|run|cleanup> [args...]
 
 Checks the PR into the selected review workspace's rocm-systems checkout,
 updates the existing PR checkout if it is already present, creates/reuses the
@@ -21,6 +22,7 @@ Environment overrides:
   VENV_DIR            default: $REVIEW_PARENT/venv
   CMAKE_PRESETS       default: default gcc-13 clang-23-asan-ubsan clang-23-tsan
   CMAKE_PRESET        legacy single-preset override
+  CMAKE_CONFIGURE_ARGS optional whitespace-separated extra CMake arguments
   CMAKE_BUILD_TARGET  default: all
   PYTEST_WORKDIR      default: $ROCJITSU_SOURCE/lib/python
   PYTEST_ARGS         default: amdisa/tests/ -x
@@ -39,44 +41,53 @@ NO_LAUNCH=0
 NO_BUILD=0
 NO_PYTEST=0
 PR_SPEC=""
-while (($#)); do
-  case "$1" in
-    --no-build)
-      NO_BUILD=1
-      shift
-      ;;
-    --no-pytest)
-      NO_PYTEST=1
-      shift
-      ;;
-    --no-launch)
-      NO_LAUNCH=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    -*)
-      echo "unknown option: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-    *)
-      if [[ -n "$PR_SPEC" ]]; then
-        echo "only one PR may be specified" >&2
+QUEUE_ACTION=""
+QUEUE_ARGS=()
+if [[ "${1:-}" == "queue" ]]; then
+  shift
+  QUEUE_ACTION="${1:-}"
+  [[ -n "$QUEUE_ACTION" ]] && shift
+  QUEUE_ARGS=("$@")
+else
+  while (($#)); do
+    case "$1" in
+      --no-build)
+        NO_BUILD=1
+        shift
+        ;;
+      --no-pytest)
+        NO_PYTEST=1
+        shift
+        ;;
+      --no-launch)
+        NO_LAUNCH=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        echo "unknown option: $1" >&2
         usage >&2
         exit 2
-      fi
-      PR_SPEC="$1"
-      shift
-      ;;
-  esac
-done
+        ;;
+      *)
+        if [[ -n "$PR_SPEC" ]]; then
+          echo "only one PR may be specified" >&2
+          usage >&2
+          exit 2
+        fi
+        PR_SPEC="$1"
+        shift
+        ;;
+    esac
+  done
 
-if [[ -z "$PR_SPEC" ]]; then
-  usage >&2
-  exit 2
+  if [[ -z "$PR_SPEC" ]]; then
+    usage >&2
+    exit 2
+  fi
 fi
 
 DEFAULT_REVIEW_PARENT="$HOME/rocjitsu/review"
@@ -97,6 +108,11 @@ read -r -a CMAKE_BUILD_PRESETS <<<"$CMAKE_PRESET_SPEC"
 if ((${#CMAKE_BUILD_PRESETS[@]} == 0)); then
   echo "no CMake presets requested" >&2
   exit 2
+fi
+CMAKE_CONFIGURE_ARGS_SPEC="${CMAKE_CONFIGURE_ARGS:-}"
+CMAKE_CONFIGURE_ARGS_ARRAY=()
+if [[ -n "$CMAKE_CONFIGURE_ARGS_SPEC" ]]; then
+  read -r -a CMAKE_CONFIGURE_ARGS_ARRAY <<<"$CMAKE_CONFIGURE_ARGS_SPEC"
 fi
 CMAKE_BUILD_TARGET="${CMAKE_BUILD_TARGET:-all}"
 PYTEST_WORKDIR="${PYTEST_WORKDIR:-$ROCJITSU_SOURCE/lib/python}"
@@ -156,6 +172,185 @@ resolve_spec() {
   exit 2
 }
 
+queue_validate_wrapper() {
+  if [[ "${REVIEW_QUEUE_PROTOCOL:-}" != 1 ]]; then
+    echo "REVIEW_QUEUE_PROTOCOL=1 is required" >&2
+    return 1
+  fi
+  for variable in \
+    REVIEW_QUEUE_WRAPPER REVIEW_QUEUE_ROOT REVIEW_QUEUE_OWNER_TOKEN REVIEW_QUEUE_TARGET_HEAD; do
+    if [[ -z "${!variable:-}" ]]; then
+      echo "missing required queue environment: $variable" >&2
+      return 1
+    fi
+  done
+
+  local wrapper root marker marker_token marker_protocol
+  wrapper="$(realpath -e -- "$REVIEW_QUEUE_WRAPPER")"
+  root="$(realpath -e -- "$REVIEW_QUEUE_ROOT")"
+  if [[ -L "$REVIEW_QUEUE_WRAPPER" || "$(dirname -- "$wrapper")" != "$root" ]]; then
+    echo "queue wrapper is not a direct managed-root child: $wrapper" >&2
+    return 1
+  fi
+  marker="$wrapper/.review-queue.json"
+  if [[ ! -f "$marker" ]]; then
+    echo "missing queue ownership marker: $marker" >&2
+    return 1
+  fi
+  marker_token="$(jq -r '.owner_token // empty' "$marker")"
+  marker_protocol="$(jq -r '.protocol // empty' "$marker")"
+  if [[ "$marker_protocol" != 1 || "$marker_token" != "$REVIEW_QUEUE_OWNER_TOKEN" ]]; then
+    echo "queue ownership marker does not match" >&2
+    return 1
+  fi
+  REVIEW_QUEUE_WRAPPER="$wrapper"
+  REVIEW_QUEUE_ROOT="$root"
+  export REVIEW_QUEUE_WRAPPER REVIEW_QUEUE_ROOT
+}
+
+queue_resolve_pr() {
+  local spec="$1"
+  resolve_spec "$spec"
+  QUEUE_PR_JSON="$(gh pr view "$RESOLVED_NUMBER" --repo "$RESOLVED_REPO" \
+    --json number,url,headRefName,headRefOid,state,isDraft)"
+  QUEUE_PR_NUMBER="$(jq -r '.number' <<<"$QUEUE_PR_JSON")"
+  QUEUE_PR_URL="$(jq -r '.url' <<<"$QUEUE_PR_JSON")"
+  QUEUE_HEAD_SHA="$(jq -r '.headRefOid' <<<"$QUEUE_PR_JSON")"
+  local state draft
+  state="$(jq -r '.state' <<<"$QUEUE_PR_JSON")"
+  draft="$(jq -r '.isDraft' <<<"$QUEUE_PR_JSON")"
+  if [[ "$state" != "OPEN" || "$draft" != false ]]; then
+    echo "queue reviews require an open non-draft PR" >&2
+    return 1
+  fi
+  if [[ -n "${REVIEW_QUEUE_TARGET_HEAD:-}" \
+        && "$REVIEW_QUEUE_TARGET_HEAD" != "$QUEUE_HEAD_SHA" ]]; then
+    echo "PR head changed: requested $REVIEW_QUEUE_TARGET_HEAD, current $QUEUE_HEAD_SHA" >&2
+    return 75
+  fi
+}
+
+queue_prepare() {
+  if [[ $# -ne 1 ]]; then
+    echo "Usage: review-pr.sh queue prepare <pr>" >&2
+    return 2
+  fi
+  need gh
+  need git
+  need jq
+  need realpath
+  queue_validate_wrapper
+  queue_resolve_pr "$1"
+
+  local main_workspace worktree_script fetch_ref
+  main_workspace="${ROCJITSU_MAIN_WORKSPACE:-$HOME/rocjitsu/develop/rocm-systems}"
+  worktree_script="${ROCJITSU_WORKTREE_SCRIPT:-$HOME/jakub-env/worktree-scripts/rocjitsu/rocjitsu-worktree.sh}"
+  if [[ ! -x "$worktree_script" ]]; then
+    echo "missing RocJITsu worktree script: $worktree_script" >&2
+    return 1
+  fi
+  fetch_ref="refs/remotes/origin/review-queue/$QUEUE_PR_NUMBER"
+  git -C "$main_workspace" fetch origin \
+    "+pull/${QUEUE_PR_NUMBER}/head:${fetch_ref}"
+  if [[ "$(git -C "$main_workspace" rev-parse "$fetch_ref")" != "$QUEUE_HEAD_SHA" ]]; then
+    echo "fetched PR head does not match the requested queue snapshot" >&2
+    return 1
+  fi
+  "$worktree_script" queue-setup "$REVIEW_QUEUE_WRAPPER" "$QUEUE_HEAD_SHA"
+  if [[ "$(git -C "$REVIEW_QUEUE_WRAPPER/rocm-systems" rev-parse HEAD)" != "$QUEUE_HEAD_SHA" ]]; then
+    echo "prepared worktree does not match the requested head" >&2
+    return 1
+  fi
+}
+
+queue_write_result() {
+  local status="$1"
+  local exit_code="$2"
+  local started_at="$3"
+  local finished_at="$4"
+  local reviewed_head="$5"
+  local result="${REVIEW_QUEUE_RESULT:-}"
+  if [[ -z "$result" ]]; then
+    echo "missing required queue environment: REVIEW_QUEUE_RESULT" >&2
+    return 1
+  fi
+  mkdir -p -- "$(dirname -- "$result")"
+  local temporary="${result}.tmp.$$"
+  jq -n \
+    --argjson protocol 1 \
+    --arg repository "$RESOLVED_REPO" \
+    --argjson pr "$QUEUE_PR_NUMBER" \
+    --arg requested_head "$REVIEW_QUEUE_TARGET_HEAD" \
+    --arg reviewed_head "$reviewed_head" \
+    --arg status "$status" \
+    --argjson exit_code "$exit_code" \
+    --arg started_at "$started_at" \
+    --arg finished_at "$finished_at" \
+    '{protocol:$protocol,repository:$repository,pr:$pr,
+      requested_head:$requested_head,reviewed_head:$reviewed_head,
+      status:$status,exit_code:$exit_code,
+      started_at:$started_at,finished_at:$finished_at}' >"$temporary"
+  mv -- "$temporary" "$result"
+}
+
+queue_run() {
+  if [[ $# -ne 1 ]]; then
+    echo "Usage: review-pr.sh queue run <pr>" >&2
+    return 2
+  fi
+  need gh
+  need git
+  need jq
+  need realpath
+  queue_validate_wrapper
+  queue_resolve_pr "$1"
+  if [[ ! -d "$REVIEW_QUEUE_WRAPPER/rocm-systems" ]]; then
+    echo "queue wrapper was not prepared: $REVIEW_QUEUE_WRAPPER" >&2
+    return 1
+  fi
+
+  local script_path started_at finished_at reviewed_head status exit_code
+  script_path="$(realpath -- "${BASH_SOURCE[0]}")"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  set +e
+  REVIEW_PARENT="$REVIEW_QUEUE_WRAPPER" \
+    WORKSPACE="$REVIEW_QUEUE_WRAPPER/rocm-systems" \
+    "$script_path" "$QUEUE_PR_URL"
+  exit_code=$?
+  set -e
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  reviewed_head="$(git -C "$REVIEW_QUEUE_WRAPPER/rocm-systems" rev-parse HEAD 2>/dev/null || true)"
+  status="failed"
+  if [[ "$exit_code" == 0 && "$reviewed_head" == "$REVIEW_QUEUE_TARGET_HEAD" ]]; then
+    status="succeeded"
+  elif [[ "$exit_code" == 0 ]]; then
+    exit_code=1
+  fi
+  queue_write_result "$status" "$exit_code" "$started_at" "$finished_at" "$reviewed_head"
+  return "$exit_code"
+}
+
+queue_cleanup() {
+  need jq
+  need realpath
+  need flock
+  queue_validate_wrapper
+  local worktree_script
+  worktree_script="${ROCJITSU_WORKTREE_SCRIPT:-$HOME/jakub-env/worktree-scripts/rocjitsu/rocjitsu-worktree.sh}"
+  if [[ ! -x "$worktree_script" ]]; then
+    echo "missing RocJITsu worktree script: $worktree_script" >&2
+    return 1
+  fi
+  if [[ "${1:-}" == "--check" && $# -eq 1 ]]; then
+    exec "$worktree_script" queue-cleanup --check "$REVIEW_QUEUE_WRAPPER"
+  elif [[ $# -eq 0 ]]; then
+    exec "$worktree_script" queue-cleanup "$REVIEW_QUEUE_WRAPPER"
+  else
+    echo "Usage: review-pr.sh queue cleanup [--check]" >&2
+    return 2
+  fi
+}
+
 setup_rocjitsu_env() {
   export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$REVIEW_PARENT}"
   export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
@@ -198,6 +393,36 @@ setup_rocjitsu_env() {
     done
   fi
 }
+
+if [[ -n "$QUEUE_ACTION" ]]; then
+  case "$QUEUE_ACTION" in
+    protocol)
+      if ((${#QUEUE_ARGS[@]} != 0)); then
+        echo "Usage: review-pr.sh queue protocol" >&2
+        exit 2
+      fi
+      printf '%s\n' \
+        '{"version":1,"repository":"ROCm/rocm-systems","operations":["prepare","run","cleanup-check","cleanup"]}'
+      exit 0
+      ;;
+    prepare)
+      queue_prepare "${QUEUE_ARGS[@]}"
+      exit $?
+      ;;
+    run)
+      queue_run "${QUEUE_ARGS[@]}"
+      exit $?
+      ;;
+    cleanup)
+      queue_cleanup "${QUEUE_ARGS[@]}"
+      exit $?
+      ;;
+    *)
+      echo "unknown queue action: $QUEUE_ACTION" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 need gh
 need git
@@ -252,6 +477,10 @@ HEAD_SHA="$(jq -r '.headRefOid' <<<"$PR_JSON")"
 BASE_REF="$(jq -r '.baseRefName' <<<"$PR_JSON")"
 BASE_SHA="$(jq -r '.baseRefOid' <<<"$PR_JSON")"
 UPDATED_AT="$(jq -r '.updatedAt' <<<"$PR_JSON")"
+if [[ -n "${REVIEW_QUEUE_TARGET_HEAD:-}" && "$HEAD_SHA" != "$REVIEW_QUEUE_TARGET_HEAD" ]]; then
+  echo "PR head changed: requested $REVIEW_QUEUE_TARGET_HEAD, current $HEAD_SHA" >&2
+  exit 75
+fi
 LOCAL_BRANCH="pr-${PR_NUMBER}-$(slugify "$HEAD_REF")"
 FETCH_REF="refs/remotes/origin/pr/${PR_NUMBER}"
 
@@ -348,7 +577,7 @@ else
     echo "configure:   (cd $ROCJITSU_SOURCE && cmake --preset $preset)"
     (
       cd "$ROCJITSU_SOURCE"
-      cmake --preset "$preset"
+      cmake --preset "$preset" "${CMAKE_CONFIGURE_ARGS_ARRAY[@]}"
     )
     echo "build:       (cd $ROCJITSU_SOURCE && cmake --build --preset $preset --target $CMAKE_BUILD_TARGET)"
     (

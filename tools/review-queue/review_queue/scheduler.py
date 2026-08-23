@@ -229,8 +229,8 @@ class Scheduler:
 
     async def _poll_loop(self) -> None:
         while not self._stopping:
-            await self.poll_once()
             self._poll_now.clear()
+            await self.poll_once()
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._poll_now.wait(), timeout=self.config.poll_seconds)
 
@@ -247,10 +247,10 @@ class Scheduler:
             poll = await self.github.list_project(project)
             records = list(poll.records)
             present = set(poll.query_numbers)
-            manual = set(self.db.manual_watches(project.name)) - present
-            if manual:
+            followups = set(self.db.poll_followups(project.name)) - present
+            if followups:
                 extra = await asyncio.gather(
-                    *(self.github.view(project, number) for number in sorted(manual))
+                    *(self.github.view(project, number) for number in sorted(followups))
                 )
                 records.extend(extra)
             return self.db.apply_poll(
@@ -500,6 +500,7 @@ class Scheduler:
             self.db.update_wrapper(
                 int(row["wrapper_id"]), state="idle", size_bytes=size, touch=True
             )
+            self.request_refresh()
 
     @staticmethod
     def _validate_result(path: Path, row: object) -> None:

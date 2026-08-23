@@ -107,7 +107,7 @@ def load_config(path: Path | None = None, *, state_dir: Path | None = None) -> Q
 
     resolved_state = (state_dir or xdg_state_dir()).expanduser().resolve()
     return QueueConfig(
-        poll_seconds=_positive("queue.poll_seconds", queue.get("poll_seconds", 60)),
+        poll_seconds=_positive("queue.poll_seconds", queue.get("poll_seconds", 120)),
         push_quiet_seconds=_positive(
             "queue.push_quiet_seconds", queue.get("push_quiet_seconds", 120), allow_zero=True
         ),

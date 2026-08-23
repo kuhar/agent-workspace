@@ -31,6 +31,12 @@ database intentionally.
 Use `./bin/review-queue poll --json` for a one-shot discovery pass and
 `./bin/review-queue state --json` for a non-interactive snapshot.
 
+The scheduler polls once at startup, every configured interval (120 seconds by
+default), and immediately after a review job finishes. PRs that merge or close
+are removed from waiting work on that poll; terminal manually included PRs are
+also removed from the persistent watch set. An already-running review is
+allowed to finish.
+
 ## Accelerated demo
 
 Run the production TUI against an isolated, deterministic synthetic trace:

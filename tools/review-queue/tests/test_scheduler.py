@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from review_queue.github import GitHubPoll
 from review_queue.launcher import LauncherClient, Protocol
 from review_queue.models import ProjectConfig, PullRequest, QueueConfig
 from review_queue.scheduler import QueueError, Scheduler
@@ -72,6 +73,18 @@ class FakeGitHub:
         return record(project)
 
 
+class MergedGitHub:
+    def __init__(self) -> None:
+        self.views: list[int] = []
+
+    async def list_project(self, _project: ProjectConfig) -> GitHubPoll:
+        return GitHubPoll(records=(), query_numbers=frozenset())
+
+    async def view(self, project: ProjectConfig, spec: str | int) -> PullRequest:
+        self.views.append(int(spec))
+        return replace(record(project), state="MERGED")
+
+
 class GapLauncher(FakeLauncher):
     def __init__(self) -> None:
         super().__init__()
@@ -119,6 +132,7 @@ async def test_dispatch_allocates_named_wrapper_and_validates_result(
         bootstrap_hours=24,
         push_quiet_seconds=0,
     )
+    assert not scheduler._poll_now.is_set()
     await scheduler._dispatch_available()
     await next(iter(scheduler._job_tasks.values()))
     wrappers = scheduler.db.wrappers()
@@ -129,10 +143,34 @@ async def test_dispatch_allocates_named_wrapper_and_validates_result(
         json.loads(Path(scheduler.db.job_row(1)["result_path"]).read_text())["status"]
         == "succeeded"
     )
+    assert scheduler._poll_now.is_set()
     wrapper_id = wrappers[0].wrapper_id
     assert await scheduler.recycle_wrapper(wrapper_id)
     assert scheduler.db.wrappers() == ()
     assert scheduler.db.job_row(1)["wrapper_id"] is None
+
+
+async def test_poll_views_missing_eligible_pr_and_removes_it_when_merged(
+    config: QueueConfig, project: ProjectConfig
+) -> None:
+    github = MergedGitHub()
+    scheduler = Scheduler(config, github=github)
+    scheduler.db.apply_poll(
+        project,
+        (record(project),),
+        query_numbers={12},
+        bootstrap_hours=24,
+        push_quiet_seconds=0,
+    )
+    job_id = scheduler.db.queue_items()[0].job_id
+
+    outcome = await scheduler._poll_project(project)
+
+    assert github.views == [12]
+    assert outcome.left_query == 1
+    assert scheduler.db.queue_items() == ()
+    assert scheduler.db.job_row(job_id)["status"] == "ineligible"
+    assert scheduler.db.job_row(job_id)["error"] == "PR merged"
 
 
 async def test_manual_include_uses_url_repository_with_multiple_projects(

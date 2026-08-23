@@ -220,6 +220,14 @@ class Database:
         ).fetchall()
         return tuple(int(row["number"]) for row in rows)
 
+    def poll_followups(self, project: str) -> tuple[int, ...]:
+        rows = self.connection.execute(
+            "SELECT number FROM pull_requests "
+            "WHERE project = ? AND (eligible = 1 OR manual_watch = 1)",
+            (project,),
+        ).fetchall()
+        return tuple(int(row["number"]) for row in rows)
+
     def apply_poll(
         self,
         project: ProjectConfig,
@@ -239,7 +247,7 @@ class Database:
             raise KeyError(f"unknown project: {project.name}")
         bootstrapped = bool(project_row["bootstrap_complete"])
         seen: set[int] = set()
-        discovered = changed = queued = 0
+        discovered = changed = queued = left = 0
 
         with self.connection:
             for record in records:
@@ -255,6 +263,7 @@ class Database:
                 ).fetchone()
                 is_open = record.state.upper() == "OPEN" and not record.is_draft
                 manual_watch = bool(existing and existing["manual_watch"])
+                keep_manual_watch = manual_watch and record.state.upper() == "OPEN"
                 ignored = bool(existing and existing["ignored"])
                 eligible = (
                     is_open and not ignored and (record.number in query_numbers or manual_watch)
@@ -307,12 +316,15 @@ class Database:
                 else:
                     head_changed = existing["head_sha"] != record.head_sha
                     became_eligible = eligible and not bool(existing["eligible"])
+                    became_ineligible = not eligible and bool(existing["eligible"])
                     changed += int(head_changed)
+                    left += int(became_ineligible)
                     self.connection.execute(
                         """
                         UPDATE pull_requests
                         SET url = ?, title = ?, author = ?, head_sha = ?, head_ref = ?,
-                            updated_at = ?, state = ?, is_draft = ?, eligible = ?, last_seen_at = ?
+                            updated_at = ?, state = ?, is_draft = ?, eligible = ?,
+                            manual_watch = ?, last_seen_at = ?
                         WHERE repo = ? AND number = ?
                         """,
                         (
@@ -325,11 +337,29 @@ class Database:
                             record.state.upper(),
                             int(record.is_draft),
                             int(eligible),
+                            int(keep_manual_watch),
                             now_text,
                             record.repo,
                             record.number,
                         ),
                     )
+                    if not eligible:
+                        if record.state.upper() == "MERGED":
+                            reason = "PR merged"
+                        elif record.state.upper() != "OPEN":
+                            reason = "PR closed"
+                        elif record.is_draft:
+                            reason = "PR became draft"
+                        else:
+                            reason = "PR left configured query"
+                        self.connection.execute(
+                            """
+                            UPDATE jobs SET status = 'ineligible', finished_at = ?, error = ?
+                            WHERE repo = ? AND pr_number = ?
+                              AND status IN ('debouncing', 'queued')
+                            """,
+                            (now_text, reason, record.repo, record.number),
+                        )
                     if head_changed:
                         self.connection.execute(
                             """
@@ -399,7 +429,7 @@ class Database:
                 """,
                 (now_text, now_text, project.name),
             )
-        return PollOutcome(discovered, changed, queued, len(missing))
+        return PollOutcome(discovered, changed, queued, left + len(missing))
 
     @staticmethod
     def _quiet_until(updated_at: str, now_text: str, quiet_seconds: int) -> str | None:
@@ -454,11 +484,14 @@ class Database:
 
     def enqueue_current(self, repo: str, number: int, *, manual: bool = True) -> int:
         row = self.connection.execute(
-            "SELECT project, head_sha FROM pull_requests WHERE repo = ? AND number = ?",
+            "SELECT project, head_sha, state, is_draft FROM pull_requests "
+            "WHERE repo = ? AND number = ?",
             (repo, number),
         ).fetchone()
         if row is None:
             raise KeyError(f"unknown pull request: {repo}#{number}")
+        if row["state"] != "OPEN" or bool(row["is_draft"]):
+            raise ValueError(f"pull request is not open for review: {repo}#{number}")
         with self.connection:
             active = self.connection.execute(
                 """
@@ -496,6 +529,10 @@ class Database:
         return self.enqueue_current(row["repo"], int(row["pr_number"]), manual=True)
 
     def set_manual_watch(self, record: PullRequest, *, enqueue: bool = True) -> None:
+        if record.state.upper() != "OPEN" or record.is_draft:
+            raise ValueError(
+                f"manual pull request must be open and non-draft: {record.repo}#{record.number}"
+            )
         now = isoformat()
         with self.connection:
             self.connection.execute(

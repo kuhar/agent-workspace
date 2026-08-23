@@ -56,3 +56,19 @@ wrapper_root = "{tmp_path / "wrappers"}"
     config.write_text("[queue]\n" + project + project)
     with pytest.raises(ValueError, match="duplicate project"):
         load_config(config)
+
+
+def test_default_poll_interval_is_two_minutes(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""
+[[projects]]
+name = "demo"
+repo = "owner/repo"
+query = "draft:false"
+launcher = "{tmp_path / "review-pr.sh"}"
+wrapper_root = "{tmp_path / "wrappers"}"
+"""
+    )
+
+    assert load_config(config).poll_seconds == 120

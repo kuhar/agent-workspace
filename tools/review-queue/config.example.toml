@@ -1,5 +1,5 @@
 [queue]
-poll_seconds = 60
+poll_seconds = 120
 push_quiet_seconds = 120
 bootstrap_hours = 24
 max_running = 2

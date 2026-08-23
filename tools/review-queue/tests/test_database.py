@@ -150,6 +150,59 @@ def test_leaving_query_cancels_waiting_but_manual_retry_is_allowed(
     assert db.job_row(retry)["attempt"] == 2
 
 
+def test_merged_manual_pr_leaves_queue_and_watch_set(
+    tmp_path: Path, project: ProjectConfig
+) -> None:
+    db = database(tmp_path, project)
+    opened = pr(project, 18, head="e" * 40)
+    db.set_manual_watch(opened)
+    job_id = db.queue_items()[0].job_id
+
+    outcome = db.apply_poll(
+        project,
+        (replace(opened, state="MERGED"),),
+        query_numbers=set(),
+        bootstrap_hours=24,
+        push_quiet_seconds=0,
+    )
+
+    assert outcome.left_query == 1
+    assert db.queue_items() == ()
+    assert db.manual_watches(project.name) == ()
+    assert db.job_row(job_id)["status"] == "ineligible"
+    assert db.job_row(job_id)["error"] == "PR merged"
+    with pytest.raises(ValueError, match="not open"):
+        db.enqueue_current(project.repo, 18)
+
+
+def test_draft_manual_pr_remains_watched_until_it_returns(
+    tmp_path: Path, project: ProjectConfig
+) -> None:
+    db = database(tmp_path, project)
+    opened = pr(project, 19, head="f" * 40)
+    db.set_manual_watch(opened)
+
+    db.apply_poll(
+        project,
+        (replace(opened, is_draft=True),),
+        query_numbers=set(),
+        bootstrap_hours=24,
+        push_quiet_seconds=0,
+    )
+    assert db.queue_items() == ()
+    assert db.manual_watches(project.name) == (19,)
+
+    outcome = db.apply_poll(
+        project,
+        (opened,),
+        query_numbers=set(),
+        bootstrap_hours=24,
+        push_quiet_seconds=0,
+    )
+    assert outcome.queued == 1
+    assert db.queue_items()[0].number == 19
+
+
 def test_new_head_reports_completed_review_count(tmp_path: Path, project: ProjectConfig) -> None:
     db = database(tmp_path, project)
     first = pr(project, 12, head="a" * 40)

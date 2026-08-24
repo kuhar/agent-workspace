@@ -11,8 +11,8 @@
 #   Run setup-bwrap-apparmor.sh from this directory.
 #
 # Usage:
-#   agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
-#   agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
+#   agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [--reserve-cores N] [project-dir] [-- harness-args...]
+#   agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [--reserve-cores N] [project-dir] [-- harness-args...]
 #
 # Examples:
 #   agent-sandbox ~/iree/constraints
@@ -28,23 +28,25 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
-  agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [project-dir] [-- harness-args...]
+  agent-sandbox [--harness claude|opencode|codex] [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [--reserve-cores N] [project-dir] [-- harness-args...]
+  agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [--reserve-cores N] [project-dir] [-- harness-args...]
 
 Options:
   --harness, -H NAME       Select claude, opencode, or codex (default: claude)
   --im-feeling-lucky      Use real gh/git/ssh credentials instead of sandbox credentials
   --airgap, --no-network  Disable shell command networking and Codex web tools
   --memory-limit-gb N     Limit aggregate agent process-tree cgroup memory to N GiB
+  --reserve-cores N       Reserve N complete physical cores for this harness
   -h, --help              Show this help
 
-All runs use a systemd cgroup to isolate OOM handling and require an
-accessible systemd user manager.
+All runs use a systemd cgroup to isolate OOM handling. --reserve-cores uses
+the system manager through a root helper; other runs use the user manager.
 
 Examples:
   agent-sandbox ~/iree/constraints
   agent-sandbox --harness opencode ~/iree/constraints
   agent-sandbox --memory-limit-gb 16 ~/iree/constraints
+  agent-sandbox --reserve-cores 2 ~/rocjitsu/misc
   agent-sandbox codex ~/iree/constraints -- "fix the build"
   agent-sandbox opencode ~/iree/constraints -- run "fix the build"
 EOF
@@ -57,6 +59,15 @@ IM_FEELING_LUCKY=false
 AIRGAP=false
 MEMORY_LIMIT_GB=""
 MEMORY_LIMIT_SET=false
+RESERVE_CORES=""
+RESERVE_CORES_SET=false
+ORIGINAL_ARGS=("$@")
+
+case "$0" in
+    /*) INVOCATION_PATH="$0" ;;
+    */*) INVOCATION_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" ;;
+    *) INVOCATION_PATH="$(command -v "$0")" ;;
+esac
 
 script_name="$(basename "$0")"
 case "$script_name" in
@@ -100,6 +111,20 @@ while [[ $# -gt 0 ]]; do
             MEMORY_LIMIT_SET=true
             shift
             ;;
+        --reserve-cores)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: $1 requires a positive integer" >&2
+                exit 1
+            fi
+            RESERVE_CORES="$2"
+            RESERVE_CORES_SET=true
+            shift 2
+            ;;
+        --reserve-cores=*)
+            RESERVE_CORES="${1#*=}"
+            RESERVE_CORES_SET=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -127,6 +152,38 @@ done
 if $MEMORY_LIMIT_SET && [[ ! "$MEMORY_LIMIT_GB" =~ ^[1-9][0-9]*$ ]]; then
     echo "Error: --memory-limit-gb requires a positive integer (GiB), got '$MEMORY_LIMIT_GB'" >&2
     exit 1
+fi
+if $RESERVE_CORES_SET && [[ ! "$RESERVE_CORES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --reserve-cores requires a positive physical-core count, got '$RESERVE_CORES'" >&2
+    exit 1
+fi
+
+RESERVED_CHILD=false
+if [[ "${AGENT_SANDBOX_RESERVED_CHILD:-}" == "1" ]]; then
+    if ! grep -Eq '^0::/benchmark\.slice/agent-reserved-[^/]+\.scope$' /proc/self/cgroup; then
+        echo "Error: reserved child marker is only valid inside benchmark.slice." >&2
+        exit 1
+    fi
+    RESERVED_CHILD=true
+fi
+
+if $RESERVE_CORES_SET && ! $RESERVED_CHILD; then
+    CPU_RESERVE_HELPER="${AGENT_CPU_RESERVE_HELPER:-/usr/local/libexec/agent-cpu-reserve}"
+    if [[ ! -x "$CPU_RESERVE_HELPER" ]]; then
+        echo "Error: --reserve-cores requires $CPU_RESERVE_HELPER" >&2
+        echo "Run scripts/setup-agent-cpu-reserve.sh outside the sandbox first." >&2
+        exit 1
+    fi
+    MEMORY_MAX="infinity"
+    if $MEMORY_LIMIT_SET; then
+        MEMORY_MAX="${MEMORY_LIMIT_GB}G"
+    fi
+    sudo -- "$CPU_RESERVE_HELPER" run \
+        --cores "$RESERVE_CORES" \
+        --memory-max "$MEMORY_MAX" \
+        --caller-pid "$$" \
+        -- "$INVOCATION_PATH" "${ORIGINAL_ARGS[@]}"
+    exit $?
 fi
 
 case "$HARNESS" in
@@ -351,6 +408,10 @@ if $MEMORY_LIMIT_SET; then
     echo "  Memory: ${MEMORY_LIMIT_GB} GiB aggregate process-tree limit"
 else
     echo "  Memory: unlimited"
+fi
+if $RESERVE_CORES_SET; then
+    echo "  CPU isolation: ${RESERVE_CORES} physical core(s) (${AGENT_SANDBOX_RESERVED_CPUS})"
+    echo "  Reserved commands: agent-reserved-run COMMAND ..."
 fi
 echo "  OOM policy: prefer and kill the whole agent cgroup"
 
@@ -579,26 +640,33 @@ BWRAP_ARGS+=(
     --die-with-parent
 )
 
-SYSTEMD_RUN_BIN="$(command -v systemd-run || true)"
-SYSTEMCTL_BIN="$(command -v systemctl || true)"
 CHOOM_BIN="$(command -v choom || true)"
 
-if [[ -z "$SYSTEMD_RUN_BIN" || -z "$SYSTEMCTL_BIN" ]]; then
-    echo "Error: agent-sandbox requires systemd-run, systemctl, and a running systemd user manager." >&2
-    exit 1
-fi
 if [[ -z "$CHOOM_BIN" ]]; then
     echo "Error: agent-sandbox requires choom to configure OOM victim preference." >&2
-    exit 1
-fi
-if ! "$SYSTEMCTL_BIN" --user show-environment >/dev/null 2>&1; then
-    echo "Error: agent-sandbox requires an accessible systemd user manager." >&2
     exit 1
 fi
 
 MEMORY_MAX="infinity"
 if $MEMORY_LIMIT_SET; then
     MEMORY_MAX="${MEMORY_LIMIT_GB}G"
+fi
+
+if $RESERVED_CHILD; then
+    exec "$CHOOM_BIN" -n 1000 -- \
+        /usr/bin/bwrap "${BWRAP_ARGS[@]}" -- "${AGENT_CMD[@]}"
+fi
+
+SYSTEMD_RUN_BIN="$(command -v systemd-run || true)"
+SYSTEMCTL_BIN="$(command -v systemctl || true)"
+
+if [[ -z "$SYSTEMD_RUN_BIN" || -z "$SYSTEMCTL_BIN" ]]; then
+    echo "Error: agent-sandbox requires systemd-run, systemctl, and a running systemd user manager." >&2
+    exit 1
+fi
+if ! "$SYSTEMCTL_BIN" --user show-environment >/dev/null 2>&1; then
+    echo "Error: agent-sandbox requires an accessible systemd user manager." >&2
+    exit 1
 fi
 
 # A transient scope puts bwrap, the agent, and every descendant in one cgroup.

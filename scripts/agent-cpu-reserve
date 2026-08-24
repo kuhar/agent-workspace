@@ -1,0 +1,536 @@
+#!/usr/bin/python3
+"""Run an agent sandbox on physical cores reserved with systemd cpusets."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import fcntl
+import json
+import os
+import pathlib
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import time
+
+
+SYSTEMCTL = "/usr/bin/systemctl"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+STATE_PATH = pathlib.Path("/run/agent-cpu-reserve.json")
+LOCK_PATH = pathlib.Path("/run/lock/agent-cpu-reserve.lock")
+BACKGROUND_UNITS = ("init.scope", "system.slice", "user.slice", "machine.slice")
+SAFE_ROOT_ENV = {
+    "HOME": "/root",
+    "LANG": os.environ.get("LANG", "C.UTF-8"),
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+}
+PR_SET_NO_NEW_PRIVS = 38
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"Error: {message}")
+
+
+def parse_cpu_list(value: str) -> set[int]:
+    cpus: set[int] = set()
+    for item in re.split(r"[\s,]+", value.strip()):
+        if not item:
+            continue
+        if "-" in item:
+            first_text, last_text = item.split("-", 1)
+            first = int(first_text)
+            last = int(last_text)
+            if first > last:
+                fail(f"invalid CPU range: {item}")
+            cpus.update(range(first, last + 1))
+        else:
+            cpus.add(int(item))
+    return cpus
+
+
+def format_cpu_list(cpus: set[int]) -> str:
+    ordered = sorted(cpus)
+    if not ordered:
+        return ""
+    ranges: list[str] = []
+    first = previous = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == previous + 1:
+            previous = cpu
+            continue
+        ranges.append(str(first) if first == previous else f"{first}-{previous}")
+        first = previous = cpu
+    ranges.append(str(first) if first == previous else f"{first}-{previous}")
+    return ",".join(ranges)
+
+
+def online_cpus() -> set[int]:
+    return parse_cpu_list(pathlib.Path("/sys/devices/system/cpu/online").read_text())
+
+
+def physical_core_groups() -> list[tuple[int, int, tuple[int, ...]]]:
+    groups: dict[tuple[int, int], list[int]] = {}
+    for cpu in sorted(online_cpus()):
+        topology = pathlib.Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        package = int((topology / "physical_package_id").read_text())
+        core = int((topology / "core_id").read_text())
+        groups.setdefault((package, core), []).append(cpu)
+    return [
+        (package, core, tuple(cpus))
+        for (package, core), cpus in sorted(groups.items())
+    ]
+
+
+def select_cores(count: int) -> tuple[list[tuple[int, int, tuple[int, ...]]], set[int]]:
+    groups = physical_core_groups()
+    if count >= len(groups):
+        fail(
+            f"cannot reserve {count} of {len(groups)} physical cores; "
+            "at least one core must remain for other workloads"
+        )
+    selected = groups[-count:]
+    cpus = {cpu for _, _, siblings in selected for cpu in siblings}
+    return selected, cpus
+
+
+def systemctl_show(unit: str, property_name: str) -> str:
+    result = subprocess.run(
+        [SYSTEMCTL, "show", unit, f"--property={property_name}", "--value"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=SAFE_ROOT_ENV,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def set_allowed_cpus(unit: str, value: str) -> None:
+    subprocess.run(
+        [SYSTEMCTL, "set-property", "--runtime", unit, f"AllowedCPUs={value}"],
+        check=True,
+        env=SAFE_ROOT_ENV,
+    )
+
+
+def snapshot_units(reserved: set[int]) -> dict[str, str]:
+    online = online_cpus()
+    previous: dict[str, str] = {}
+    for unit in BACKGROUND_UNITS:
+        if systemctl_show(unit, "LoadState") == "not-found":
+            continue
+        old_value = systemctl_show(unit, "AllowedCPUs")
+        allowed = parse_cpu_list(old_value) if old_value else online
+        housekeeping = allowed - reserved
+        if not housekeeping:
+            fail(f"reserving these CPUs would leave {unit} with no CPUs")
+        previous[unit] = old_value
+
+    return previous
+
+
+def restrict_units(previous: dict[str, str], reserved: set[int]) -> None:
+    online = online_cpus()
+    for unit, old_value in previous.items():
+        allowed = parse_cpu_list(old_value) if old_value else online
+        set_allowed_cpus(unit, format_cpu_list(allowed - reserved))
+
+
+def verify_restrictions(previous: dict[str, str], reserved: set[int]) -> None:
+    for unit in previous:
+        if systemctl_show(unit, "ActiveState") != "active":
+            continue
+        control_group = systemctl_show(unit, "ControlGroup")
+        effective_path = pathlib.Path(
+            f"/sys/fs/cgroup{control_group}/cpuset.cpus.effective"
+        )
+        if not control_group or not effective_path.is_file():
+            fail(f"cannot verify the effective CPU set for {unit}")
+        effective = parse_cpu_list(effective_path.read_text())
+        overlap = effective & reserved
+        if overlap:
+            fail(
+                f"{unit} can still use reserved logical CPUs "
+                f"{format_cpu_list(overlap)}"
+            )
+
+
+def restore_units(previous: dict[str, str]) -> bool:
+    failures: list[str] = []
+    for unit, value in reversed(previous.items()):
+        try:
+            set_allowed_cpus(unit, value)
+        except subprocess.CalledProcessError:
+            failures.append(unit)
+    if failures:
+        print(
+            "Warning: failed to restore AllowedCPUs for " + ", ".join(failures),
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def write_state(unit: str, previous: dict[str, str], owner_uid: int) -> None:
+    temporary = STATE_PATH.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps({"unit": unit, "owner_uid": owner_uid, "previous": previous})
+        + "\n"
+    )
+    os.chmod(temporary, 0o600)
+    temporary.replace(STATE_PATH)
+
+
+def read_state() -> dict[str, object] | None:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def clear_state() -> None:
+    try:
+        STATE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def stop_unit(unit: str) -> None:
+    subprocess.run(
+        [SYSTEMCTL, "stop", unit],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=SAFE_ROOT_ENV,
+    )
+
+
+def process_uid(pid: int) -> int:
+    for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("Uid:"):
+            return int(line.split()[1])
+    fail(f"cannot determine uid for caller PID {pid}")
+
+
+def parent_pid(pid: int) -> int:
+    stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    return int(stat[stat.rfind(")") + 2 :].split()[1])
+
+
+def is_ancestor(candidate: int, pid: int) -> bool:
+    for _ in range(12):
+        if pid == candidate:
+            return True
+        if pid <= 1:
+            return False
+        pid = parent_pid(pid)
+    return False
+
+
+def caller_environment(pid: int) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        name, value = item.split(b"=", 1)
+        result[os.fsdecode(name)] = os.fsdecode(value)
+    return result
+
+
+def acquire_lock() -> object:
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock = LOCK_PATH.open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fail("another reserved harness is active")
+    return lock
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        fail("this helper must run as root")
+
+
+def reset() -> None:
+    require_root()
+    lock = acquire_lock()
+    try:
+        state = read_state()
+        if state is None:
+            print("No CPU reservation state to restore.")
+            return
+        unit = str(state.get("unit", ""))
+        previous = state.get("previous", {})
+        if unit:
+            stop_unit(unit)
+        if not isinstance(previous, dict):
+            fail(f"invalid state in {STATE_PATH}")
+        if restore_units({str(key): str(value) for key, value in previous.items()}):
+            clear_state()
+            print("Restored the previous systemd CPU policy.")
+        else:
+            fail(f"restore remains incomplete; state is preserved in {STATE_PATH}")
+    finally:
+        lock.close()
+
+
+def child(args: argparse.Namespace) -> None:
+    require_root()
+    if process_uid(args.caller_pid) != args.uid:
+        fail("the recorded caller no longer belongs to the invoking user")
+    environment = caller_environment(args.caller_pid)
+    environment["AGENT_SANDBOX_RESERVED_CHILD"] = "1"
+    environment["AGENT_SANDBOX_RESERVED_CPUS"] = args.cpus
+
+    expected_cpus = parse_cpu_list(args.cpus)
+    os.sched_setaffinity(0, expected_cpus)
+    effective_cpus = set(os.sched_getaffinity(0))
+    if effective_cpus != expected_cpus:
+        fail(
+            "reserved scope has logical CPUs "
+            f"{format_cpu_list(effective_cpus)}, expected {args.cpus}"
+        )
+    print(f"  Reserved scope limited to logical CPUs {args.cpus}.", flush=True)
+
+    account = pwd.getpwuid(args.uid)
+    os.chdir(args.working_directory)
+    pathlib.Path("/proc/self/oom_score_adj").write_text("1000\n")
+    os.initgroups(account.pw_name, args.gid)
+    os.setgid(args.gid)
+    os.setuid(args.uid)
+    os.execve(args.command[0], args.command, environment)
+
+
+def set_no_new_privileges() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        error_number = ctypes.get_errno()
+        fail(f"cannot set NoNewPrivs: {os.strerror(error_number)}")
+
+
+def scope_owner_uids(control_group: str) -> set[int]:
+    process_file = pathlib.Path(f"/sys/fs/cgroup{control_group}/cgroup.procs")
+    owners: set[int] = set()
+    for process_text in process_file.read_text().split():
+        try:
+            owner = process_uid(int(process_text))
+        except FileNotFoundError:
+            continue
+        if owner != 0:
+            owners.add(owner)
+    return owners
+
+
+def exec_reserved(args: argparse.Namespace) -> None:
+    require_root()
+    try:
+        target_uid = int(os.environ["SUDO_UID"])
+        target_gid = int(os.environ["SUDO_GID"])
+    except (KeyError, ValueError):
+        fail("run this command through sudo from the invoking user")
+    if process_uid(args.caller_pid) != target_uid:
+        fail("caller PID does not belong to the sudo user")
+    if not is_ancestor(args.caller_pid, os.getpid()):
+        fail("caller PID is not an ancestor of this helper")
+    if not args.command or not os.path.isabs(args.command[0]):
+        fail("the reserved command must use an absolute executable path")
+
+    state = read_state()
+    if state is None:
+        fail("there is no active agent CPU reservation")
+    unit = str(state.get("unit", ""))
+    if not re.fullmatch(r"agent-reserved-[0-9]+-[0-9]+\.scope", unit):
+        fail(f"invalid reservation unit in {STATE_PATH}")
+    if systemctl_show(unit, "ActiveState") != "active":
+        fail(f"reservation unit {unit} is not active")
+
+    control_group = systemctl_show(unit, "ControlGroup")
+    expected_control_group = f"/benchmark.slice/{unit}"
+    if control_group != expected_control_group:
+        fail(f"reservation unit has unexpected cgroup {control_group}")
+    recorded_owner = state.get("owner_uid")
+    if recorded_owner is not None and int(recorded_owner) != target_uid:
+        fail("active reservation belongs to another user")
+    owners = scope_owner_uids(control_group)
+    if owners != {target_uid}:
+        fail(f"active reservation has unexpected process owners: {sorted(owners)}")
+
+    effective_path = pathlib.Path(
+        f"/sys/fs/cgroup{control_group}/cpuset.cpus.effective"
+    )
+    cgroup_processes = pathlib.Path(f"/sys/fs/cgroup{control_group}/cgroup.procs")
+    reserved = parse_cpu_list(effective_path.read_text())
+    if not reserved:
+        fail("active reservation has no effective CPUs")
+    environment = caller_environment(args.caller_pid)
+    environment["AGENT_RESERVED_CPUS"] = format_cpu_list(reserved)
+    working_directory = os.readlink(f"/proc/{args.caller_pid}/cwd")
+
+    cgroup_processes.write_text(f"{os.getpid()}\n")
+    os.sched_setaffinity(0, reserved)
+    if set(os.sched_getaffinity(0)) != reserved:
+        fail("failed to enter the reserved CPU set")
+    pathlib.Path("/proc/self/oom_score_adj").write_text("1000\n")
+
+    account = pwd.getpwuid(target_uid)
+    os.initgroups(account.pw_name, target_gid)
+    set_no_new_privileges()
+    os.setresgid(target_gid, target_gid, target_gid)
+    os.setresuid(target_uid, target_uid, target_uid)
+    if os.getuid() != target_uid or os.geteuid() != target_uid:
+        fail("failed to drop root privileges")
+    os.chdir(working_directory)
+    os.execve(args.command[0], args.command, environment)
+
+
+def run_reserved(args: argparse.Namespace) -> int:
+    require_root()
+    try:
+        target_uid = int(os.environ["SUDO_UID"])
+        target_gid = int(os.environ["SUDO_GID"])
+    except (KeyError, ValueError):
+        fail("run this command through sudo from the user launching agent-sandbox")
+    if process_uid(args.caller_pid) != target_uid:
+        fail("caller PID does not belong to the sudo user")
+    if not is_ancestor(args.caller_pid, os.getpid()):
+        fail("caller PID is not an ancestor of this helper")
+    if not args.command or not os.path.isabs(args.command[0]):
+        fail("the reserved command must use an absolute executable path")
+
+    lock = acquire_lock()
+    unit = f"agent-reserved-{os.getpid()}-{time.monotonic_ns()}.scope"
+    previous: dict[str, str] = {}
+    owns_state = False
+    try:
+        if read_state() is not None:
+            fail(f"stale reservation state exists; run: sudo {sys.argv[0]} reset")
+
+        selected, reserved = select_cores(args.cores)
+        reserved_text = format_cpu_list(reserved)
+        labels = ", ".join(
+            f"package {package} core {core}" for package, core, _ in selected
+        )
+        print(f"Reserving {args.cores} physical core(s): {labels}")
+        print(f"  Logical CPUs: {reserved_text}")
+
+        previous = snapshot_units(reserved)
+        write_state(unit, previous, target_uid)
+        owns_state = True
+        restrict_units(previous, reserved)
+        verify_restrictions(previous, reserved)
+        print("  Background systemd workloads excluded from the reserved CPUs.")
+
+        command = [
+            SYSTEMD_RUN,
+            "--scope",
+            "--quiet",
+            "--collect",
+            f"--unit={unit}",
+            "--slice=benchmark.slice",
+            f"--property=AllowedCPUs={reserved_text}",
+            "--property=OOMPolicy=kill",
+            f"--property=MemoryMax={args.memory_max}",
+            "--property=KillMode=control-group",
+            "--",
+            os.path.realpath(__file__),
+            "child",
+            f"--uid={target_uid}",
+            f"--gid={target_gid}",
+            f"--caller-pid={args.caller_pid}",
+            f"--working-directory={os.getcwd()}",
+            f"--cpus={reserved_text}",
+            "--",
+            *args.command,
+        ]
+
+        interrupted = False
+
+        def handle_signal(signum: int, _frame: object) -> None:
+            nonlocal interrupted
+            interrupted = True
+            stop_unit(unit)
+
+        old_handlers = {
+            signum: signal.signal(signum, handle_signal)
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        }
+        try:
+            result = subprocess.run(command, check=False, env=SAFE_ROOT_ENV)
+        finally:
+            for signum, handler in old_handlers.items():
+                signal.signal(signum, handler)
+        return 128 + signal.SIGINT if interrupted else result.returncode
+    finally:
+        stop_unit(unit)
+        restored = restore_units(previous) if previous else True
+        if owns_state and restored:
+            clear_state()
+        lock.close()
+
+
+def plan(count: int) -> None:
+    selected, cpus = select_cores(count)
+    for package, core, siblings in selected:
+        print(
+            f"package={package} core={core} logical_cpus={format_cpu_list(set(siblings))}"
+        )
+    print(f"AllowedCPUs={format_cpu_list(cpus)}")
+
+
+def make_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="action", required=True)
+
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("--cores", type=int, required=True)
+    run_parser.add_argument("--memory-max", default="infinity")
+    run_parser.add_argument("--caller-pid", type=int, required=True)
+    run_parser.add_argument("command", nargs=argparse.REMAINDER)
+
+    child_parser = subparsers.add_parser("child", help=argparse.SUPPRESS)
+    child_parser.add_argument("--uid", type=int, required=True)
+    child_parser.add_argument("--gid", type=int, required=True)
+    child_parser.add_argument("--caller-pid", type=int, required=True)
+    child_parser.add_argument("--working-directory", required=True)
+    child_parser.add_argument("--cpus", required=True)
+    child_parser.add_argument("command", nargs=argparse.REMAINDER)
+
+    exec_parser = subparsers.add_parser("exec")
+    exec_parser.add_argument("--caller-pid", type=int, required=True)
+    exec_parser.add_argument("command", nargs=argparse.REMAINDER)
+
+    plan_parser = subparsers.add_parser("plan")
+    plan_parser.add_argument("--cores", type=int, required=True)
+    subparsers.add_parser("reset")
+    return parser
+
+
+def main() -> int:
+    args = make_parser().parse_args()
+    if getattr(args, "cores", 1) <= 0:
+        fail("core count must be a positive integer")
+    if getattr(args, "command", None) and args.command[0] == "--":
+        args.command = args.command[1:]
+    if args.action == "plan":
+        plan(args.cores)
+        return 0
+    if args.action == "reset":
+        reset()
+        return 0
+    if args.action == "child":
+        child(args)
+        return 0
+    if args.action == "exec":
+        exec_reserved(args)
+        return 0
+    return run_reserved(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

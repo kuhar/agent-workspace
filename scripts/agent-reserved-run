@@ -1,0 +1,30 @@
+#!/bin/bash
+# Run one command in the active agent CPU reservation.
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+    echo "Usage: agent-reserved-run COMMAND [ARGUMENTS...]" >&2
+    exit 2
+fi
+
+case "$1" in
+    /*)
+        EXECUTABLE="$1"
+        ;;
+    */*)
+        EXECUTABLE="$(realpath "$1")"
+        ;;
+    *)
+        EXECUTABLE="$(type -P -- "$1" || true)"
+        ;;
+esac
+
+if [[ -z "$EXECUTABLE" || ! -x "$EXECUTABLE" ]]; then
+    echo "Error: executable not found: $1" >&2
+    exit 127
+fi
+shift
+
+sudo -n -- /usr/local/libexec/agent-cpu-reserve exec \
+    --caller-pid "$$" \
+    -- "$EXECUTABLE" "$@"

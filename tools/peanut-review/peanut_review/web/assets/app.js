@@ -2420,6 +2420,29 @@
     refreshComments();
   }
 
+  async function ghRefresh() {
+    const btn = document.getElementById("gh-refresh-btn");
+    if (!btn) return;
+    if (!confirm(
+      "Refresh this PR checkout, synchronize the review snapshot, and fetch GitHub comments?"
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Refreshing…";
+    try {
+      const r = await api("POST", "/api/gh/refresh");
+      flashToast(r.summary || "PR refreshed.", 5000);
+      location.reload();
+    } catch (e) {
+      alert("Refresh PR failed: " + e.message);
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  const ghRefreshBtn = document.getElementById("gh-refresh-btn");
+  if (ghRefreshBtn) ghRefreshBtn.addEventListener("click", ghRefresh);
+
   // Soft line-wrap toggle. Persisted in localStorage so the choice
   // survives reloads. CSS does the actual wrapping (`body.wrap-lines`).
   const WRAP_KEY = "pr.wrap-lines";
@@ -2457,6 +2480,7 @@
          } },
     g: { label: "github…", submap: {
            f: { label: "fetch from GitHub", run: ghFetch },
+           r: { label: "refresh PR", run: ghRefresh },
            p: { label: "push", run: () => clickById("gh-push-btn") },
          } },
   };

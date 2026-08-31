@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import curator, models, polling, runtime, session as sess, store, validation
+from . import curator, models, polling, pr_sync, runtime, session as sess, store, validation
 
 
 def _get_session_dir(args: argparse.Namespace) -> str:
@@ -120,57 +120,6 @@ def _require_configured_curator(agents: list[models.AgentConfig]) -> models.Agen
     return curator.ensure_curator_agent(agents)
 
 
-def _github_pr_from_info(
-    pr_info,
-    *,
-    base_sha: str | None = None,
-    head_sha: str | None = None,
-) -> models.GitHubPR:
-    return models.GitHubPR(
-        repo=pr_info.repo,
-        number=pr_info.number,
-        url=pr_info.url,
-        head_sha=head_sha or pr_info.head_sha,
-        base_sha=base_sha or pr_info.base_sha,
-        title=pr_info.title,
-        head_ref_name=pr_info.head_ref_name,
-    )
-
-
-def _sync_session_to_pr(
-    session_dir: str | Path,
-    pr_info,
-    *,
-    base_ref: str | None = None,
-    topic_ref: str | None = None,
-    workspace: str | None = None,
-    repo_relative: str | None = None,
-) -> tuple[models.Session, bool, bool, int]:
-    existing = sess.load_session(session_dir)
-    if existing.github is not None and (
-        existing.github.repo != pr_info.repo
-        or existing.github.number != pr_info.number
-    ):
-        raise ValueError(
-            f"session is linked to {existing.github.repo}#{existing.github.number}, "
-            f"not {pr_info.repo}#{pr_info.number}"
-        )
-    session, head_changed, changed = sess.sync_session_snapshot(
-        session_dir,
-        base_ref=base_ref or pr_info.base_sha,
-        topic_ref=topic_ref or pr_info.head_sha,
-        github=_github_pr_from_info(
-            pr_info,
-            base_sha=base_ref,
-            head_sha=topic_ref,
-        ),
-        workspace=workspace,
-        repo_relative=repo_relative,
-    )
-    stale_count = store.mark_stale(session_dir) if head_changed else 0
-    return session, head_changed, changed, stale_count
-
-
 # ── Subcommand handlers ────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -215,7 +164,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 pr_info.repo, pr_info.number,
                 pr_info.head_ref_name or pr_info.title,
             )
-        github = _github_pr_from_info(
+        github = pr_sync.github_pr_from_info(
             pr_info,
             base_sha=base_ref,
             head_sha=topic_ref,
@@ -421,7 +370,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     if session_json.exists():
         if args.sync:
             try:
-                session_obj, head_changed, changed, stale_count = _sync_session_to_pr(
+                session_obj, head_changed, changed, stale_count = pr_sync.sync_session_to_pr(
                     session_dir,
                     pr_info,
                     base_ref=args.base,
@@ -448,7 +397,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             sess.save_session(session_dir, session_obj)
         print(session_dir)
     else:
-        github = _github_pr_from_info(
+        github = pr_sync.github_pr_from_info(
             pr_info,
             base_sha=args.base,
             head_sha=args.topic,
@@ -517,7 +466,7 @@ def cmd_sync_pr(args: argparse.Namespace) -> int:
     try:
         repo, number = gh.resolve_pr_spec(spec, workspace=sess.repo_path(session))
         pr_info = gh.fetch_pr_info(repo, number)
-        synced, head_changed, changed, stale_count = _sync_session_to_pr(
+        synced, head_changed, changed, stale_count = pr_sync.sync_session_to_pr(
             session_dir, pr_info,
         )
     except (RuntimeError, ValueError, gh.GhError) as e:

@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import agent_control, gh, gh_pull, gh_push, launch, runtime, store
+from .. import agent_control, gh, gh_pull, gh_push, launch, pr_refresh, runtime, store
 from ..models import Comment, CommentCategory, Note, Severity, normalize_comment_category
 from ..session import (
     GLOBAL_FILE,
@@ -681,6 +681,9 @@ class _Handler(BaseHTTPRequestHandler):
         if tail == "/api/gh/pull":
             self._post_gh_pull(session_dir)
             return
+        if tail == "/api/gh/refresh":
+            self._post_gh_refresh(session_dir)
+            return
         if tail == "/api/agents/kill":
             self._post_agents_kill(session_dir, data)
             return
@@ -1052,6 +1055,27 @@ class _Handler(BaseHTTPRequestHandler):
             "resolution_changed": r.resolution_changed,
             "skipped": r.skipped,
             "summary": r.summary(),
+        })
+
+    def _post_gh_refresh(self, session_dir: Path) -> None:
+        """Safely update the checkout, PR snapshot, and GitHub comments."""
+        try:
+            result = pr_refresh.refresh_pr(session_dir)
+        except ValueError as e:
+            return self._error(400, str(e))
+        except pr_refresh.RefreshConflict as e:
+            return self._error(409, str(e))
+        except gh.GhError as e:
+            return self._error(502, str(e))
+        except RuntimeError as e:
+            return self._error(500, str(e))
+        self._json(200, {
+            "old_head": result.old_head,
+            "new_head": result.new_head,
+            "head_changed": result.head_changed,
+            "stale_count": result.stale_count,
+            "pull_summary": result.pull_result.summary(),
+            "summary": result.summary(),
         })
 
     def _post_agents_kill(self, session_dir: Path, data: dict) -> None:

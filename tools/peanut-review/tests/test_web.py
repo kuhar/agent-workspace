@@ -1184,6 +1184,28 @@ def test_server_session_page(session_dir: Path):
         srv.shutdown()
 
 
+def test_github_session_renders_refresh_pr_button(session_dir: Path):
+    _mark_github_backed(session_dir)
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        text = body.decode()
+        assert 'id="gh-refresh-btn"' in text
+        assert ">Refresh PR</button>" in text
+        assert "refresh PR checkout" in text
+    finally:
+        srv.shutdown()
+
+
+def test_local_session_does_not_render_refresh_pr_button(session_dir: Path):
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
+        assert 'id="gh-refresh-btn"' not in body.decode()
+    finally:
+        srv.shutdown()
+
+
 def test_server_serves_versioned_compressed_assets(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
@@ -1425,6 +1447,57 @@ def test_server_gh_push_default_excludes_agent_comments(
         assert code == 200
         assert data["summary"] == "Pushed 1."
         assert captured_ids[-1] == [human_comment.id]
+    finally:
+        srv.shutdown()
+
+
+def test_server_gh_refresh_returns_checkout_and_sync_summary(
+    session_dir: Path,
+    monkeypatch,
+):
+    _mark_github_backed(session_dir)
+    result = web_app.pr_refresh.RefreshResult(
+        old_head="a" * 40,
+        new_head="b" * 40,
+        head_changed=True,
+        stale_count=2,
+        checkout_output="fast-forwarded",
+        pull_result=web_app.gh_pull.PullResult(new_anchored=1, skipped=4),
+    )
+    monkeypatch.setattr(web_app.pr_refresh, "refresh_pr", lambda path: result)
+
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/gh/refresh",
+            {},
+        )
+        assert code == 200
+        assert data["old_head"] == "a" * 40
+        assert data["new_head"] == "b" * 40
+        assert data["head_changed"] is True
+        assert data["stale_count"] == 2
+        assert data["pull_summary"] == "Pulled 1 anchored + 0 global (4 already local)."
+        assert data["summary"].startswith("Updated aaaaaaaaaaaa to bbbbbbbbbbbb")
+    finally:
+        srv.shutdown()
+
+
+def test_server_gh_refresh_conflict_returns_409(session_dir: Path, monkeypatch):
+    _mark_github_backed(session_dir)
+
+    def conflict(_path):
+        raise web_app.pr_refresh.RefreshConflict("checkout has local changes")
+
+    monkeypatch.setattr(web_app.pr_refresh, "refresh_pr", conflict)
+    srv, session_id, port = _start_server(session_dir)
+    try:
+        code, data = _post(
+            f"http://127.0.0.1:{port}/{session_id}/api/gh/refresh",
+            {},
+        )
+        assert code == 409
+        assert data["error"] == "checkout has local changes"
     finally:
         srv.shutdown()
 

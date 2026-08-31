@@ -1185,6 +1185,23 @@ header .gh-push {
 header .gh-push:hover { filter: brightness(1.15); }
 header .gh-push:active { transform: translateY(1px); }
 
+header .gh-refresh {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+header .gh-refresh:hover { background: var(--hover); }
+header .gh-refresh:active { transform: translateY(1px); }
+header .gh-refresh:disabled {
+  color: var(--muted);
+  border-color: var(--border);
+  cursor: wait;
+}
+
 body.modal-open { overflow: hidden; }
 .modal { position: fixed; inset: 0; z-index: 100; }
 .modal[hidden] { display: none; }

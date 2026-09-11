@@ -28,6 +28,7 @@ from ..session import (
     load_session,
     refresh_agent_statuses,
     repo_path,
+    review_repo_path,
     reviewer_agents,
     validate_comment_location,
     workspace_head_mismatch,
@@ -522,7 +523,7 @@ class _Handler(BaseHTTPRequestHandler):
                 poll_etags["/api/session"] = session_after
             try:
                 files = diffmod.parse_diff(
-                    repo_path(session), session.base_ref, session.topic_ref,
+                    review_repo_path(session), session.base_ref, session.topic_ref,
                 )
             except RuntimeError as e:
                 self._error(409, f"cannot render pinned review diff: {e}")
@@ -572,6 +573,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "workspace": session.workspace,
                 "repo_relative": session.repo_relative,
                 "repo_path": repo_path(session),
+                "git_common_dir": session.git_common_dir,
                 "agents": agents,
                 "progress": summarize_agent_progress(agents),
                 "comment_count": len(live),
@@ -756,9 +758,10 @@ class _Handler(BaseHTTPRequestHandler):
                 end_line = data.get("end_line")
                 session = load_session(session_dir)
                 _, err = validate_comment_location(
-                    repo_path(session), file, line,
+                    review_repo_path(session), file, line,
                     head_ref=session.current_head,
                     require_pinned=session.github is not None,
+                    checkout=repo_path(session),
                 )
                 if err:
                     return self._error(400, err)
@@ -863,7 +866,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(400, "session is not GitHub-backed")
         comments = store.read_all_comments(session_dir)
         anchor_index = gh_push.build_review_anchor_index(
-            repo_path(s), s.base_ref, s.topic_ref,
+            review_repo_path(s), s.base_ref, s.topic_ref,
         )
         plan = gh_push.plan_push(comments, anchor_index=anchor_index)
         by_id = {c.id: c for c in comments}
@@ -966,7 +969,7 @@ class _Handler(BaseHTTPRequestHandler):
         end = min(end, start + MAX_DIFF_FOLD_FETCH_LINES)
         s = load_session(session_dir)
         try:
-            files = diffmod.parse_diff(repo_path(s), s.base_ref, s.topic_ref)
+            files = diffmod.parse_diff(review_repo_path(s), s.base_ref, s.topic_ref)
         except RuntimeError as e:
             return self._error(409, f"cannot render pinned review diff: {e}")
         fd = next((f for f in files if f.path == file_path), None)
@@ -995,7 +998,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(400, "session is not GitHub-backed")
         comments = store.read_all_comments(session_dir)
         anchor_index = gh_push.build_review_anchor_index(
-            repo_path(s), s.base_ref, s.topic_ref,
+            review_repo_path(s), s.base_ref, s.topic_ref,
         )
         plan = gh_push.plan_push(comments, anchor_index=anchor_index)
         try:

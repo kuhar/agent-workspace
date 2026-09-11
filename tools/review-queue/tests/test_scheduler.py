@@ -64,6 +64,84 @@ class FakeLauncher:
         return None
 
 
+@pytest.mark.parametrize("exit_code", [0, 7])
+async def test_live_phases_persist_before_process_exit(
+    config, project, tmp_path, exit_code, monkeypatch
+):
+    from review_queue.database import Database
+
+    gate = tmp_path / "continue"
+    project.launcher.write_text(
+        f"#!{sys.executable}\n"
+        + """
+import json, os, sys, time
+from pathlib import Path
+if sys.argv[2] == "prepare":
+    print("::group::Setup", flush=True)
+    sys.exit(0)
+print("source.cpp:1: error: earlier nonblocking diagnostic", flush=True)
+print("::group::Build", flush=True)
+print("::group::Clang", flush=True)
+while not Path(os.environ["TEST_PHASE_GATE"]).exists():
+    time.sleep(0.01)
+code = int(os.environ["TEST_PHASE_EXIT"])
+if code:
+    print("source.cpp:12: error: broken build", flush=True)
+    print("Final checkout after failure: ready", flush=True)
+    sys.exit(code)
+print("::endgroup::", flush=True)
+print("::endgroup::", flush=True)
+Path(os.environ["REVIEW_QUEUE_RESULT"]).write_text(json.dumps({
+    "protocol": 1, "repository": "ROCm/rocm-systems", "pr": 12,
+    "requested_head": os.environ["REVIEW_QUEUE_TARGET_HEAD"],
+    "reviewed_head": os.environ["REVIEW_QUEUE_TARGET_HEAD"], "status": "succeeded",
+}))
+"""
+    )
+    monkeypatch.setenv("TEST_PHASE_GATE", str(gate))
+    monkeypatch.setenv("TEST_PHASE_EXIT", str(exit_code))
+    scheduler = Scheduler(config, launcher=LauncherClient(grace_seconds=0.1))
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    await scheduler._dispatch_available()
+    task = next(iter(scheduler._job_tasks.values()))
+    try:
+
+        async def wait_phase():
+            while scheduler.db.job_row(1)["phase"] != "Build › Clang":
+                if task.done():
+                    await task
+                    raise AssertionError(dict(scheduler.db.job_row(1)))
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_phase(), timeout=10)
+        assert not task.done()
+        active = scheduler.snapshot().running[0]
+        assert active.status == "running"
+        assert active.phase == "Build › Clang"
+        assert active.phase_started_at
+        other = Database(config.state_dir / "queue.sqlite3")
+        try:
+            assert other.job_row(1)["phase"] == active.phase
+            assert [e.phase for e in other.phase_events()] == ["Setup", "Build", "Build › Clang"]
+        finally:
+            other.close()
+    finally:
+        gate.touch()
+        await asyncio.wait_for(task, timeout=10)
+    row = scheduler.db.job_row(1)
+    if exit_code:
+        assert row["status"] == "failed"
+        assert row["phase"] == "Build › Clang"
+        assert row["error"].startswith("Build › Clang failed (exit 7)")
+        assert "broken build" in row["error"]
+        assert "earlier nonblocking" not in row["error"]
+    else:
+        assert row["status"] == "succeeded"
+        assert row["phase"] == ""
+
+
 class FakeGitHub:
     def __init__(self) -> None:
         self.project: ProjectConfig | None = None
@@ -118,6 +196,51 @@ def record(project: ProjectConfig) -> PullRequest:
         head_ref="users/alice/test",
         updated_at=isoformat(utc_now() - timedelta(minutes=5)),
     )
+
+
+async def test_manual_mode_dispatch_requires_enqueue_and_pause_still_blocks(config, project):
+    scheduler = Scheduler(config, launcher=FakeLauncher(), github=FakeGitHub())
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    assert scheduler.cycle_mode() == "manual"
+    await scheduler._dispatch_available()
+    assert not scheduler._job_tasks
+    assert not scheduler.db.wrappers()
+    assert scheduler.snapshot().dispatch_blocked_reason == "waiting for manual enqueue"
+    await scheduler.add_manual("12")
+    assert scheduler.snapshot().queue[0].manual_enqueued
+    scheduler.toggle_pause()
+    await scheduler._dispatch_available()
+    assert not scheduler._job_tasks
+    scheduler.toggle_pause()
+    assert scheduler.snapshot().mode == "manual"
+    await scheduler._dispatch_available()
+    await next(iter(scheduler._job_tasks.values()))
+    assert scheduler.db.connection.execute("SELECT status FROM jobs").fetchone()[0] == "succeeded"
+
+
+async def test_switching_to_manual_during_wrapper_preparation_holds_job(
+    config, project, monkeypatch
+):
+    scheduler = Scheduler(config, launcher=FakeLauncher())
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    prepare = scheduler._ensure_wrapper
+
+    async def switch_mode(item):
+        wrapper = await prepare(item)
+        scheduler.db.set_mode("manual")
+        return wrapper
+
+    monkeypatch.setattr(scheduler, "_ensure_wrapper", switch_mode)
+    await scheduler._dispatch_available()
+    assert not scheduler._job_tasks
+    assert scheduler.snapshot().queue[0].status == "queued"
+    scheduler.retry(scheduler.snapshot().queue[0])
+    await scheduler._dispatch_available()
+    await next(iter(scheduler._job_tasks.values()))
 
 
 async def test_dispatch_allocates_named_wrapper_and_validates_result(
@@ -361,3 +484,74 @@ async def test_reconcile_waits_for_unidentified_supervisor_shutdown(
     assert scheduler.db.wrapper_by_id(wrapper_id)["state"] == "idle"
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
+
+
+async def test_path_check_failure_holds_dispatch_and_manual_inclusion(config, project):
+    from review_queue.github import GitHubError
+
+    project = replace(project, include_paths=("emulation/",))
+    config = replace(config, projects=(project,))
+    included = replace(
+        record(project), path_filter_key=project.path_filter_key, path_filter_passed=True
+    )
+
+    class FailingFiles:
+        async def list_project(self, _project):
+            raise GitHubError("incomplete PR file list")
+
+        async def view(self, _project, _spec):
+            return replace(included, path_filter_passed=False)
+
+    scheduler = Scheduler(config, github=FailingFiles(), launcher=FakeLauncher())
+    scheduler.db.apply_poll(
+        project, [included], query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    with pytest.raises(GitHubError, match="incomplete"):
+        await scheduler._poll_project(project)
+    await scheduler._dispatch_available()
+    assert not scheduler._job_tasks
+    assert scheduler.db.stale_projects() == frozenset({project.name})
+    with pytest.raises(ValueError, match="include_paths"):
+        await scheduler.add_manual("12")
+
+
+@pytest.mark.parametrize("operation", ["prepare", "run"])
+@pytest.mark.parametrize("ineligible", [True, False])
+async def test_launcher_failure_reason_and_terminal_status(config, project, operation, ineligible):
+    class FailedLauncher(FakeLauncher):
+        async def run_logged(self, **kwargs):
+            if kwargs["operation"] != operation:
+                return await super().run_logged(**kwargs)
+            kwargs["on_started"](os.getpid(), None)
+            with Path(kwargs["log_path"]).open("a") as log:
+                log.write("test.cpp:12: error: missing symbol\n")
+            if ineligible:
+                Path(kwargs["env"]["REVIEW_QUEUE_RESULT"]).write_text(
+                    json.dumps(
+                        {
+                            "protocol": 1,
+                            "repository": project.repo,
+                            "pr": 12,
+                            "requested_head": "a" * 40,
+                            "exit_code": 1,
+                            "status": "ineligible",
+                            "error": "PR #12 is merged",
+                        }
+                    )
+                )
+            return 1
+
+    scheduler = Scheduler(config, launcher=FailedLauncher())
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    await scheduler._dispatch_available()
+    await next(iter(scheduler._job_tasks.values()))
+    row = scheduler.db.job_row(1)
+    assert row["status"] == ("ineligible" if ineligible else "failed")
+    assert row["finished_at"]
+    assert row["exit_code"] == 1
+    assert ("PR #12 is merged" if ineligible else "missing symbol") in row["error"]
+    assert scheduler.snapshot().wrappers[0].state == row["status"]
+    assert scheduler.snapshot().wrappers[0].cleanup_error == row["error"]
+    assert scheduler._poll_now.is_set()

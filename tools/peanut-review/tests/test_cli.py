@@ -8,6 +8,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from peanut_review.cli import main
 from peanut_review import session as sess, models, store
 
@@ -77,6 +79,8 @@ def _make_git_repo() -> Path:
 
 
 def _mock_git(workspace, *args):
+    if args == ("rev-parse", "--path-format=absolute", "--git-common-dir"):
+        return "/tmp/fakerepo/.git"
     if args[:2] == ("rev-parse", "--verify"):
         return "abc123def456789"
     if args[0] == "diff" and "--stat" in args:
@@ -85,6 +89,8 @@ def _mock_git(workspace, *args):
 
 
 def _mock_git_empty_diff(workspace, *args):
+    if args == ("rev-parse", "--path-format=absolute", "--git-common-dir"):
+        return "/tmp/fakerepo/.git"
     if args[:2] == ("rev-parse", "--verify"):
         return "abc123def456789"
     if args[0] == "diff" and "--stat" in args:
@@ -283,6 +289,71 @@ def test_wait_all_no_curate_skips_github_curator():
 
     assert rc == 0
     mocked.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "count, failures, allowed, unfinished, curator_fails, expected",
+    [
+        (4, 0, 2, False, False, 0),
+        (4, 1, 2, False, False, 0),
+        (4, 2, 2, False, False, 0),
+        (4, 3, 2, False, False, 1),
+        (3, 1, 1, False, False, 0),
+        (3, 2, 1, False, False, 1),
+        (1, 1, 0, False, False, 1),
+        (4, 1, 0, False, False, 1),
+        (4, 2, 2, True, False, 1),
+        (4, 2, 2, False, True, 1),
+        (4, 4, 4, False, False, 1),
+    ],
+)
+def test_wait_all_reviewer_failure_budget(
+    tmp_path, capsys, count, failures, allowed, unfinished, curator_fails, expected,
+):
+    from peanut_review import polling, runtime
+
+    sd = str(tmp_path / "session")
+    with patch("peanut_review.session._run_git", side_effect=_mock_git):
+        sess.create_session(
+            workspace=_make_cursor_workspace(),
+            agents=[{"name": f"reviewer{i}", "model": "test"} for i in range(count)]
+            + [{"name": "Curator", "model": "test", "role": "curator"}],
+            session_dir=sd,
+            github=models.GitHubPR(repo="acme/repo", number=42),
+            include_curator=True,
+        )
+    for i in range(count):
+        if i < failures:
+            runtime.update_agent_meta(sd, f"reviewer{i}", {"exit_code": 1})
+        elif not (unfinished and i == count - 1):
+            polling.write_signal(sd, f"reviewer{i}", "round-done")
+
+    def curate(session_dir):
+        if curator_fails:
+            runtime.update_agent_meta(session_dir, "Curator", {"exit_code": 1})
+        else:
+            polling.write_signal(session_dir, "Curator", "round-done")
+        return [{"name": "Curator", "supervisor_pid": 12345}]
+
+    with patch("peanut_review.launch.launch_curator", side_effect=curate) as mocked:
+        rc = main([
+            "--session", sd, "wait-all", "round-done", "--timeout", "0",
+            "--max-reviewer-failures", str(allowed),
+        ])
+    assert rc == expected
+    assert mocked.call_count == int(not unfinished and failures <= allowed and failures < count)
+    output = capsys.readouterr()
+    markers = [line for line in output.out.splitlines() if line.startswith("::")]
+    expected_markers = ["::group::Reviewers"]
+    if mocked.call_count:
+        expected_markers += ["::endgroup::", "::group::Curator"]
+        if not curator_fails:
+            expected_markers += ["::endgroup::"]
+    assert markers == expected_markers
+    if failures:
+        assert "reviewer0" in output.err
+    if failures:
+        assert not (Path(sd) / "signals/reviewer0.round-done").exists()
 
 
 def test_kill_agents_cli_prints_results():

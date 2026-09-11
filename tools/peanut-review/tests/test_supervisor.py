@@ -14,6 +14,8 @@ from peanut_review.supervisor import supervise_agent
 
 
 def _mock_git(workspace, *args):
+    if args == ("rev-parse", "--path-format=absolute", "--git-common-dir"):
+        return "/tmp/fakerepo/.git"
     if args[:2] == ("rev-parse", "--verify"):
         return "abc123def456"
     if args[0] == "diff" and "--stat" in args:

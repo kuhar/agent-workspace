@@ -159,6 +159,10 @@ SESSION=<printed-session-path>
 "$PR_BIN" --session "$SESSION" wait-all round-done --timeout 900
 ```
 
+`wait-all round-done` emits `::group::Reviewers` and `::group::Curator` log
+markers as it enters those phases, closing each with `::endgroup::` on success.
+A failed phase remains open so a calling queue can attribute the failure.
+
 For GitHub-backed sessions, `wait-all round-done` waits for reviewers, then
 launches the dedicated `Curator` agent and waits for it to finish. Inspect the
 curated result in the web UI, then use the UI's GitHub push modal when ready:
@@ -169,6 +173,21 @@ curated result in the web UI, then use the UI's GitHub push modal when ready:
 "$PR_BIN" --session "$SESSION" edit c_1234abcd --body-file /tmp/comment.md
 "$PR_BIN" --session "$SESSION" delete c_9999ffff
 ```
+
+`wait-all round-done --max-reviewer-failures N` tolerates up to N reviewers
+finishing without a `round-done` signal. It waits for every reviewer to finish
+before curation, reports the failed reviewers, and still fails if any reviewer
+remains unfinished at the deadline or Curator fails. At least one reviewer must
+succeed. The default is zero tolerated failures; the RocJITsu `review-pr.sh`
+launcher allows up to half of its configured reviewers (rounded down).
+
+When **curate** needs a checkout that was recycled or has moved to another
+commit, it restores the pinned commit from retained Git storage into
+`<session>/curator-workspaces/<commit>/repo`. The saved diff, comments, and PR
+identity stay unchanged. The replacement contains source and runner config;
+build outputs and virtual environments are not restored. Retargeting is blocked
+while session agents are still running. A legacy session without retained Git
+storage must first use `retain-git --repo <surviving-repository>`.
 
 The web UI also exposes manual **curate** and **rerun all** controls in the
 Agents section when you need to rerun comment curation or start a fresh
@@ -240,6 +259,25 @@ retargets them: if the checkout has moved, the page reports that the workspace
 differs until `sync-pr` (GitHub sessions) or `migrate` (local sessions) is run
 explicitly. Agent launch/rerun is refused for a GitHub session while its
 workspace is checked out at a different commit.
+
+New and synchronized sessions record `git_common_dir` separately from the
+execution `workspace` and `repo_relative`. Pinned diffs, folded source context,
+and GitHub comment anchors read the shared Git directory, so linked worktrees
+can be recycled without breaking saved reviews. Session-specific refs under
+`refs/peanut-review/` retain reviewed commits, including earlier revisions,
+against Git garbage collection. Keep the shared repository available; these
+refs are not automatically pruned when session directories are deleted.
+
+To repair an older session whose worktree has already been removed, supply a
+surviving repository containing its recorded commits:
+
+```bash
+"$PR_BIN" --session "$SESSION" retain-git --repo /path/to/main/repository
+```
+
+This updates durable Git storage without changing the execution workspace,
+reviewed commits, comments, or agent configuration. Reviewer reruns still need
+a valid execution checkout; synchronize a replacement workspace before rerunning.
 
 Rerun agents only for substantial changes. Use `rerun`, not `launch`, so stale
 round signals are cleared before the selected reviewers start:

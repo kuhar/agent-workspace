@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .database import Database, PollOutcome
 from .github import GitHubClient, GitHubError
-from .launcher import LauncherClient, LauncherError, launcher_environment
+from .launcher import LauncherClient, LauncherError, failure_details, launcher_environment
 from .models import ProjectConfig, QueueConfig, QueueItem, QueueSnapshot
 from .util import (
     atomic_json,
@@ -66,7 +66,9 @@ class Scheduler:
         (self.config.state_dir / "logs").mkdir(exist_ok=True)
         (self.config.state_dir / "results").mkdir(exist_ok=True)
         self.db = Database(self.config.state_dir / "queue.sqlite3")
-        self.db.seed(config.projects, start_paused=config.start_paused)
+        self.db.seed(
+            config.projects, start_paused=config.start_paused, start_mode=config.start_mode
+        )
         self.github = github or GitHubClient()
         self.launcher = launcher or LauncherClient()
         self.projects = {project.name: project for project in config.projects}
@@ -291,6 +293,8 @@ class Scheduler:
             self._blocked_reason = (
                 "waiting projects have stale GitHub state"
                 if stale_projects and self.db.next_ready() is not None
+                else "waiting for manual enqueue"
+                if self.db.manual_only()
                 else None
             )
             return
@@ -298,6 +302,13 @@ class Scheduler:
         if wrapper is None:
             return
         job_id = item.job_id
+        # Wrapper cleanup can await I/O while the user changes the dispatch mode.
+        current = self.db.job_row(job_id)
+        if self.db.paused() or (
+            self.db.manual_only() and current["source"] not in {"manual", "manual-watch"}
+        ):
+            self._blocked_reason = "dispatch mode changed; waiting"
+            return
         self.db.update_job(job_id, status="preparing")
         self.db.update_wrapper(int(wrapper["id"]), state="preparing", touch=True)
         task = asyncio.create_task(self._run_job(job_id), name=f"review-job-{job_id}")
@@ -435,6 +446,7 @@ class Scheduler:
                 self.launcher.cancel(job_id)
 
         try:
+            prepare_offset = log_path.stat().st_size if log_path.exists() else 0
             prepare_code = await self.launcher.run_logged(
                 job_id=job_id,
                 project=project,
@@ -444,16 +456,26 @@ class Scheduler:
                 env=env,
                 log_path=log_path,
                 on_started=started,
+                on_phase=lambda change: self.db.update_phase(job_id, change),
             )
             if prepare_code:
                 latest = self.db.job_row(job_id)
                 cancelled = latest is not None and latest["status"] == "cancelling"
+                status, reason = failure_details(
+                    log_path=log_path,
+                    result_path=result_path,
+                    operation="prepare",
+                    exit_code=prepare_code,
+                    repo=row["repo"],
+                    number=row["pr_number"],
+                    head=row["head_sha"],
+                    log_offset=max(prepare_offset, latest["phase_log_offset"] if latest else 0),
+                    phase=latest["phase"] if latest else "",
+                )
                 self.db.update_job(
                     job_id,
-                    status="cancelled" if cancelled else "failed",
-                    error="cancelled by user"
-                    if cancelled
-                    else f"launcher prepare exited {prepare_code}",
+                    status="cancelled" if cancelled else status,
+                    error="cancelled by user" if cancelled else reason,
                     exit_code=prepare_code,
                 )
                 return
@@ -464,6 +486,7 @@ class Scheduler:
                 return
             self.db.update_job(job_id, status="running")
             self.db.update_wrapper(int(row["wrapper_id"]), state="running", touch=True)
+            run_offset = log_path.stat().st_size if log_path.exists() else 0
             run_code = await self.launcher.run_logged(
                 job_id=job_id,
                 project=project,
@@ -473,6 +496,7 @@ class Scheduler:
                 env=env,
                 log_path=log_path,
                 on_started=started,
+                on_phase=lambda change: self.db.update_phase(job_id, change),
             )
             latest = self.db.job_row(job_id)
             if latest is not None and latest["status"] == "cancelling":
@@ -480,10 +504,21 @@ class Scheduler:
                     job_id, status="cancelled", error="cancelled by user", exit_code=run_code
                 )
             elif run_code:
+                status, reason = failure_details(
+                    log_path=log_path,
+                    result_path=result_path,
+                    operation="run",
+                    exit_code=run_code,
+                    repo=row["repo"],
+                    number=row["pr_number"],
+                    head=row["head_sha"],
+                    log_offset=max(run_offset, latest["phase_log_offset"] if latest else 0),
+                    phase=latest["phase"] if latest else "",
+                )
                 self.db.update_job(
                     job_id,
-                    status="failed",
-                    error=f"launcher run exited {run_code}",
+                    status=status,
+                    error=reason,
                     exit_code=run_code,
                 )
             else:
@@ -578,6 +613,12 @@ class Scheduler:
         self.db.set_paused(paused)
         return paused
 
+    def cycle_mode(self) -> str:
+        modes = ("active", "manual", "paused")
+        mode = modes[(modes.index(self.db.mode()) + 1) % len(modes)]
+        self.db.set_mode(mode)
+        return mode
+
     def adjust_priority(self, item: QueueItem, delta: int) -> None:
         self.db.adjust_pr_priority(item.repo, item.number, delta)
 
@@ -651,6 +692,7 @@ class Scheduler:
         )
         return QueueSnapshot(
             paused=self.db.paused(),
+            manual_only=self.db.manual_only(),
             dispatch_blocked_reason=self._blocked_reason,
             max_running=self.config.max_running,
             max_wrappers=self.config.max_wrappers,
@@ -659,6 +701,7 @@ class Scheduler:
             running=self.db.running(),
             wrappers=self.db.wrappers(),
             projects=self.db.project_health(),
+            phase_events=self.db.phase_events(),
         )
 
     def log_tail(self, path: str | None, *, lines: int = 500) -> str:

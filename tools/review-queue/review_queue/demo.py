@@ -7,7 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from .models import ProjectHealth, QueueItem, QueueSnapshot, RunView, WrapperView
+from .models import PhaseEvent, ProjectHealth, QueueItem, QueueSnapshot, RunView, WrapperView
 from .scheduler import QueueError
 from .util import isoformat
 
@@ -47,6 +47,7 @@ class DemoJob:
     quiet_until: datetime | None = None
     wrapper_id: int | None = None
     error: str | None = None
+    manual_enqueued: bool = False
 
 
 @dataclass(slots=True)
@@ -180,6 +181,7 @@ class DemoScheduler:
         self._time_scale = float(speed)
         self._clock_paused = False
         self._dispatch_paused = False
+        self._manual_only = False
         self._task: asyncio.Task[None] | None = None
         self._restart()
 
@@ -196,6 +198,7 @@ class DemoScheduler:
         self._pull_versions: dict[tuple[str, int], int] = {}
         self._attempts: dict[tuple[str, int, str], int] = {}
         self._logs: dict[int, list[str]] = {}
+        self._phase_events: list[PhaseEvent] = []
         self._latest_job_by_wrapper: dict[int, int] = {}
         self._project_priorities = {
             "rocjitsu": 10,
@@ -389,6 +392,7 @@ class DemoScheduler:
             attempt=attempt,
             queued_at=self._now,
             quiet_until=quiet_until,
+            manual_enqueued=source.startswith("manual"),
         )
         self._jobs[job_id] = job
         self._logs[job_id] = [
@@ -420,7 +424,11 @@ class DemoScheduler:
 
     def _ready_jobs(self) -> list[DemoJob]:
         return sorted(
-            (job for job in self._jobs.values() if job.status == "queued"),
+            (
+                job
+                for job in self._jobs.values()
+                if job.status == "queued" and (not self._manual_only or job.manual_enqueued)
+            ),
             key=lambda job: (-self._score(job), job.queued_at, job.job_id),
         )
 
@@ -521,6 +529,16 @@ class DemoScheduler:
         run.stage_index = stage_index
         stage = STAGES[stage_index][1]
         self._log(job.job_id, f"{stage} ({int(fraction * 100)}%)")
+        self._phase_events.append(
+            PhaseEvent(
+                id=(self._phase_events[-1].id + 1) if self._phase_events else 1,
+                project=job.pull.project,
+                number=job.pull.number,
+                phase=stage,
+                started_at=isoformat(self._now),
+            )
+        )
+        self._phase_events = self._phase_events[-50:]
 
     def _finish(self, job: DemoJob, *, succeeded: bool) -> None:
         self._runs.pop(job.job_id, None)
@@ -571,6 +589,7 @@ class DemoScheduler:
             wrapper_path=wrapper.path if wrapper else None,
             error=job.error,
             review_count=self._review_count(pull),
+            manual_enqueued=job.manual_enqueued,
         )
 
     def snapshot(self) -> QueueSnapshot:
@@ -592,7 +611,12 @@ class DemoScheduler:
                 title=self._jobs[job_id].pull.title,
                 author=self._jobs[job_id].pull.author,
                 head_sha=self._jobs[job_id].head_sha,
-                status=self._run_status(run),
+                status=self._jobs[job_id].status,
+                phase=self._run_status(run),
+                phase_started_at=isoformat(
+                    run.started_at
+                    + timedelta(minutes=run.duration_minutes * STAGES[max(run.stage_index, 0)][0])
+                ),
                 started_at=isoformat(run.started_at),
                 wrapper_path=self._wrappers[self._jobs[job_id].wrapper_id].path,
                 log_path=f"demo://job/{job_id}",
@@ -639,6 +663,8 @@ class DemoScheduler:
         reason = None
         if self._dispatch_paused:
             reason = "dispatch paused"
+        elif self._manual_only and not self._ready_jobs():
+            reason = "waiting for manual enqueue"
         elif waiting and all(job.pull.project in self._stale_projects for job in waiting):
             reason = "waiting projects have stale synthetic GitHub state"
         elif len(self._runs) >= self.max_running:
@@ -654,7 +680,9 @@ class DemoScheduler:
             reason = "wrapper cap reached; unpin an idle wrapper"
         total_size = sum(wrapper.size_bytes for wrapper in self._wrappers.values())
         return QueueSnapshot(
+            phase_events=tuple(self._phase_events),
             paused=self._dispatch_paused,
+            manual_only=self._manual_only,
             dispatch_blocked_reason=reason,
             max_running=self.max_running,
             max_wrappers=self.max_wrappers,
@@ -696,6 +724,15 @@ class DemoScheduler:
             self._dispatch()
         return self._dispatch_paused
 
+    def cycle_mode(self) -> str:
+        modes = ("active", "manual", "paused")
+        mode = modes[(modes.index(self.snapshot().mode) + 1) % len(modes)]
+        self._dispatch_paused = mode == "paused"
+        if mode != "paused":
+            self._manual_only = mode == "manual"
+        self._dispatch()
+        return mode
+
     def adjust_priority(self, item: QueueItem, delta: int) -> None:
         key = (item.repo, item.number)
         self._pr_priorities[key] = self._pr_priorities.get(key, 0) + delta
@@ -718,6 +755,11 @@ class DemoScheduler:
         existing = next((pull for pull in self._pulls.values() if pull.number == number), None)
         if existing is not None:
             self._ignored.discard((existing.repo, existing.number))
+            for job in self._jobs.values():
+                if job.pull == existing and job.status in {"queued", "debouncing"}:
+                    job.manual_enqueued = True
+                    job.status = "queued"
+                    job.quiet_until = None
             if not any(
                 job.pull.repo == existing.repo
                 and job.pull.number == existing.number
@@ -765,6 +807,7 @@ class DemoScheduler:
     def retry(self, item: QueueItem) -> int:
         job = self._jobs[item.job_id]
         if job.status in {"queued", "debouncing"}:
+            job.manual_enqueued = True
             job.status = "queued"
             job.quiet_until = None
             return job.job_id
@@ -785,6 +828,11 @@ class DemoScheduler:
             None,
         )
         if active is not None:
+            job = self._jobs[active]
+            if job.status in {"queued", "debouncing"}:
+                job.manual_enqueued = True
+                job.status = "queued"
+                job.quiet_until = None
             return active
         job_id = self._enqueue(
             wrapper.pull,

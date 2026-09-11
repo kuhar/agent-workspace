@@ -225,7 +225,7 @@ def _comment_result(session_dir: Path, author: str, payload: dict[str, Any]) -> 
             line = line_value
             end_line = payload.get("end_line")
             file_lines, error = sess.validate_comment_location(
-                sess.repo_path(session), file, line,
+                sess.review_repo_path(session), file, line,
                 head_ref=session.current_head,
                 require_pinned=True,
             )

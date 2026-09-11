@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 from collections.abc import Callable
@@ -11,11 +12,76 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import ProjectConfig
+from .phases import PhaseChange, PhaseStack
 from .util import process_start_ticks
 
 
 class LauncherError(RuntimeError):
     pass
+
+
+def failure_details(
+    *,
+    log_path: Path,
+    result_path: Path,
+    operation: str,
+    exit_code: int,
+    repo: str,
+    number: int,
+    head: str,
+    log_offset: int = 0,
+    phase: str = "",
+) -> tuple[str, str]:
+    """Read an optional failure result, falling back to bounded launcher output."""
+    try:
+        payload = json.loads(result_path.read_text())
+    except (OSError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and all(
+        payload.get(key) == value
+        for key, value in {
+            "protocol": 1,
+            "repository": repo,
+            "pr": number,
+            "requested_head": head,
+            "exit_code": exit_code,
+        }.items()
+    ):
+        status, reason = payload.get("status"), payload.get("error")
+        if (
+            isinstance(status, str)
+            and status in {"failed", "ineligible"}
+            and isinstance(reason, str)
+            and reason.strip()
+        ):
+            context = f"{phase}: " if phase else ""
+            return status, context + " ".join(reason.split())[:1200]
+
+    fallback = (
+        f"{phase} failed (exit {exit_code})"
+        if phase
+        else f"launcher {operation} exited {exit_code}"
+    )
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(log_offset, stream.tell() - 131072))
+            output = stream.read().decode(errors="replace")
+    except OSError:
+        return "failed", fallback
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    errors = [line for line in lines if re.search(r"\berror\b|\bfatal\b", line, re.I)]
+    diagnostics = errors or [
+        line
+        for line in lines
+        if re.search(r"\bfailed\b|timed? out|timeout|permission denied", line, re.I)
+        and not line.startswith(("FAILED:", "ninja: build stopped:"))
+    ]
+    # Keep the compiler diagnostic, even when an EXIT trap prints a happy checkout footer.
+    details = diagnostics[:3] or lines[-3:]
+    summary = "; ".join(line[:350] for line in details)
+    return "failed", f"{fallback}: {summary}"[:1200] if summary else fallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +159,11 @@ class LauncherClient:
         env: dict[str, str],
         log_path: Path,
         on_started: Callable[[int, int | None], None],
+        on_phase: Callable[[PhaseChange], None] | None = None,
     ) -> int:
+        phases = PhaseStack()
+        if on_phase:
+            on_phase(PhaseChange())
         command = [
             sys.executable,
             "-m",
@@ -124,6 +194,9 @@ class LauncherClient:
                     text = line.decode(errors="replace")
                     log.write(text)
                     log.flush()
+                    change = phases.consume(text, log_offset=log.tell())
+                    if change is not None and on_phase:
+                        on_phase(change)
             return int(await process.wait())
         except BaseException:
             await self._terminate(process)

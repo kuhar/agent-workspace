@@ -21,6 +21,7 @@ max_running = 2
 max_wrappers = 3
 min_free_gib = 4
 start_paused = true
+start_mode = "manual"
 
 [ui]
 theme = "monokai"
@@ -33,14 +34,17 @@ launcher = "{launcher}"
 wrapper_root = "{tmp_path / "wrappers"}"
 estimated_wrapper_gib = 5
 priority = 7
+include_paths = ["emulation"]
 """
     )
     loaded = load_config(config, state_dir=tmp_path / "state")
     assert loaded.start_paused
+    assert loaded.start_mode == "manual"
     assert loaded.push_quiet_seconds == 0
     assert loaded.projects[0].priority == 7
     assert loaded.projects[0].launcher == launcher
     assert loaded.theme == "monokai"
+    assert loaded.projects[0].include_paths == ("emulation/",)
 
 
 def test_config_rejects_duplicate_projects(tmp_path: Path) -> None:
@@ -72,3 +76,38 @@ wrapper_root = "{tmp_path / "wrappers"}"
     )
 
     assert load_config(config).poll_seconds == 120
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (["emulation"], ("emulation/",)),
+        (["emulation/", "emulation"], ("emulation/",)),
+        ([], ()),
+    ],
+)
+def test_include_paths_normalizes_directories(value, expected):
+    from review_queue.config import _include_paths
+
+    assert _include_paths(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "emulation/",
+        [1],
+        ["/emulation"],
+        ["../emulation"],
+        ["emulation/../docs"],
+        ["emulation//foo"],
+        ["emulation/*"],
+        [""],
+        ["."],
+    ],
+)
+def test_include_paths_rejects_invalid_directories(value):
+    from review_queue.config import _include_paths
+
+    with pytest.raises(ValueError):
+        _include_paths(value)

@@ -5,7 +5,7 @@ bootstrap_hours = 24
 max_running = 2
 max_wrappers = 3
 min_free_gib = 50
-start_paused = false
+start_mode = "active"
 
 [ui]
 theme = "catppuccin-mocha"
@@ -13,7 +13,8 @@ theme = "catppuccin-mocha"
 [[projects]]
 name = "rocjitsu"
 repo = "ROCm/rocm-systems"
-query = "draft:false team-review-requested:ROCm/rocjitsu-core-team"
+query = "draft:false team-review-requested:ROCm/rocjitsu-core-team -author:app/dependabot -author:@me"
+include_paths = ["emulation/"]
 launcher = "/home/jakub/jakub-env/agent-workspace/rocjitsu/review-pr.sh"
 wrapper_root = "/mnt/dev/review-queue/rocjitsu"
 estimated_wrapper_gib = 160

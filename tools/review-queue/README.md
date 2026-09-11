@@ -37,6 +37,72 @@ are removed from waiting work on that poll; terminal manually included PRs are
 also removed from the persistent watch set. An already-running review is
 allowed to finish.
 
+The RocJITsu adapter retains review commits in the repository's shared Git
+directory before launching reviewers. Saved peanut-review pages and comment
+anchors use that durable storage after queue-owned worktrees are recycled.
+The shared repository must remain available; the wrapper limit only bounds
+temporary checkouts and build directories.
+
+Drag the separator above the bottom activity pane up or down to resize it.
+`Alt+Up` and `Alt+Down` grow or shrink it one row at a time. Scroll over the
+history pane with the mouse wheel to read the last 50 activity entries.
+Resizing keeps space for the queue and adapts when the terminal size changes.
+
+## Dispatch modes
+
+Press `m` to cycle **active → manual → paused**. Space pauses dispatch or resumes
+the previous active/manual mode. The selection is saved across restarts.
+
+In manual mode, discovery and polling continue and discovered PRs stay visible
+in the waiting pane. Press `r` to enqueue the selected head, or `n` to include
+and enqueue a PR. The ▶ marker identifies explicitly enqueued work. Existing
+automatic entries stay held; a later push needs a new manual enqueue even for
+manually watched PRs. Filters, priorities, concurrency, and storage limits still
+apply. Mode changes allow running reviews to finish. Paused mode starts no work,
+including manually enqueued reviews.
+
+You can also run `review-queue mode manual` (or `active` / `paused`). For a new
+state database, `[queue] start_mode = "manual"` selects the initial mode;
+the existing `start_paused` setting is still supported when `start_mode` is
+omitted. Saved mode selections take precedence over startup configuration.
+
+## Permanent exclusions
+
+For an unrelated PR, select its queued entry or retained review and press `i`.
+Confirming Ignore removes waiting work and excludes future pushed heads of
+that PR. The decision is saved in SQLite and survives restarts. A running
+review is allowed to finish. Press `n` and enter the PR to include it again.
+
+For recurring categories, edit the project's `query` in
+`~/.config/review-queue/config.toml`. The default RocJITsu query excludes
+Dependabot and PRs authored by the authenticated GitHub user:
+
+```toml
+query = "draft:false team-review-requested:ROCm/rocjitsu-core-team -author:app/dependabot -author:@me"
+include_paths = ["emulation/"]
+```
+
+Other GitHub search exclusions, such as `-author:LOGIN` or `-label:LABEL`,
+can be appended to the same query. Restart the TUI after editing configuration.
+Query exclusions affect automatic discovery; explicitly included PRs remain
+watched until ignored with `i`. The TUI's text filter only changes what is
+displayed and does not exclude PRs from scheduling.
+
+`include_paths` requires at least one changed file under one of the listed
+repository-relative directories. RocJITsu uses `emulation/`, so a PR touching
+only other parts of `rocm-systems` is excluded even if the team is requested
+for review or the PR is manually included. Manual retry cannot bypass this
+rule. Deletions and either side of a rename count as touching a directory.
+An excluded PR can become eligible when a later push adds a matching change.
+
+The queue paginates GitHub's file list and verifies the base/head commits
+before accepting a result. Results are cached for that commit pair and filter.
+An incomplete file list or API failure marks the project stale and holds its
+waiting work until a successful poll. After enabling or changing the filter,
+existing waiting PRs must be checked against the new rule before dispatch.
+Already-running reviews may finish. Omit `include_paths` or use `[]` for
+projects that do not need a directory filter.
+
 ## Accelerated demo
 
 Run the production TUI against an isolated, deterministic synthetic trace:
@@ -80,10 +146,44 @@ the requested immutable head. `run` performs the project-owned review workflow.
 Both commands run with the managed wrapper as their working directory and must
 propagate termination to their children.
 
+Launchers report their current phase using whole-line log markers:
+
+```bash
+echo '::group::Build'
+echo '::group::Clang ASan/UBSan'
+cmake --build --preset clang-23-asan-ubsan
+echo '::endgroup::'
+echo '::endgroup::'
+```
+
+Groups nest: this displays `Build › Clang ASan/UBSan` with elapsed time in the
+current phase in selected-review details. The table shows the innermost phase
+so long parent names do not hide the active step. The job's scheduling state
+remains `preparing`, `running`, or
+`cancelling`. Closing a group restores its parent's phase and original start
+time. Each operation starts with an empty stack. Empty titles and unmatched end
+markers are ignored. Titles support `%25`, `%0A`, and `%0D` escapes; whitespace
+is normalized for display. Only these two group markers are interpreted.
+
+Phase updates are parsed as output arrives and saved in SQLite. Group starts
+appear in history, including phases that finish between UI refreshes. Press
+`l` for the selected review's phase and launcher log. An end marker closes a
+scope; the process exit code determines success. Leave the failing group open
+on an error, and avoid emitting new groups from failure cleanup, so the failure
+report retains the original phase. The RocJITsu launcher follows this rule.
+
+The scripts own phase names, including SDK installation and compiler presets.
+The reviewer/curator transition is emitted by peanut-review's `wait-all`
+command, which knows when the reviewer wait finishes and curation starts.
+
 The RocJITsu adapter maps protocol `prepare` and `cleanup` to the sibling
 `worktree-scripts` commands `queue-setup` and `queue-cleanup`. The outer
 `jakub-env` commit pins both nested repositories, so that adapter and lifecycle
 contract must be deployed together.
+
+RocJITsu reviews build with Clang by default (`default`,
+`clang-23-asan-ubsan`, and `clang-23-tsan`). Set `CMAKE_PRESETS` to override
+the build list explicitly.
 
 The queue exports these variables for every operation:
 
@@ -109,6 +209,16 @@ A successful `run` exits zero and writes:
 ```
 
 The queue accepts success only when both commit IDs equal the head it scheduled.
+On a nonzero exit, either `prepare` or `run` may write a failure result with
+`protocol`, `repository`, `pr`, `requested_head`, `exit_code`, `status`, and
+`error`. The queue verifies the job identity and exit code before using it.
+Use `status: "ineligible"` for a PR that has merged, closed, or become a draft;
+use `status: "failed"` for an actual failure. `error` is a readable reason.
+Without a matching failure result, the queue extracts diagnostics from the
+operation's log and retains the launcher exit code. The TUI shows the reason
+in selected-review details and history; press `l` for the full reason and the
+last 500 log lines. Ineligible reviews appear as skipped.
+
 `cleanup --check` must be read-only and print a JSON object containing a boolean
 `safe`; `cleanup` may remove only the owned wrapper after validating its path,
 marker, token, process state, and project-specific clean-worktree rules.
@@ -143,6 +253,7 @@ Monokai, Catppuccin Mocha, and Tokyo Night.
 - `p`: set project, author, and PR priorities exactly.
 - `t`: cycle the preferred themes.
 - Space: pause or resume dispatch.
+- `m`: cycle active, manual, and paused modes.
 - `r`: retry or enqueue the selected head.
 - `x`: cancel the selected running review.
 - `P`: pin or unpin its retained wrapper.

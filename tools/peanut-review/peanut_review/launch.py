@@ -15,6 +15,7 @@ from . import curator, store
 from .models import AgentStatus
 from .session import (
     load_session,
+    prepare_curator_workspace,
     repo_path,
     reset_agent_runtime,
     save_session,
@@ -714,6 +715,7 @@ def launch_curator(
     agents = _select_agents(session.agents, [curator_name])
     if not dry_run:
         _ensure_agents_not_live(sdir, agents)
+        prepare_curator_workspace(sdir)
         _clear_curator_auto_launch_markers(sdir, agents)
         _clear_agent_round_state(sdir, [curator_name])
     return launch_agents(

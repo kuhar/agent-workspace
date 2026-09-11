@@ -20,7 +20,7 @@ Environment overrides:
   ROCJITSU_SOURCE     default: $WORKSPACE/emulation/rocjitsu
   BUILD_DIR           default: $REVIEW_PARENT/build
   VENV_DIR            default: $REVIEW_PARENT/venv
-  CMAKE_PRESETS       default: default gcc-13 clang-23-asan-ubsan clang-23-tsan
+  CMAKE_PRESETS       default: default clang-23-asan-ubsan clang-23-tsan
   CMAKE_PRESET        legacy single-preset override
   CMAKE_CONFIGURE_ARGS optional whitespace-separated extra CMake arguments
   CMAKE_BUILD_TARGET  default: all
@@ -101,7 +101,7 @@ ROCJITSU_SOURCE="${ROCJITSU_SOURCE:-$WORKSPACE/emulation/rocjitsu}"
 BUILD_DIR="${BUILD_DIR:-$REVIEW_PARENT/build}"
 VENV_DIR="${VENV_DIR:-$REVIEW_PARENT/venv}"
 CONFIG="$REVIEW_PARENT/.peanut-review.json"
-DEFAULT_CMAKE_PRESETS="default gcc-13 clang-23-asan-ubsan clang-23-tsan"
+DEFAULT_CMAKE_PRESETS="default clang-23-asan-ubsan clang-23-tsan"
 CMAKE_PRESET_SPEC="${CMAKE_PRESETS:-${CMAKE_PRESET:-$DEFAULT_CMAKE_PRESETS}}"
 CMAKE_PRESET_SPEC="${CMAKE_PRESET_SPEC//,/ }"
 read -r -a CMAKE_BUILD_PRESETS <<<"$CMAKE_PRESET_SPEC"
@@ -120,6 +120,18 @@ PYTEST_ARGS_SPEC="${PYTEST_ARGS:-amdisa/tests/ -x}"
 PYTEST_PYTHON="${PYTEST_PYTHON:-python}"
 DEFAULT_REPO="${DEFAULT_REPO:-ROCm/rocm-systems}"
 PR_BIN="${PR_BIN:-$HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review}"
+
+phase_start() {
+  local title="$1"
+  title="${title//%/%25}"
+  title="${title//$'\r'/%0D}"
+  title="${title//$'\n'/%0A}"
+  printf '::group::%s\n' "$title"
+}
+
+phase_end() {
+  echo '::endgroup::'
+}
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -219,8 +231,17 @@ queue_resolve_pr() {
   local state draft
   state="$(jq -r '.state' <<<"$QUEUE_PR_JSON")"
   draft="$(jq -r '.isDraft' <<<"$QUEUE_PR_JSON")"
+  case "$state:$draft" in
+    OPEN:false|OPEN:true|MERGED:false|MERGED:true|CLOSED:false|CLOSED:true) ;;
+    *) echo "invalid PR state returned by GitHub: $state (draft: $draft)" >&2; return 1 ;;
+  esac
   if [[ "$state" != "OPEN" || "$draft" != false ]]; then
-    echo "queue reviews require an open non-draft PR" >&2
+    local reason timestamp
+    reason="PR #$QUEUE_PR_NUMBER is ${state,,}"
+    [[ "$draft" == true ]] && reason="PR #$QUEUE_PR_NUMBER is a draft"
+    echo "$reason; skipping review" >&2
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    queue_write_result ineligible 1 "$timestamp" "$timestamp" "" "$reason"
     return 1
   fi
   if [[ -n "${REVIEW_QUEUE_TARGET_HEAD:-}" \
@@ -239,8 +260,10 @@ queue_prepare() {
   need git
   need jq
   need realpath
+  phase_start "Check PR"
   queue_validate_wrapper
   queue_resolve_pr "$1"
+  phase_end
 
   local main_workspace worktree_script fetch_ref
   main_workspace="${ROCJITSU_MAIN_WORKSPACE:-$HOME/rocjitsu/develop/rocm-systems}"
@@ -250,17 +273,21 @@ queue_prepare() {
     return 1
   fi
   fetch_ref="refs/remotes/origin/review-queue/$QUEUE_PR_NUMBER"
+  phase_start "Fetch PR"
   git -C "$main_workspace" fetch origin \
     "+pull/${QUEUE_PR_NUMBER}/head:${fetch_ref}"
   if [[ "$(git -C "$main_workspace" rev-parse "$fetch_ref")" != "$QUEUE_HEAD_SHA" ]]; then
     echo "fetched PR head does not match the requested queue snapshot" >&2
     return 1
   fi
+  phase_end
+  phase_start "Prepare workspace"
   "$worktree_script" queue-setup "$REVIEW_QUEUE_WRAPPER" "$QUEUE_HEAD_SHA"
   if [[ "$(git -C "$REVIEW_QUEUE_WRAPPER/rocm-systems" rev-parse HEAD)" != "$QUEUE_HEAD_SHA" ]]; then
     echo "prepared worktree does not match the requested head" >&2
     return 1
   fi
+  phase_end
 }
 
 queue_write_result() {
@@ -283,12 +310,13 @@ queue_write_result() {
     --arg requested_head "$REVIEW_QUEUE_TARGET_HEAD" \
     --arg reviewed_head "$reviewed_head" \
     --arg status "$status" \
+    --arg error "${6:-}" \
     --argjson exit_code "$exit_code" \
     --arg started_at "$started_at" \
     --arg finished_at "$finished_at" \
     '{protocol:$protocol,repository:$repository,pr:$pr,
       requested_head:$requested_head,reviewed_head:$reviewed_head,
-      status:$status,exit_code:$exit_code,
+      status:$status,exit_code:$exit_code,error:$error,
       started_at:$started_at,finished_at:$finished_at}' >"$temporary"
   mv -- "$temporary" "$result"
 }
@@ -302,8 +330,10 @@ queue_run() {
   need git
   need jq
   need realpath
+  phase_start "Check PR"
   queue_validate_wrapper
   queue_resolve_pr "$1"
+  phase_end
   if [[ ! -d "$REVIEW_QUEUE_WRAPPER/rocm-systems" ]]; then
     echo "queue wrapper was not prepared: $REVIEW_QUEUE_WRAPPER" >&2
     return 1
@@ -458,12 +488,14 @@ fi
 
 WORKTREE_GIT_DIR="$(git -C "$WORKSPACE" rev-parse --absolute-git-dir)"
 WORKTREE_LOCK="$WORKTREE_GIT_DIR/peanut-review-worktree.lock"
-echo "== Worktree ownership =="
+phase_start "Wait for worktree lock"
 echo "waiting:     $WORKSPACE"
 exec {WORKTREE_LOCK_FD}>"$WORKTREE_LOCK"
 flock "$WORKTREE_LOCK_FD"
 echo "acquired:    $WORKSPACE"
+phase_end
 echo
+phase_start "Inspect PR"
 
 resolve_spec "$PR_SPEC"
 PR_JSON="$(gh pr view "$RESOLVED_NUMBER" --repo "$RESOLVED_REPO" \
@@ -510,9 +542,14 @@ finish_review_run() {
   trap - EXIT
   if [[ "$CHECKOUT_READY" == 1 ]]; then
     echo
-    echo "== Final checkout =="
+    if [[ "$status" == 0 ]]; then
+      phase_start "Final checkout"
+    else
+      echo "Final checkout after failure:"
+    fi
     if ensure_review_checkout "final state"; then
       echo "ready:       $RESOLVED_REPO#$PR_NUMBER"
+      if [[ "$status" == 0 ]]; then phase_end; fi
     else
       status=1
     fi
@@ -521,7 +558,7 @@ finish_review_run() {
 }
 trap finish_review_run EXIT
 
-echo "== PR =="
+
 echo "repo:        $RESOLVED_REPO"
 echo "number:      $PR_NUMBER"
 echo "title:       $PR_TITLE"
@@ -548,7 +585,8 @@ if [[ -n "$untracked_status" ]]; then
   echo >&2
 fi
 
-echo "== Checkout =="
+phase_end
+phase_start "Checkout"
 echo "fetching origin $BASE_REF and pull/$PR_NUMBER/head"
 git -C "$WORKSPACE" fetch origin "$BASE_REF" "+pull/${PR_NUMBER}/head:${FETCH_REF}"
 ensure_review_checkout "checkout"
@@ -567,28 +605,44 @@ fi
 echo "workspace:   $WORKSPACE"
 echo
 
-echo "== Build =="
+phase_end
+phase_start "Build"
 if [[ "$NO_BUILD" == 1 ]]; then
   echo "skipped"
 else
   setup_rocjitsu_env
   for preset in "${CMAKE_BUILD_PRESETS[@]}"; do
+    phase_start "$preset"
+    phase_start "Configure"
     echo "preset:      $preset"
     echo "configure:   (cd $ROCJITSU_SOURCE && cmake --preset $preset)"
     (
-      cd "$ROCJITSU_SOURCE"
+      cd "$ROCJITSU_SOURCE" || exit
       cmake --preset "$preset" "${CMAKE_CONFIGURE_ARGS_ARRAY[@]}"
-    )
+    ) || {
+      code=$?
+      echo "preset: $preset (configure failed)" >&2
+      exit "$code"
+    }
+    phase_end
+    phase_start "Compile"
     echo "build:       (cd $ROCJITSU_SOURCE && cmake --build --preset $preset --target $CMAKE_BUILD_TARGET)"
     (
-      cd "$ROCJITSU_SOURCE"
+      cd "$ROCJITSU_SOURCE" || exit
       cmake --build --preset "$preset" --target "$CMAKE_BUILD_TARGET"
-    )
+    ) || {
+      code=$?
+      echo "preset: $preset (build failed)" >&2
+      exit "$code"
+    }
+    phase_end
+    phase_end
   done
 fi
 echo
 
-echo "== Pytest =="
+phase_end
+phase_start "Python tests"
 PYTEST_STATUS="skipped"
 PYTEST_EXIT_CODE=0
 if [[ "$NO_PYTEST" == 1 ]]; then
@@ -632,7 +686,8 @@ else
 fi
 echo
 
-echo "== Session =="
+phase_end
+phase_start "Prepare review session"
 ensure_review_checkout "session setup"
 DRY_RUN="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" \
   --base "$BASE_SHA" --topic "$HEAD_SHA" --dry-run --no-launch)"
@@ -670,6 +725,9 @@ START_OUTPUT="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" \
   --base "$BASE_SHA" --topic "$HEAD_SHA" --reuse --sync --no-launch)"
 printf '%s\n' "$START_OUTPUT"
 
+# Session reads must survive queue cleanup of this execution worktree.
+"$PR_BIN" --session "$SESSION" retain-git
+
 if ! jq -e \
   --arg repo "$RESOLVED_REPO" \
   --argjson number "$PR_NUMBER" \
@@ -700,20 +758,22 @@ echo "mode:        $([[ "$SESSION_EXISTED" == 1 ]] && echo reuse/rerun || echo n
 echo "last comment before launch: ${LAST_COMMENT_ID:-<none>}"
 echo
 
+phase_end
 if [[ "$NO_LAUNCH" == 1 ]]; then
-  echo "== Launch skipped =="
+  echo "Launch skipped"
 else
-  echo "== Launch =="
+  phase_start "Launch reviewers"
   ensure_review_checkout "agent launch"
+  mapfile -t AGENTS < <(
+    jq -r '.agents[] | select((.role // "reviewer") != "curator") | .name' \
+      "$SESSION/session.json"
+  )
+  if ((${#AGENTS[@]} == 0)); then
+    echo "no reviewer agents configured in $SESSION/session.json" >&2
+    exit 1
+  fi
+  MAX_REVIEWER_FAILURES=$((${#AGENTS[@]} / 2))
   if [[ "$SESSION_EXISTED" == 1 ]]; then
-    mapfile -t AGENTS < <(
-      jq -r '.agents[] | select((.role // "reviewer") != "curator") | .name' \
-        "$SESSION/session.json"
-    )
-    if ((${#AGENTS[@]} == 0)); then
-      echo "no reviewer agents configured in $SESSION/session.json" >&2
-      exit 1
-    fi
     RERUN_ARGS=()
     for agent in "${AGENTS[@]}"; do
       RERUN_ARGS+=(--agent "$agent")
@@ -724,18 +784,22 @@ else
   fi
   echo
 
-  echo "== Wait for review completion =="
+  phase_end
+  phase_start "Review"
   echo "timeout:     $REVIEW_WAIT_TIMEOUT seconds per phase (reviewers, then curator)"
+  echo "failures:    allow up to $MAX_REVIEWER_FAILURES of ${#AGENTS[@]} reviewers"
   "$PR_BIN" --session "$SESSION" wait-all round-done \
-    --timeout "$REVIEW_WAIT_TIMEOUT"
+    --timeout "$REVIEW_WAIT_TIMEOUT" --max-reviewer-failures "$MAX_REVIEWER_FAILURES"
   echo
 
-  echo "== Final review status =="
+  phase_end
+  phase_start "Final review status"
   "$PR_BIN" --session "$SESSION" status
+  phase_end
   echo
 fi
 
-echo "== Orchestrator context =="
+phase_start "Write review summary"
 cat <<EOF
 PR:        $RESOLVED_REPO#$PR_NUMBER
 URL:       $PR_URL
@@ -772,12 +836,14 @@ Notes for the next orchestrator:
   - The checkout is refreshed from origin pull/$PR_NUMBER/head, avoiding fork SSH remotes.
   - Existing sessions are explicitly synchronized to the current PR base/head and rerun; new sessions are launched.
   - The wrapper verifies both commit objects, checkout HEAD, and persisted session refs before launching.
-  - The wrapper blocks until all reviewers finish, then wait-all launches and waits for Curator.
-  - A reviewer/Curator failure or timeout makes the wrapper exit nonzero so callers can serialize review jobs safely.
+  - The wrapper waits for every reviewer to finish, then runs Curator if at least half signaled round-done.
+  - More than half failing, unfinished reviewers at the wait deadline, or Curator failure/timeout makes the wrapper exit nonzero.
   - RocJITsu builds from $ROCJITSU_SOURCE using the configured CMake preset list.
   - RocJITsu Python tests run from $PYTEST_WORKDIR with the configured pytest command unless --no-pytest is used.
   - Pytest failures are recorded above but do not block reviewer launch unless PYTEST_REQUIRED=1 is set.
   - The default preset is RelWithDebInfo with CMake's default -DNDEBUG, so assertions are disabled there.
-  - The local gcc-13, clang-23-asan-ubsan, and clang-23-tsan presets are RelWithDebInfo builds that override the per-config flags to omit -DNDEBUG, so assertions stay enabled.
+  - The local clang-23-asan-ubsan and clang-23-tsan presets are RelWithDebInfo builds that override the per-config flags to omit -DNDEBUG, so assertions stay enabled.
   - Use the "last comment before launch" id above with comments --since to isolate new reviewer feedback.
 EOF
+
+phase_end

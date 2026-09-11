@@ -30,6 +30,23 @@ def test_demo_trace_arrivals_push_failure_and_wrapper_cap() -> None:
     )
 
 
+def test_demo_manual_mode_holds_discovery_and_starts_only_selected_head():
+    demo = DemoScheduler(speed=300)
+    running = demo.snapshot().running
+    assert demo.cycle_mode() == "manual"
+    assert demo.snapshot().running == running
+    demo.advance(next(iter(demo._runs.values())).duration_minutes + 1)
+    assert not demo.snapshot().running
+    assert demo.snapshot().queue
+    selected = demo.snapshot().queue[0]
+    demo.retry(selected)
+    demo.advance(0)
+    assert [run.job_id for run in demo.snapshot().running] == [selected.job_id]
+    demo.toggle_pause()
+    demo.toggle_pause()
+    assert demo.snapshot().mode == "manual"
+
+
 def test_demo_dispatch_pause_priorities_and_failed_retry() -> None:
     demo = DemoScheduler(speed=300)
     demo.advance(16)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +14,11 @@ class ProjectConfig:
     wrapper_root: Path
     estimated_wrapper_gib: int = 160
     priority: int = 0
+    include_paths: tuple[str, ...] = ()
+
+    @property
+    def path_filter_key(self) -> str:
+        return json.dumps(self.include_paths) if self.include_paths else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +34,7 @@ class QueueConfig:
     config_path: Path
     state_dir: Path
     theme: str = "catppuccin-mocha"
+    start_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +50,8 @@ class PullRequest:
     updated_at: str
     state: str = "OPEN"
     is_draft: bool = False
+    path_filter_key: str = ""
+    path_filter_passed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +76,7 @@ class QueueItem:
     wrapper_path: str | None = None
     error: str | None = None
     review_count: int = 0
+    manual_enqueued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +94,17 @@ class RunView:
     log_path: str | None
     error: str | None
     review_count: int = 0
+    phase: str = ""
+    phase_started_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseEvent:
+    id: int
+    project: str
+    number: int
+    phase: str
+    started_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,3 +144,9 @@ class QueueSnapshot:
     running: tuple[RunView, ...] = field(default_factory=tuple)
     wrappers: tuple[WrapperView, ...] = field(default_factory=tuple)
     projects: tuple[ProjectHealth, ...] = field(default_factory=tuple)
+    manual_only: bool = False
+    phase_events: tuple[PhaseEvent, ...] = field(default_factory=tuple)
+
+    @property
+    def mode(self) -> str:
+        return "paused" if self.paused else "manual" if self.manual_only else "active"

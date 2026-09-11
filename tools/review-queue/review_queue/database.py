@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .models import (
+    PhaseEvent,
     ProjectConfig,
     ProjectHealth,
     PullRequest,
@@ -14,6 +15,7 @@ from .models import (
     RunView,
     WrapperView,
 )
+from .phases import PhaseChange
 from .util import isoformat, parse_time, utc_now
 
 SCHEMA = """
@@ -109,6 +111,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status, queued_at);
 CREATE INDEX IF NOT EXISTS jobs_pr_idx ON jobs(repo, pr_number, head_sha);
 CREATE INDEX IF NOT EXISTS wrappers_lru_idx ON wrappers(state, pinned, last_used_at);
+
+CREATE TABLE IF NOT EXISTS job_phase_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,
+    started_at TEXT NOT NULL
+);
 """
 
 
@@ -138,17 +147,80 @@ class Database:
                 "ALTER TABLE pull_requests ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0"
             )
         self.connection.commit()
+        for name, declaration in (
+            ("path_filter_key", "TEXT NOT NULL DEFAULT ''"),
+            ("path_filter_passed", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                self.connection.execute(
+                    f"ALTER TABLE pull_requests ADD COLUMN {name} {declaration}"
+                )
+        self.connection.commit()
+        self._path_filters: dict[str, str] = {}
+        job_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(jobs)")}
+        for name, declaration in (
+            ("phase", "TEXT NOT NULL DEFAULT ''"),
+            ("phase_started_at", "TEXT"),
+            ("phase_log_offset", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in job_columns:
+                self.connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+        self.connection.commit()
+
+    def update_phase(self, job_id: int, change: PhaseChange) -> None:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE jobs SET phase = ?, phase_started_at = ?, phase_log_offset = ? "
+                "WHERE id = ?",
+                (change.phase, change.started_at, change.log_offset, job_id),
+            )
+            if change.entered:
+                self.connection.execute(
+                    "INSERT INTO job_phase_events(job_id, phase, started_at) VALUES (?, ?, ?)",
+                    (job_id, change.phase, change.started_at),
+                )
+
+    def phase_events(self) -> tuple[PhaseEvent, ...]:
+        rows = self.connection.execute(
+            "SELECT e.id, j.project, j.pr_number, e.phase, e.started_at "
+            "FROM job_phase_events e JOIN jobs j ON j.id = e.job_id "
+            "ORDER BY e.id DESC LIMIT 50"
+        ).fetchall()
+        return tuple(
+            PhaseEvent(row["id"], row["project"], row["pr_number"], row["phase"], row["started_at"])
+            for row in reversed(rows)
+        )
 
     def close(self) -> None:
         self.connection.close()
 
-    def seed(self, projects: Iterable[ProjectConfig], *, start_paused: bool) -> None:
+    def seed(
+        self,
+        projects: Iterable[ProjectConfig],
+        *,
+        start_paused: bool,
+        start_mode: str | None = None,
+    ) -> None:
         with self.connection:
+            existing_mode = self.connection.execute(
+                "SELECT 1 FROM settings WHERE key = 'paused'"
+            ).fetchone()
             self.connection.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES ('paused', ?)",
-                ("1" if start_paused else "0",),
+                ("1" if (start_mode == "paused" if start_mode else start_paused) else "0",),
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO settings(key, value) VALUES ('manual_only', ?)",
+                ("1" if start_mode == "manual" and existing_mode is None else "0",),
             )
             for project in projects:
+                self._path_filters[project.name] = project.path_filter_key
+                if project.include_paths:
+                    self.connection.execute(
+                        "UPDATE pull_requests SET eligible = 0, path_filter_passed = 0 "
+                        "WHERE project = ? AND path_filter_key != ?",
+                        (project.name, project.path_filter_key),
+                    )
                 existing = self.connection.execute(
                     "SELECT repo FROM projects WHERE name = ?", (project.name,)
                 ).fetchone()
@@ -178,6 +250,31 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("1" if paused else "0",),
             )
+
+    def manual_only(self) -> bool:
+        row = self.connection.execute(
+            "SELECT value FROM settings WHERE key = 'manual_only'"
+        ).fetchone()
+        return row is not None and row["value"] == "1"
+
+    def mode(self) -> str:
+        return "paused" if self.paused() else "manual" if self.manual_only() else "active"
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in {"active", "manual", "paused"}:
+            raise ValueError("mode must be active, manual, or paused")
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO settings(key, value) VALUES ('paused', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("1" if mode == "paused" else "0",),
+            )
+            if mode != "paused":
+                self.connection.execute(
+                    "INSERT INTO settings(key, value) VALUES ('manual_only', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    ("1" if mode == "manual" else "0",),
+                )
 
     def mark_poll_failure(self, project: str, error: str) -> None:
         with self.connection:
@@ -265,8 +362,14 @@ class Database:
                 manual_watch = bool(existing and existing["manual_watch"])
                 keep_manual_watch = manual_watch and record.state.upper() == "OPEN"
                 ignored = bool(existing and existing["ignored"])
+                paths_match = not project.include_paths or (
+                    record.path_filter_key == project.path_filter_key and record.path_filter_passed
+                )
                 eligible = (
-                    is_open and not ignored and (record.number in query_numbers or manual_watch)
+                    is_open
+                    and not ignored
+                    and paths_match
+                    and (record.number in query_numbers or manual_watch)
                 )
 
                 if existing is None:
@@ -276,8 +379,8 @@ class Database:
                         INSERT INTO pull_requests(
                             repo, number, project, url, title, author, head_sha, head_ref,
                             updated_at, state, is_draft, eligible, manual_watch,
-                            discovered_at, last_seen_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                            discovered_at, last_seen_at, path_filter_key, path_filter_passed
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                         """,
                         (
                             record.repo,
@@ -294,6 +397,8 @@ class Database:
                             int(eligible),
                             now_text,
                             now_text,
+                            record.path_filter_key,
+                            int(record.path_filter_passed),
                         ),
                     )
                     should_queue = eligible and (
@@ -324,7 +429,8 @@ class Database:
                         UPDATE pull_requests
                         SET url = ?, title = ?, author = ?, head_sha = ?, head_ref = ?,
                             updated_at = ?, state = ?, is_draft = ?, eligible = ?,
-                            manual_watch = ?, last_seen_at = ?
+                            manual_watch = ?, last_seen_at = ?,
+                            path_filter_key = ?, path_filter_passed = ?
                         WHERE repo = ? AND number = ?
                         """,
                         (
@@ -339,6 +445,8 @@ class Database:
                             int(eligible),
                             int(keep_manual_watch),
                             now_text,
+                            record.path_filter_key,
+                            int(record.path_filter_passed),
                             record.repo,
                             record.number,
                         ),
@@ -350,6 +458,8 @@ class Database:
                             reason = "PR closed"
                         elif record.is_draft:
                             reason = "PR became draft"
+                        elif not paths_match:
+                            reason = "PR does not touch configured include_paths"
                         else:
                             reason = "PR left configured query"
                         self.connection.execute(
@@ -453,7 +563,7 @@ class Database:
     ) -> bool:
         active = self.connection.execute(
             """
-            SELECT 1 FROM jobs
+            SELECT id FROM jobs
             WHERE repo = ? AND pr_number = ? AND head_sha = ?
               AND status IN ('debouncing', 'queued', 'preparing', 'running', 'cancelling')
             LIMIT 1
@@ -461,6 +571,8 @@ class Database:
             (repo, number, head_sha),
         ).fetchone()
         if active is not None:
+            if source in {"manual", "manual-watch"}:
+                self._mark_manually_enqueued(int(active["id"]), source)
             return False
         previous = self.connection.execute(
             "SELECT COALESCE(MAX(attempt), 0) AS attempt FROM jobs "
@@ -482,9 +594,17 @@ class Database:
         )
         return True
 
+    def _mark_manually_enqueued(self, job_id: int, source: str = "manual") -> None:
+        self.connection.execute(
+            "UPDATE jobs SET source = ?, status = 'queued', quiet_until = NULL "
+            "WHERE id = ? AND status IN ('queued', 'debouncing')",
+            (source, job_id),
+        )
+
     def enqueue_current(self, repo: str, number: int, *, manual: bool = True) -> int:
         row = self.connection.execute(
-            "SELECT project, head_sha, state, is_draft FROM pull_requests "
+            "SELECT project, head_sha, state, is_draft, path_filter_key, path_filter_passed "
+            "FROM pull_requests "
             "WHERE repo = ? AND number = ?",
             (repo, number),
         ).fetchone()
@@ -492,6 +612,11 @@ class Database:
             raise KeyError(f"unknown pull request: {repo}#{number}")
         if row["state"] != "OPEN" or bool(row["is_draft"]):
             raise ValueError(f"pull request is not open for review: {repo}#{number}")
+        required_paths = self._path_filters.get(row["project"], "")
+        if required_paths and (
+            row["path_filter_key"] != required_paths or not row["path_filter_passed"]
+        ):
+            raise ValueError(f"PR does not touch configured include_paths: {repo}#{number}")
         with self.connection:
             active = self.connection.execute(
                 """
@@ -503,6 +628,8 @@ class Database:
                 (repo, number, row["head_sha"]),
             ).fetchone()
             if active is not None:
+                if manual:
+                    self._mark_manually_enqueued(int(active["id"]))
                 return int(active["id"])
             self.connection.execute(
                 "UPDATE pull_requests SET eligible = 1, ignored = 0 WHERE repo = ? AND number = ?",
@@ -532,6 +659,13 @@ class Database:
         if record.state.upper() != "OPEN" or record.is_draft:
             raise ValueError(
                 f"manual pull request must be open and non-draft: {record.repo}#{record.number}"
+            )
+        required_paths = self._path_filters.get(record.project, "")
+        if required_paths and (
+            record.path_filter_key != required_paths or not record.path_filter_passed
+        ):
+            raise ValueError(
+                f"PR does not touch configured include_paths: {record.repo}#{record.number}"
             )
         now = isoformat()
         with self.connection:
@@ -568,6 +702,16 @@ class Database:
                     int(record.is_draft),
                     now,
                     now,
+                ),
+            )
+            self.connection.execute(
+                "UPDATE pull_requests SET path_filter_key = ?, path_filter_passed = ? "
+                "WHERE repo = ? AND number = ?",
+                (
+                    record.path_filter_key,
+                    int(record.path_filter_passed),
+                    record.repo,
+                    record.number,
                 ),
             )
             if enqueue:
@@ -634,12 +778,14 @@ class Database:
                       AND active.status IN ('preparing', 'running', 'cancelling')
                 )
             """
+            if self.manual_only():
+                where += " AND j.source IN ('manual', 'manual-watch')"
         else:
             where = "j.status IN ('queued', 'debouncing')"
         sql = f"""
             SELECT j.id AS job_id, j.project, j.repo, j.pr_number AS number,
                    pr.url, pr.title, pr.author, j.head_sha, pr.head_ref, pr.updated_at,
-                   j.status, j.queued_at, j.quiet_until, j.error,
+                   j.status, j.queued_at, j.quiet_until, j.error, j.source,
                    COALESCE(pp.priority, 0) AS project_priority,
                    COALESCE(a.priority, 0) AS author_priority,
                    pr.pr_priority,
@@ -687,6 +833,7 @@ class Database:
             wrapper_path=row["wrapper_path"],
             error=row["error"],
             review_count=row["review_count"],
+            manual_enqueued=row["source"] in {"manual", "manual-watch"},
         )
 
     def queue_items(self) -> tuple[QueueItem, ...]:
@@ -702,7 +849,7 @@ class Database:
             """
             SELECT j.id AS job_id, j.project, j.repo, j.pr_number AS number,
                    pr.title, pr.author, j.head_sha, j.status, j.started_at,
-                   w.path AS wrapper_path, j.log_path, j.error,
+                   w.path AS wrapper_path, j.log_path, j.error, j.phase, j.phase_started_at,
                    (SELECT COUNT(*) FROM jobs reviewed
                     WHERE reviewed.repo = j.repo
                       AND reviewed.pr_number = j.pr_number
@@ -729,6 +876,8 @@ class Database:
                 log_path=row["log_path"],
                 error=row["error"],
                 review_count=row["review_count"],
+                phase=row["phase"],
+                phase_started_at=row["phase_started_at"],
             )
             for row in rows
         )
@@ -740,6 +889,7 @@ class Database:
                    CASE latest.status
                        WHEN 'succeeded' THEN 'complete'
                        WHEN 'failed' THEN 'failed'
+                       WHEN 'ineligible' THEN 'ineligible'
                        ELSE w.state
                    END AS display_state,
                    w.pinned, w.last_used_at, w.size_bytes,
@@ -897,7 +1047,14 @@ class Database:
         supervisor_pid: int | None = None,
         supervisor_start_ticks: int | None = None,
     ) -> None:
-        terminal = status in {"succeeded", "failed", "cancelled", "interrupted", "superseded"}
+        terminal = status in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "superseded",
+            "ineligible",
+        }
         assignments = ["status = ?", "error = ?"]
         values: list[object] = [status, error]
         if status in {"preparing", "running"}:

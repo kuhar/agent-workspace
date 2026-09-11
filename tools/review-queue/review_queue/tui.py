@@ -10,7 +10,7 @@ from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
@@ -152,6 +152,33 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class LogModal(ModalScreen[None]):
+    BINDINGS = [Binding("escape", "close", "Close")]
+    CSS = """
+    LogModal { align: center middle; background: $background 65%; }
+    LogModal > Vertical {
+        width: 90%; height: 85%; padding: 1 2;
+        border: tall $accent; background: $surface;
+    }
+    LogModal Static { height: auto; }
+    LogModal VerticalScroll { height: 1fr; }
+    """
+
+    def __init__(self, title: str, reason: str, log: str):
+        super().__init__()
+        self.title_text, self.reason, self.log_text = title, reason, log
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(f"{self.title_text} · Esc closes", markup=False)
+            with VerticalScroll():
+                yield Static(self.reason, markup=False, id="failure-reason")
+                yield Static(self.log_text or "No launcher log available.", markup=False)
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
 class HelpModal(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Close"),
@@ -160,25 +187,28 @@ class HelpModal(ModalScreen[None]):
     CSS = """
     HelpModal { align: center middle; background: $background 65%; }
     HelpModal > Static {
-        width: 74; height: 32; padding: 1 2;
+        width: 74; height: 33; padding: 1 2;
         border: tall $accent; background: $surface;
     }
     """
     HELP = """[b]Review queue keys[/b]
 
 [b]↑/↓ or j/k[/b]  select work
-[b]Tab[/b]            switch between review slots and the queue
+[b]Tab[/b]            switch between panes
 [b]← / →[/b]        lower / raise selected PR priority by ten
 [b]p[/b]            set project / author / PR priorities
 [b]t[/b]            cycle Dark+, Monokai, Catppuccin, and Tokyo Night
 [b]Space[/b]        pause or resume dispatch
 [b]r[/b]            enqueue or retry the current PR head
+[b]m[/b]            cycle active / manual / paused mode
 [b]x[/b]            cancel selected waiting/running work
 [b]P[/b]            pin or unpin selected wrapper
 [b]e[/b]            safely recycle selected idle wrapper
 [b]n[/b]            include a PR outside the project filter
 [b]i[/b]            permanently ignore the selected PR
 [b]/[/b]            filter queue
+[b]Alt+↑ / Alt+↓[/b]  grow / shrink history (or drag its divider)
+[b]l[/b]  show selected review details and launcher log
 [b]g[/b]            request an immediate GitHub refresh
 [b]?[/b]            close this help
 [b]q[/b]            quit; active launchers are stopped
@@ -230,6 +260,69 @@ def _phase(status: str, *, width: int) -> str:
     return f"[magenta]{bar}[/]  {escape(status)}"
 
 
+class HistoryLayout(Vertical):
+    """Share the remaining screen between the queue and activity history."""
+
+    preferred_height = 4
+
+    def set_history_height(self, height: int) -> None:
+        self.preferred_height = max(2, min(height, self._maximum_history_height()))
+        self._layout_history()
+
+    def _maximum_history_height(self) -> int:
+        available = max(0, self.size.height - 1)  # divider
+        queue_minimum = min(8, max(1, available - 2))
+        return max(0, available - queue_minimum)
+
+    def _layout_history(self) -> None:
+        available = max(0, self.size.height - 1)
+        self.query_one("#queue-pane").styles.min_height = min(8, max(1, available - 2))
+        self.query_one("#activity-pane").styles.height = min(
+            self.preferred_height, self._maximum_history_height()
+        )
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._layout_history()
+
+
+class HistoryDivider(Static):
+    """Capture the pointer so dragging continues outside the divider row."""
+
+    def __init__(self) -> None:
+        super().__init__(id="history-divider")
+        self._drag_start: tuple[int, int] | None = None
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 1:
+            self._drag_start = (
+                event.screen_y,
+                self.app.query_one("#activity-pane").size.height,
+            )
+            self.capture_mouse()
+            self.add_class("dragging")
+            event.prevent_default()
+            event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._drag_start is not None:
+            start_y, start_height = self._drag_start
+            self.app.query_one(HistoryLayout).set_history_height(
+                start_height + start_y - event.screen_y
+            )
+            event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if event.button == 1 and self._drag_start is not None:
+            self.release_mouse()
+            self._drag_start = None
+            self.remove_class("dragging")
+            event.stop()
+
+    def on_mouse_release(self, event: events.MouseRelease) -> None:
+        self._drag_start = None
+        self.remove_class("dragging")
+
+
 class ReviewQueueApp(App[None]):
     TITLE = "Review Queue"
     SUB_TITLE = "foreground scheduler"
@@ -245,13 +338,17 @@ class ReviewQueueApp(App[None]):
         Binding("p", "edit_priorities", "Priorities"),
         Binding("t", "cycle_theme", "Theme"),
         Binding("space", "toggle_pause", "Pause"),
-        Binding("r", "retry", "Retry"),
+        Binding("m", "cycle_mode", "Mode"),
+        Binding("r", "retry", "Enqueue"),
+        Binding("l", "show_log", "Log"),
         Binding("x", "cancel", "Cancel"),
         Binding("P", "pin_wrapper", "Pin"),
         Binding("e", "evict_wrapper", "Recycle"),
         Binding("n", "watch_pr", "Include"),
         Binding("i", "ignore_pr", "Ignore"),
         Binding("slash", "show_filter", "Filter"),
+        Binding("alt+up", "grow_history", "More history", show=False),
+        Binding("alt+down", "shrink_history", "Less history", show=False),
         Binding("escape", "clear_filter", "Clear", show=False),
         Binding("g", "refresh_github", "Refresh"),
         Binding("question_mark", "show_help", "Help"),
@@ -280,20 +377,27 @@ class ReviewQueueApp(App[None]):
         border-bottom: solid $primary-background;
     }
     #review-table { height: 1fr; background: $surface; }
-    #queue-pane { height: 1fr; min-height: 8; border-bottom: solid $primary-background; }
+    #queue-pane { height: 1fr; min-height: 8; }
     #queue-table { height: 1fr; }
-    #activity-pane {
-        height: 5; padding: 0 2; background: $panel;
+    HistoryLayout { height: 1fr; overflow: hidden; }
+    #history-divider {
+        height: 1; border-top: solid $primary-background;
+    }
+    #history-divider:hover, #history-divider.dragging {
         border-top: solid $accent;
+    }
+    #activity-pane {
+        height: 4; padding: 0 2; background: $panel; overflow: hidden;
     }
     #detail {
         height: 1; overflow: hidden; color: $text;
         text-wrap: nowrap; text-overflow: ellipsis;
     }
     #activity-feed {
-        height: 3; overflow: hidden; color: $text-muted;
+        height: auto; color: $text-muted;
         text-wrap: nowrap; text-overflow: ellipsis;
     }
+    #activity-scroll { height: 1fr; overflow-x: hidden; }
     DataTable { scrollbar-size-vertical: 0; scrollbar-size-horizontal: 0; }
     DataTable > .datatable--header {
         background: $panel; color: $text-muted; text-style: bold;
@@ -328,6 +432,7 @@ class ReviewQueueApp(App[None]):
         self.compact = False
         self._tables_configured_for: bool | None = None
         self.activity: deque[str] = deque(maxlen=50)
+        self._last_phase_event = 0
         self._record_activity(
             f"queue ready · {len(self.snapshot.queue)} waiting · "
             f"{len(self.snapshot.running)} active",
@@ -344,16 +449,19 @@ class ReviewQueueApp(App[None]):
                 classes="panel-title",
             )
             yield DataTable(id="review-table", cursor_type="row", zebra_stripes=True)
-        with Vertical(id="queue-pane"):
-            yield Static(
-                "WAITING  ·  ←/→ changes selected PR priority",
-                id="queue-heading",
-                classes="panel-title",
-            )
-            yield DataTable(id="queue-table", cursor_type="row", zebra_stripes=True)
-        with Vertical(id="activity-pane"):
-            yield Static(id="detail")
-            yield Static(id="activity-feed")
+        with HistoryLayout():
+            with Vertical(id="queue-pane"):
+                yield Static(
+                    "WAITING  ·  ←/→ changes selected PR priority",
+                    id="queue-heading",
+                    classes="panel-title",
+                )
+                yield DataTable(id="queue-table", cursor_type="row", zebra_stripes=True)
+            yield HistoryDivider()
+            with Vertical(id="activity-pane"):
+                yield Static(id="detail")
+                with VerticalScroll(id="activity-scroll"):
+                    yield Static(id="activity-feed")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -427,6 +535,13 @@ class ReviewQueueApp(App[None]):
         )
 
     def _track_activity(self, previous: object, current: object) -> None:
+        for event in current.phase_events:
+            if event.id > self._last_phase_event:
+                self.activity.appendleft(
+                    f"[dim]{parse_time(event.started_at).astimezone().strftime('%H:%M')}[/]  "
+                    f"[cyan]{escape(f'{event.project}#{event.number} · {event.phase}')}[/]"
+                )
+                self._last_phase_event = event.id
         old_queue = {item.job_id: item for item in previous.queue}
         new_queue = {item.job_id: item for item in current.queue}
         for job_id, item in new_queue.items():
@@ -467,8 +582,15 @@ class ReviewQueueApp(App[None]):
                 )
             elif wrapper and wrapper.state == "failed":
                 self._record_activity(
-                    f"× {run.project}#{run.number} failed · press r to retry",
+                    f"× {run.project}#{run.number} failed · "
+                    f"{wrapper.cleanup_error or 'press l for the launcher log'}",
                     "red",
+                )
+            elif wrapper and wrapper.state == "ineligible":
+                self._record_activity(
+                    f"– {run.project}#{run.number} skipped · "
+                    f"{wrapper.cleanup_error or 'ineligible'}",
+                    "yellow",
                 )
 
     def _filtered_queue(self) -> list[QueueItem]:
@@ -492,6 +614,8 @@ class ReviewQueueApp(App[None]):
         ]
 
     def refresh_view(self) -> None:
+        if not self.query("#health-bar"):
+            return  # A queued timer callback can arrive after the screen unmounts.
         next_snapshot = self.scheduler.snapshot()
         self._track_activity(self.snapshot, next_snapshot)
         self.snapshot = next_snapshot
@@ -516,7 +640,11 @@ class ReviewQueueApp(App[None]):
             ]
             last_poll = _age(max(polls), now=self._now()) if polls else "never"
             source = f"[b]{gh}[/]  last poll {last_poll}"
-        mode = "[yellow]PAUSED[/]" if self.snapshot.paused else "[green]dispatching[/]"
+        mode = {
+            "paused": "[yellow]PAUSED[/]",
+            "manual": "[cyan]MANUAL[/]",
+            "active": "[green]ACTIVE[/]",
+        }[self.snapshot.mode]
         reason = self.snapshot.dispatch_blocked_reason
         suffix = f"  •  [yellow]{escape(reason)}[/]" if reason else ""
         self.query_one("#health-bar", Static).update(
@@ -532,8 +660,13 @@ class ReviewQueueApp(App[None]):
         items = self._filtered_queue()
         hidden = len(self.snapshot.queue) - len(items)
         filter_status = f"  ·  {hidden} filtered" if hidden else ""
+        hint = (
+            "r enqueues selected head · ▶ enqueued"
+            if self.snapshot.manual_only
+            else "←/→ changes selected PR priority"
+        )
         self.query_one("#queue-heading", Static).update(
-            f"WAITING  {len(items)}{filter_status}  ·  ←/→ changes selected PR priority"
+            f"WAITING  {len(items)}{filter_status}  ·  {hint}"
         )
         ids = {item.job_id for item in items}
         if self.selected_job not in ids:
@@ -541,6 +674,8 @@ class ReviewQueueApp(App[None]):
         table.clear(columns=False)
         for item in items:
             reviewed = _reviews(item.review_count)
+            if self.snapshot.manual_only and item.manual_enqueued:
+                reviewed += " [cyan]▶[/]"
             if item.status == "debouncing":
                 reviewed = f"{reviewed} [yellow]…[/]"
             values = [
@@ -580,7 +715,19 @@ class ReviewQueueApp(App[None]):
             if run:
                 marker = "[b green]●[/]"
                 reviewed = f"{_reviews(review_count)}  [b cyan]#{review_count + 1}[/]"
-                phase = _phase(run.status, width=6 if self.compact else 10)
+                # Keep the active step visible in the narrow table; details show the full path.
+                phase = _phase(
+                    run.phase.rsplit(" › ", 1)[-1] or run.status,
+                    width=6 if self.compact else 10,
+                )
+                if run.phase and run.status == "cancelling":
+                    phase = f"[yellow]cancelling[/] · {phase}"
+                if run.phase_started_at:
+                    phase += f" [dim]{_age(run.phase_started_at, now=self._now())}[/]"
+            elif wrapper.state == "ineligible":
+                marker = "[yellow]–[/]"
+                reviewed = _reviews(review_count)
+                phase = "[yellow]skipped[/]"
             elif wrapper.cleanup_error or wrapper.state in {"failed", "cleanup_failed"}:
                 marker = "[b red]×[/]"
                 phase = f"[red]{escape(wrapper.state)}[/]  ·  press r to retry"
@@ -632,6 +779,12 @@ class ReviewQueueApp(App[None]):
         activity = self.query_one("#activity-feed", Static)
         if item is not None:
             reason = "push quiet period" if item.status == "debouncing" else "eligible for dispatch"
+            if self.snapshot.manual_only:
+                reason = (
+                    "manually enqueued" if item.manual_enqueued else "press r to enqueue this head"
+                )
+            if self.snapshot.paused:
+                reason += " · dispatch paused"
             detail.update(
                 f"[b]SELECTED[/]  ·  {escape(item.repo)}#{item.number}  "
                 f"@{escape(item.author)}  "
@@ -659,7 +812,45 @@ class ReviewQueueApp(App[None]):
                     f"{'pinned' if wrapper.pinned else 'recyclable when safe'}  •  "
                     f"{escape(wrapper.path)}"
                 )
-        activity.update("\n".join(tuple(self.activity)[:3]))
+                if active and active.phase:
+                    detail.update(
+                        f"[b]{escape(wrapper.project)}#{wrapper.number}[/] · "
+                        f"{escape(active.status)} · {escape(active.phase)} · "
+                        f"{_age(active.phase_started_at, now=self._now())} in phase"
+                    )
+                if wrapper.cleanup_error:
+                    detail.update(
+                        f"[b]{escape(wrapper.project)}#{wrapper.number}[/] · "
+                        f"[dim]l: details/log[/] · {escape(wrapper.cleanup_error)}"
+                    )
+        activity.update("\n".join(self.activity))
+
+    def action_show_log(self) -> None:
+        wrapper = self._selected_wrapper()
+        if wrapper is None:
+            self.notify("Select a retained review to view its log.")
+            return
+        active = next(
+            (run for run in self.snapshot.running if run.wrapper_path == wrapper.path), None
+        )
+        phase = active.phase if active else ""
+        self.push_screen(
+            LogModal(
+                f"{wrapper.repo}#{wrapper.number} · {wrapper.state}",
+                wrapper.cleanup_error or phase,
+                self.scheduler.wrapper_log_tail(wrapper.wrapper_id),
+            )
+        )
+
+    def action_grow_history(self) -> None:
+        self.query_one(HistoryLayout).set_history_height(
+            self.query_one("#activity-pane").size.height + 1
+        )
+
+    def action_shrink_history(self) -> None:
+        self.query_one(HistoryLayout).set_history_height(
+            self.query_one("#activity-pane").size.height - 1
+        )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.row_key is None:
@@ -670,6 +861,10 @@ class ReviewQueueApp(App[None]):
         elif event.data_table.id == "review-table":
             self.selected_wrapper = identifier
         self._refresh_detail()
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if event.widget.id in {"queue-table", "review-table"} and self.query("#detail"):
+            self._refresh_detail()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "filter-input":
@@ -747,9 +942,14 @@ class ReviewQueueApp(App[None]):
     def action_toggle_pause(self) -> None:
         paused = self.scheduler.toggle_pause()
         self._record_activity(
-            "dispatch paused" if paused else "dispatch resumed",
+            "dispatch paused" if paused else f"dispatch resumed · {self.scheduler.snapshot().mode}",
             "yellow" if paused else "green",
         )
+        self.refresh_view()
+
+    def action_cycle_mode(self) -> None:
+        mode = self.scheduler.cycle_mode()
+        self._record_activity(f"dispatch mode · {mode}", "cyan")
         self.refresh_view()
 
     def action_retry(self) -> None:

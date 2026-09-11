@@ -20,6 +20,8 @@ from peanut_review.session import (
 
 def _mock_git(workspace, *args):
     """Mock git calls for testing."""
+    if args == ("rev-parse", "--path-format=absolute", "--git-common-dir"):
+        return "/tmp/fakerepo/.git"
     if args[:2] == ("rev-parse", "--verify"):
         if args[-1] == "main^{commit}":
             return "base123def456"

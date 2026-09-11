@@ -49,8 +49,10 @@ def _parser() -> argparse.ArgumentParser:
     state.add_argument("--json", action="store_true")
     watch = subcommands.add_parser("watch", help="watch and enqueue one PR")
     watch.add_argument("pr")
-    subcommands.add_parser("pause", help="pause automatic dispatch")
-    subcommands.add_parser("resume", help="resume automatic dispatch")
+    subcommands.add_parser("pause", help="pause all dispatch")
+    subcommands.add_parser("resume", help="resume the previous active/manual mode")
+    mode = subcommands.add_parser("mode", help="select persistent dispatch mode")
+    mode.add_argument("mode", choices=("active", "manual", "paused"))
     return parser
 
 
@@ -132,10 +134,12 @@ async def _run(args: argparse.Namespace) -> int:
         if args.command == "state":
             snapshot = scheduler.snapshot()
             if args.json:
-                print(json.dumps(asdict(snapshot), indent=2, sort_keys=True))
+                print(
+                    json.dumps(asdict(snapshot) | {"mode": snapshot.mode}, indent=2, sort_keys=True)
+                )
             else:
                 print(
-                    f"paused={snapshot.paused} queued={len(snapshot.queue)} "
+                    f"mode={snapshot.mode} paused={snapshot.paused} queued={len(snapshot.queue)} "
                     f"running={len(snapshot.running)} wrappers={len(snapshot.wrappers)}"
                 )
                 for item in snapshot.queue:
@@ -151,6 +155,10 @@ async def _run(args: argparse.Namespace) -> int:
         if args.command in {"pause", "resume"}:
             scheduler.db.set_paused(args.command == "pause")
             print(args.command + "d")
+            return 0
+        if args.command == "mode":
+            scheduler.db.set_mode(args.mode)
+            print(f"dispatch mode: {args.mode}")
             return 0
 
         await scheduler.start()

@@ -68,6 +68,7 @@ def managed_wrapper(tmp_path: Path) -> tuple[Path, dict[str, str]]:
             "ROCJITSU_MAIN_WORKSPACE": str(repository),
             "REVIEW_QUEUE_ROOT": str(root),
             "REVIEW_QUEUE_OWNER_TOKEN": token,
+            "ROCJITSU_REVIEW_LAUNCHER": str(LAUNCHER),
         }
     )
     return wrapper, env
@@ -112,6 +113,38 @@ def test_cleanup_preflight_rejects_active_lock(managed_wrapper) -> None:
         assert "lock" in str(result["reason"])
 
 
+@pytest.mark.parametrize("relative", [False, True])
+def test_cleanup_removes_managed_launcher_link_only(managed_wrapper, relative) -> None:
+    wrapper, env = managed_wrapper
+    target = LAUNCHER.resolve()
+    original = target.read_bytes()
+    link = wrapper / "review-pr.sh"
+    link.symlink_to(os.path.relpath(target, wrapper) if relative else target)
+    assert check(wrapper, env)["safe"] is True
+    subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, check=True, capture_output=True)
+    assert not wrapper.exists()
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "wrong-link", "broken-link"])
+def test_cleanup_rejects_unmanaged_launcher_entry(managed_wrapper, kind) -> None:
+    wrapper, env = managed_wrapper
+    entry = wrapper / "review-pr.sh"
+    if kind == "file":
+        entry.write_text("keep me\n")
+    elif kind == "directory":
+        entry.mkdir()
+    else:
+        entry.symlink_to("/dev/null" if kind == "wrong-link" else wrapper / "missing")
+    result = check(wrapper, env)
+    assert result["safe"] is False
+    assert "review-pr.sh" in str(result["reason"])
+    cleanup = subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, capture_output=True)
+    assert cleanup.returncode != 0
+    assert (wrapper / "rocm-systems/.git").exists()
+    assert entry.exists() or entry.is_symlink()
+
+
 def test_cleanup_removes_clean_managed_wrapper(managed_wrapper) -> None:
     wrapper, env = managed_wrapper
     beads = wrapper / ".beads"
@@ -139,6 +172,53 @@ def test_cleanup_accepts_owned_marker_only_wrapper(managed_wrapper) -> None:
     assert check(wrapper, env)["safe"] is True
     subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, check=True, capture_output=True)
     assert not wrapper.exists()
+
+
+@pytest.mark.parametrize("dirty", [None, "tracked", "untracked"])
+def test_cleanup_handles_initialized_submodule(managed_wrapper, tmp_path, dirty) -> None:
+    wrapper, env = managed_wrapper
+    repository = Path(env["ROCJITSU_MAIN_WORKSPACE"])
+    checkout = wrapper / "rocm-systems"
+
+    def git(*args):
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Review Queue Test",
+                "-c",
+                "user.email=review-queue@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "protocol.file.allow=always",
+                *map(str, args),
+            ],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+
+    subrepo = tmp_path / "submodule-source"
+    git("clone", repository, subrepo)
+    git("-C", checkout, "submodule", "add", subrepo, "vendor")
+    git("-C", checkout, "commit", "-am", "Add test submodule")
+    if dirty:
+        changed = (
+            checkout
+            / "vendor"
+            / ("emulation/rocjitsu/CMakeLists.txt" if dirty == "tracked" else "notes.txt")
+        )
+        changed.write_text("keep my changes\n")
+        assert check(wrapper, env)["safe"] is False
+        result = subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, capture_output=True)
+        assert result.returncode != 0
+        assert changed.read_text() == "keep my changes\n"
+    else:
+        assert check(wrapper, env)["safe"] is True
+        subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, check=True, capture_output=True)
+        assert not wrapper.exists()
+        assert subrepo.is_dir()
 
 
 def test_queue_launcher_protocol_and_cleanup_adapter(managed_wrapper) -> None:
@@ -280,3 +360,88 @@ def test_queue_setup_refuses_dirty_source_before_switching_head(managed_wrapper)
         check=True,
     ).stdout.strip()
     assert current_head == original_head
+
+
+def test_saved_review_survives_managed_wrapper_cleanup(managed_wrapper, tmp_path) -> None:
+    wrapper, env = managed_wrapper
+    review_dir = tmp_path / "reviews" / "saved"
+    review_bin = AGENT_WORKSPACE / "tools/peanut-review/bin/peanut-review"
+    checkout = wrapper / "rocm-systems"
+    source = checkout / "emulation/rocjitsu/CMakeLists.txt"
+    source.write_text(source.read_text() + "# Review change\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            checkout,
+            "-c",
+            "user.name=Review Queue Test",
+            "-c",
+            "user.email=review-queue@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-am",
+            "Review change",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            review_bin,
+            "--session",
+            review_dir,
+            "init",
+            "--workspace",
+            wrapper,
+            "--repo-relative",
+            "rocm-systems",
+            "--base",
+            "HEAD~1",
+            "--topic",
+            "HEAD",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    metadata = json.loads((review_dir / "session.json").read_text())
+    repository = Path(env["ROCJITSU_MAIN_WORKSPACE"])
+    assert metadata["git_common_dir"] == str(repository / ".git")
+    subprocess.run(
+        [SCRIPT, "queue-cleanup", wrapper],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    assert not wrapper.exists()
+    for args in (["reflog", "expire", "--expire=now", "--all"], ["gc", "--prune=now"]):
+        subprocess.run(
+            ["git", "-C", repository, *args],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            metadata["git_common_dir"],
+            "diff",
+            f"{metadata['base_ref']}...{metadata['topic_ref']}",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "+# Review change" in result.stdout
+    subprocess.run(
+        [review_bin, "--session", review_dir, "retain-git"],
+        env=env,
+        check=True,
+        capture_output=True,
+    )

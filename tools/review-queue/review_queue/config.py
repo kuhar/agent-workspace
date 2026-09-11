@@ -42,6 +42,23 @@ def _positive(name: str, value: object, *, allow_zero: bool = False) -> int:
     return value
 
 
+def _include_paths(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(path, str) for path in value):
+        raise ValueError("include_paths must be an array of repository-relative directories")
+    paths = []
+    for path in value:
+        clean = path.rstrip("/")
+        if (
+            not clean
+            or clean.startswith("/")
+            or any(part in {"", ".", ".."} for part in clean.split("/"))
+            or any(char in path for char in "*?[]\\")
+        ):
+            raise ValueError(f"invalid include_paths directory: {path!r}")
+        paths.append(clean + "/")
+    return tuple(sorted(set(paths)))
+
+
 def load_config(path: Path | None = None, *, state_dir: Path | None = None) -> QueueConfig:
     config_path = (path or xdg_config_path()).expanduser().resolve()
     if not config_path.is_file():
@@ -102,10 +119,14 @@ def load_config(path: Path | None = None, *, state_dir: Path | None = None) -> Q
                     item.get("estimated_wrapper_gib", 160),
                 ),
                 priority=int(item.get("priority", 0)),
+                include_paths=_include_paths(item.get("include_paths", [])),
             )
         )
 
     resolved_state = (state_dir or xdg_state_dir()).expanduser().resolve()
+    start_mode = queue.get("start_mode")
+    if start_mode is not None and start_mode not in ("active", "manual", "paused"):
+        raise ValueError("queue.start_mode must be active, manual, or paused")
     return QueueConfig(
         poll_seconds=_positive("queue.poll_seconds", queue.get("poll_seconds", 120)),
         push_quiet_seconds=_positive(
@@ -116,6 +137,7 @@ def load_config(path: Path | None = None, *, state_dir: Path | None = None) -> Q
         max_wrappers=_positive("queue.max_wrappers", queue.get("max_wrappers", 3)),
         min_free_gib=_positive("queue.min_free_gib", queue.get("min_free_gib", 50)),
         start_paused=bool(queue.get("start_paused", False)),
+        start_mode=start_mode,
         projects=tuple(projects),
         config_path=config_path,
         state_dir=resolved_state,

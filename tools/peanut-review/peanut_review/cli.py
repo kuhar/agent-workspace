@@ -619,9 +619,10 @@ def cmd_add_comment(args: argparse.Namespace) -> int:
             line = args.line
             end_line = args.end_line
             file_lines, err = sess.validate_comment_location(
-                sess.repo_path(s), file, line,
+                sess.review_repo_path(s), file, line,
                 head_ref=s.current_head,
                 require_pinned=s.github is not None,
+                checkout=sess.repo_path(s),
             )
             if err:
                 print(f"Error: {err}", file=sys.stderr)
@@ -847,7 +848,7 @@ def cmd_gh_push(args: argparse.Namespace) -> int:
 
     comments = store.read_all_comments(session_dir)
     anchor_index = _gh_push.build_review_anchor_index(
-        sess.repo_path(s), s.base_ref, s.topic_ref,
+        sess.review_repo_path(s), s.base_ref, s.topic_ref,
     )
     plan = _gh_push.plan_push(comments, anchor_index=anchor_index)
 
@@ -1061,12 +1062,38 @@ def cmd_wait_all(args: argparse.Namespace) -> int:
     session_dir = _get_session_dir(args)
     s = sess.load_session(session_dir)
     agents = [a.name for a in sess.reviewer_agents(s)]
-    timed_out = polling.wait_all_signals(
-        session_dir, agents, args.event,
-        timeout=args.timeout, poll_interval=args.poll,
-    )
+    max_failures = args.max_reviewer_failures
+    if max_failures < 0 or (max_failures and args.event != runtime.ROUND_DONE_EVENT):
+        print("--max-reviewer-failures must be nonnegative and requires round-done", file=sys.stderr)
+        return 1
+    if not agents:
+        print("No reviewer agents configured", file=sys.stderr)
+        return 1
+    failed = []
+    if args.event == runtime.ROUND_DONE_EVENT:
+        print("::group::Reviewers", flush=True)
+        failed, timed_out = polling.wait_round_completion(
+            session_dir, agents, timeout=args.timeout, poll_interval=args.poll,
+        )
+    else:
+        timed_out = polling.wait_all_signals(
+            session_dir, agents, args.event,
+            timeout=args.timeout, poll_interval=args.poll,
+        )
+    if failed:
+        print(f"Reviewers failed without round-done: {', '.join(failed)}", file=sys.stderr)
+    if len(failed) > max_failures or len(failed) == len(agents):
+        print(f"Reviewer failure limit exceeded ({len(failed)}/{len(agents)}, "
+              f"allowed {max_failures}); curator skipped", file=sys.stderr)
+        return 1
     if not timed_out:
-        print(f"All reviewers signaled {args.event}")
+        if failed:
+            print(f"{len(agents) - len(failed)}/{len(agents)} reviewers signaled {args.event}; "
+                  f"continuing with {len(failed)} failed reviewers")
+        else:
+            print(f"All reviewers signaled {args.event}")
+        if args.event == runtime.ROUND_DONE_EVENT:
+            print("::endgroup::", flush=True)
         if (
             args.event == runtime.ROUND_DONE_EVENT
             and s.github is not None
@@ -1081,6 +1108,7 @@ def cmd_wait_all(args: argparse.Namespace) -> int:
 def _run_auto_curator_after_wait(session_dir: str, args: argparse.Namespace) -> int:
     from . import launch
 
+    print("::group::Curator", flush=True)
     s = sess.load_session(session_dir)
     try:
         curator_agent = sess.ensure_curator(s)
@@ -1099,14 +1127,18 @@ def _run_auto_curator_after_wait(session_dir: str, args: argparse.Namespace) -> 
     else:
         print(f"Curator already signaled {args.event}")
 
-    timed_out = polling.wait_all_signals(
-        session_dir, [curator_agent.name], args.event,
+    failed, timed_out = polling.wait_round_completion(
+        session_dir, [curator_agent.name],
         timeout=args.timeout, poll_interval=args.poll,
     )
+    if failed:
+        print(f"Curator failed without round-done: {', '.join(failed)}", file=sys.stderr)
+        return 1
     if timed_out:
         print(f"Timed out waiting for curator: {', '.join(timed_out)}", file=sys.stderr)
         return 1
     print(f"Curator signaled {args.event}")
+    print("::endgroup::", flush=True)
     return 0
 
 
@@ -1232,6 +1264,17 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_retain_git(args: argparse.Namespace) -> int:
+    """Retain pinned Git objects and repair durable session storage."""
+    try:
+        session = sess.repair_review_git(_get_session_dir(args), args.repo)
+    except RuntimeError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    print(f"Git storage: {session.git_common_dir}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Show session status."""
     session_dir = _get_session_dir(args)
@@ -1246,6 +1289,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"Workspace: {s.workspace}")
     if s.repo_relative:
         print(f"Repo:      {sess.repo_path(s)}")
+    if s.git_common_dir:
+        print(f"Git storage: {s.git_common_dir}")
     workspace_mismatch, workspace_head = sess.workspace_head_mismatch(s)
     if workspace_head:
         print(f"Workspace HEAD: {workspace_head[:12]}")
@@ -1438,7 +1483,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
     for c in comments:
         note_data = json.dumps(dataclasses.asdict(c), indent=2)
         subprocess.run(
-            ["git", "-C", sess.repo_path(s), "notes", "--ref", ref,
+            ["git", "-C", sess.review_repo_path(s), "notes", "--ref", ref,
              "append", "-m", note_data, s.original_head],
             capture_output=True, text=True, timeout=10,
         )
@@ -1736,6 +1781,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--timeout", type=int, default=600, help="Timeout seconds (default: 600)")
     sp.add_argument("--poll", type=float, default=2.0, help="Poll interval (default: 2)")
     sp.add_argument(
+        "--max-reviewer-failures", type=int, default=0,
+        help="Allow this many terminal reviewer failures for round-done (default: 0); "
+             "unfinished reviewers and curator failure still fail the wait",
+    )
+    sp.add_argument(
         "--no-curate",
         action="store_true",
         help="For GitHub sessions, do not auto-launch the curator after reviewer round-done",
@@ -1761,6 +1811,9 @@ def build_parser() -> argparse.ArgumentParser:
     # migrate
     sp = sub.add_parser("migrate", help="Update HEAD, mark comments stale")
     sp.add_argument("--new-head", help="New HEAD SHA (default: current HEAD)")
+
+    sp = sub.add_parser("retain-git", help="Retain pinned commits independently of the worktree")
+    sp.add_argument("--repo", help="Surviving repository or Git directory for session recovery")
 
     # status
     sp = sub.add_parser("status", help="Show session status")
@@ -1863,6 +1916,7 @@ def main(argv: list[str] | None = None) -> int:
         "verdict": cmd_verdict,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "retain-git": cmd_retain_git,
         "archive": cmd_archive,
         "serve": cmd_serve,
         "stop": cmd_stop,

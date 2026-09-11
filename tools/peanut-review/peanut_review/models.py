@@ -313,6 +313,8 @@ class Session:
     # at the Git repository under this directory.
     workspace: str = ""
     repo_relative: str = ""
+    # Durable object storage, independent of the agent's recyclable checkout.
+    git_common_dir: str = ""
     base_ref: str = "main"
     topic_ref: str = "HEAD"
     original_head: str = ""

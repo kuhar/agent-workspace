@@ -1130,6 +1130,8 @@ def _render_sidebar(
         '<span class="desc">kill all agents</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>f</kbd></span>'
         '<span class="desc">fetch from GitHub</span></li>'
+        f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>r</kbd></span>'
+        '<span class="desc">refresh PR checkout</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{PREFIX_LABEL}</kbd><kbd>g</kbd><kbd>p</kbd></span>'
         '<span class="desc">push to GitHub</span></li>'
         '</ul>'
@@ -1401,9 +1403,15 @@ def render_page(
             f'{html.escape(label)}'
             f'</button>'
         )
+        gh_refresh_button = (
+            '<button id="gh-refresh-btn" class="gh-refresh" type="button" '
+            'title="Update the clean checkout, synchronize the PR snapshot, '
+            'and fetch GitHub comments">Refresh PR</button>'
+        )
     else:
         gh_link_html = ""
         gh_push_button = ""
+        gh_refresh_button = ""
 
     session_url = f"{base_url}/{session_id}"
     # Escape single quotes for safe JSON in JS
@@ -1444,6 +1452,7 @@ def render_page(
     {gh_link_html}
     <span class="spacer"></span>
     {THEME_TOGGLE_BUTTON}
+    {gh_refresh_button}
     {gh_push_button}
     {head_badge}
     <span class="badge review-progress progress-{progress_status}"

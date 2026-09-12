@@ -190,6 +190,15 @@ def fetch_pr_info(repo: str, number: int) -> PRInfo:
     )
 
 
+def checkout_pr(pr: str, *, workspace: str, branch: str) -> str:
+    """Update an existing local branch from a PR without forcing divergence."""
+    return _run(
+        ["pr", "checkout", pr, "--branch", branch],
+        cwd=workspace,
+        timeout=120,
+    )
+
+
 def fetch_review_comments(repo: str, number: int) -> list[dict]:
     """Inline (line-anchored) review comments. Paginated."""
     raw = _api(f"repos/{repo}/pulls/{number}/comments", paginate=True)

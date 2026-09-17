@@ -31,6 +31,13 @@ database intentionally.
 Use `./bin/review-queue poll --json` for a one-shot discovery pass and
 `./bin/review-queue state --json` for a non-interactive snapshot.
 
+Quitting stops launchers and records active reviews as interrupted. On restart,
+the next successful GitHub poll retries those reviews once, including in manual
+mode, if the PR is still eligible and its revision is unchanged. The retry reuses
+the workspace and incremental build output; it starts a new launcher attempt.
+Explicitly cancelled reviews stay cancelled. A newer revision requires its own
+manual enqueue. Interrupted attempts and their logs remain in the state database.
+
 The scheduler polls once at startup, every configured interval (120 seconds by
 default), and immediately after a review job finishes. PRs that merge or close
 are removed from waiting work on that poll; terminal manually included PRs are
@@ -42,6 +49,26 @@ directory before launching reviewers. Saved peanut-review pages and comment
 anchors use that durable storage after queue-owned worktrees are recycled.
 The shared repository must remain available; the wrapper limit only bounds
 temporary checkouts and build directories.
+
+Failed runs automatically release unpinned workspaces after cleanup preflight
+passes, even when the wrapper limit has not been reached. Source changes or a
+queued retry keep the workspace. Failed cleanup retries wait 60 seconds and do
+not change review ordering. Failure records and logs remain in the state
+directory; recent failures also reappear in history after restarting the TUI.
+Use `n` to enqueue a failed PR again after its workspace has been recycled.
+
+The active-review panel grows to fit retained workspaces, within the terminal's
+available height. Short terminals keep the rows scrollable. Reviews keep their
+workspace creation order as their status changes. Both tables update changed
+cells in place, preserving selection and scrolling on routine refreshes; the
+waiting queue still follows dispatch priority.
+
+Both PR lists show GitHub approvals separately from local review rounds:
+`You ✓` means the authenticated GitHub account has approved, and `Others N`
+counts other approving accounts. `You –` means no current personal approval;
+`Approvals ?` means the queue has not fetched that information yet. The values
+refresh on each poll and with `g`, using GitHub's latest opinionated reviews
+so comments do not replace approvals and dismissed approvals do not count.
 
 Drag the separator above the bottom activity pane up or down to resize it.
 `Alt+Up` and `Alt+Down` grow or shrink it one row at a time. Scroll over the

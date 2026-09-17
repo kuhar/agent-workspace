@@ -24,6 +24,81 @@ class GitHubClient:
         self.timeout_seconds = timeout_seconds
         self._file_checks = asyncio.Semaphore(4)
         self._path_cache: dict[tuple[object, ...], bool] = {}
+        self._review_checks = asyncio.Semaphore(4)
+
+    async def _with_approvals(self, record: PullRequest) -> PullRequest:
+        query = """
+        query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+          viewer { login }
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              headRefOid
+              latestOpinionatedReviews(first: 100, after: $cursor) {
+                nodes { author { login } state }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+        """
+        owner, name = record.repo.split("/", 1)
+        approved: set[str] = set()
+        cursors: set[str] = set()
+        cursor = None
+        async with self._review_checks:
+            try:
+                while True:
+                    args = (
+                        "gh",
+                        "api",
+                        "graphql",
+                        "-f",
+                        f"query={query}",
+                        "-f",
+                        f"owner={owner}",
+                        "-f",
+                        f"name={name}",
+                        "-F",
+                        f"number={record.number}",
+                    )
+                    if cursor:
+                        args += ("-f", f"cursor={cursor}")
+                    payload = json.loads(await self._run(*args))
+                    if payload.get("errors"):
+                        raise ValueError("GitHub returned review query errors")
+                    data = payload["data"]
+                    viewer = data["viewer"]["login"]
+                    if not isinstance(viewer, str) or not viewer:
+                        raise ValueError("missing authenticated reviewer")
+                    pull = data["repository"]["pullRequest"]
+                    if pull["headRefOid"] != record.head_sha:
+                        raise ValueError("PR changed while checking approvals; retry next poll")
+                    connection = pull["latestOpinionatedReviews"]
+                    for review in connection["nodes"]:
+                        author = review.get("author")
+                        if review["state"] == "APPROVED" and author:
+                            login = author["login"]
+                            if not isinstance(login, str) or not login:
+                                raise ValueError("invalid approving reviewer")
+                            approved.add(login)
+                    page = connection["pageInfo"]
+                    if page["hasNextPage"] is False:
+                        break
+                    cursor = page["endCursor"]
+                    if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                        raise ValueError("invalid review pagination cursor")
+                    cursors.add(cursor)
+            except (KeyError, TypeError, ValueError, AttributeError) as error:
+                raise GitHubError(
+                    f"cannot read approvals for {record.repo}#{record.number}: {error}"
+                ) from error
+        return replace(
+            record, approval_viewer=viewer, approved_by=tuple(sorted(approved, key=str.casefold))
+        )
+
+    async def _read_record(self, project: ProjectConfig, item: dict[str, object]) -> PullRequest:
+        record = await self._filter_paths(project, self._from_gh(project, item), item)
+        return await self._with_approvals(record)
 
     def _fields(self, project: ProjectConfig) -> str:
         return self.fields + (",baseRefOid,changedFiles" if project.include_paths else "")
@@ -163,12 +238,7 @@ class GitHubClient:
             if not isinstance(payload, list):
                 raise GitHubError("gh pr list returned a non-list payload")
             records = tuple(
-                await asyncio.gather(
-                    *(
-                        self._filter_paths(project, self._from_gh(project, item), item)
-                        for item in payload
-                    )
-                )
+                await asyncio.gather(*(self._read_record(project, item) for item in payload))
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise GitHubError(f"invalid gh pr list response: {error}") from error
@@ -189,6 +259,6 @@ class GitHubClient:
             payload = json.loads(output)
             if not isinstance(payload, dict):
                 raise TypeError("expected an object")
-            return await self._filter_paths(project, self._from_gh(project, payload), payload)
+            return await self._read_record(project, payload)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise GitHubError(f"invalid gh pr view response: {error}") from error

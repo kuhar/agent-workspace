@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import signal
+import time
 from contextlib import suppress
 from pathlib import Path
 
@@ -78,6 +79,7 @@ class Scheduler:
         self._poll_lock = asyncio.Lock()
         self._stopping = False
         self._blocked_reason: str | None = None
+        self._cleanup_retry_at: dict[int, float] = {}
 
     async def start(self) -> None:
         for project in self.config.projects:
@@ -97,17 +99,23 @@ class Scheduler:
         await asyncio.gather(*self._background, return_exceptions=True)
         for row in self.db.orphaned_jobs():
             with suppress(ValueError):
-                self.db.mark_cancelling(int(row["id"]))
+                self.db.mark_cancelling(int(row["id"]), resume_on_restart=True)
+        owned_jobs = set(self._job_tasks)
         await self.launcher.shutdown()
-        if self._job_tasks:
+        tasks = tuple(self._job_tasks.values())
+        if tasks:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*self._job_tasks.values(), return_exceptions=True),
+                    asyncio.gather(*tasks, return_exceptions=True),
                     timeout=self.launcher.grace_seconds + 5,
                 )
             except TimeoutError:
-                for task in self._job_tasks.values():
+                for task in tasks:
                     task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        for row in self.db.orphaned_jobs():
+            if int(row["id"]) in owned_jobs:
+                self.db.update_job(int(row["id"]), status="cancelled", error="cancelled by user")
         self.db.close()
 
     async def reconcile_orphans(self) -> None:
@@ -131,6 +139,8 @@ class Scheduler:
             await asyncio.sleep(self.launcher.grace_seconds + 1)
 
         for row in orphans:
+            if row["status"] != "cancelling":
+                self.db.mark_cancelling(int(row["id"]), resume_on_restart=True)
             pid = row["supervisor_pid"]
             expected_ticks = row["supervisor_start_ticks"]
             token = row["owner_token"]
@@ -159,11 +169,7 @@ class Scheduler:
                             touch=True,
                         )
                     continue
-            self.db.update_job(
-                int(row["id"]),
-                status="interrupted",
-                error="queue restarted during an active launcher",
-            )
+            self.db.update_job(int(row["id"]), status="cancelled", error="cancelled by user")
             if row["wrapper_id"]:
                 self.db.update_wrapper(int(row["wrapper_id"]), state="idle", touch=True)
         self._reconcile_wrapper_records()
@@ -255,13 +261,15 @@ class Scheduler:
                     *(self.github.view(project, number) for number in sorted(followups))
                 )
                 records.extend(extra)
-            return self.db.apply_poll(
+            outcome = self.db.apply_poll(
                 project,
                 records,
                 query_numbers=set(poll.query_numbers),
                 bootstrap_hours=self.config.bootstrap_hours,
                 push_quiet_seconds=self.config.push_quiet_seconds,
             )
+            self.db.resume_interrupted_jobs(project.name)
+            return outcome
         except Exception as error:
             self.db.mark_poll_failure(project.name, str(error))
             if isinstance(error, (GitHubError, QueueError)):
@@ -284,6 +292,7 @@ class Scheduler:
         if self.db.paused():
             self._blocked_reason = "dispatch paused"
             return
+        await self._recycle_failed_wrappers()
         if self.db.running_count() >= self.config.max_running:
             self._blocked_reason = "all review slots are occupied"
             return
@@ -316,6 +325,11 @@ class Scheduler:
         task.add_done_callback(lambda _task, value=job_id: self._job_tasks.pop(value, None))
         self._blocked_reason = None
 
+    async def _recycle_failed_wrappers(self) -> None:
+        for row in self.db.wrapper_candidates(failed_only=True):
+            if time.monotonic() >= self._cleanup_retry_at.get(int(row["id"]), 0):
+                await self._cleanup_wrapper_row(row)
+
     async def _ensure_wrapper(self, item: QueueItem):
         existing = self.db.wrapper_for_pr(item.repo, item.number)
         if existing is not None:
@@ -323,12 +337,17 @@ class Scheduler:
 
         wrappers = self.db.wrappers()
         if len(wrappers) >= self.config.max_wrappers:
-            candidate = next(iter(self.db.wrapper_candidates()), None)
-            if candidate is None:
+            candidates = self.db.wrapper_candidates()
+            if not candidates:
                 self._blocked_reason = "wrapper cap reached; no safe idle candidate"
                 return None
-            if not await self._cleanup_wrapper_row(candidate):
-                self._blocked_reason = "wrapper cap reached; cleanup preflight blocked"
+            for candidate in candidates:
+                if time.monotonic() < self._cleanup_retry_at.get(int(candidate["id"]), 0):
+                    continue
+                if await self._cleanup_wrapper_row(candidate):
+                    break
+            else:
+                self._blocked_reason = "wrapper cap reached; cleanup blocked (retry every 60s)"
                 return None
 
         project = self.projects[item.project]
@@ -587,17 +606,16 @@ class Scheduler:
             check = await self.launcher.cleanup_check(project, cwd=project.wrapper_root, env=env)
             if not check["safe"]:
                 reason = str(check.get("reason") or "cleanup preflight rejected wrapper")
-                self.db.update_wrapper(
-                    int(row["id"]), state="cleanup_failed", cleanup_error=reason, touch=True
-                )
+                self.db.update_wrapper(int(row["id"]), state="cleanup_failed", cleanup_error=reason)
+                self._cleanup_retry_at[int(row["id"])] = time.monotonic() + 60
                 return False
             await self.launcher.cleanup(project, cwd=project.wrapper_root, env=env)
             self.db.remove_wrapper(int(row["id"]))
+            self._cleanup_retry_at.pop(int(row["id"]), None)
             return True
         except (LauncherError, OSError) as error:
-            self.db.update_wrapper(
-                int(row["id"]), state="cleanup_failed", cleanup_error=str(error), touch=True
-            )
+            self.db.update_wrapper(int(row["id"]), state="cleanup_failed", cleanup_error=str(error))
+            self._cleanup_retry_at[int(row["id"])] = time.monotonic() + 60
             return False
 
     async def recycle_wrapper(self, wrapper_id: int) -> bool:
@@ -702,6 +720,7 @@ class Scheduler:
             wrappers=self.db.wrappers(),
             projects=self.db.project_health(),
             phase_events=self.db.phase_events(),
+            failures=self.db.recent_failures(),
         )
 
     def log_tail(self, path: str | None, *, lines: int = 500) -> str:

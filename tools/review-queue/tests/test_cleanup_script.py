@@ -161,6 +161,17 @@ def test_cleanup_removes_clean_managed_wrapper(managed_wrapper) -> None:
     assert not wrapper.exists()
 
 
+def test_cleanup_removes_ruff_cache(managed_wrapper) -> None:
+    wrapper, env = managed_wrapper
+    cache = wrapper / ".ruff_cache" / "0.16.4"
+    cache.mkdir(parents=True)
+    (cache / "123456789").write_bytes(b"cached lint results")
+    assert check(wrapper, env)["safe"] is True
+    subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, check=True, capture_output=True)
+    assert not wrapper.exists()
+    assert Path(env["ROCJITSU_MAIN_WORKSPACE"]).is_dir()
+
+
 def test_cleanup_accepts_owned_marker_only_wrapper(managed_wrapper) -> None:
     wrapper, env = managed_wrapper
     repository = Path(env["ROCJITSU_MAIN_WORKSPACE"])

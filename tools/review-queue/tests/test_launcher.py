@@ -1,11 +1,54 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from review_queue.launcher import LauncherClient
+
+
+@pytest.mark.parametrize("terminated", [True, False])
+async def test_long_output_preserves_bytes_and_following_phases(project, tmp_path, terminated):
+    output = tmp_path / "output"
+    data = b"::group::Compile\n" + ("長いコマンド" * 100000).encode()
+    if terminated:
+        data += b"\n::group::Link\nmold: error: undefined symbol: missing\n"
+    output.write_bytes(data)
+    project.launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "sys.stdout.buffer.write(Path(os.environ['TEST_OUTPUT']).read_bytes())\n"
+        "sys.exit(1)\n"
+    )
+    log = tmp_path / "job.log"
+    log.write_bytes(b"previous operation\n")
+    changes = []
+    client = LauncherClient(grace_seconds=0.1)
+    code = await client.run_logged(
+        job_id=9,
+        project=project,
+        operation="run",
+        pr_url="test/repo#9",
+        cwd=tmp_path,
+        env=os.environ | {"TEST_OUTPUT": str(output)},
+        log_path=log,
+        on_started=lambda *_: None,
+        on_phase=changes.append,
+    )
+    assert code == 1
+    assert log.read_bytes() == b"previous operation\n" + data
+    assert client.processes == {}
+    assert changes[1].phase == "Compile"
+    assert changes[1].log_offset == len(b"previous operation\n::group::Compile\n")
+    if terminated:
+        assert changes[-1].phase == "Compile › Link"
+        assert (
+            log.read_bytes()[changes[-1].log_offset :]
+            == b"mold: error: undefined symbol: missing\n"
+        )
 
 
 async def test_log_failure_terminates_and_forgets_supervisor(project, tmp_path: Path) -> None:

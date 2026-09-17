@@ -188,13 +188,31 @@ class LauncherClient:
         try:
             on_started(process.pid, process_start_ticks(process.pid))
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8", errors="replace") as log:
+            with log_path.open("ab") as log:
                 assert process.stdout is not None
-                while line := await process.stdout.readline():
-                    text = line.decode(errors="replace")
-                    log.write(text)
+                pending: bytes | None = b""
+                while chunk := await process.stdout.read(65536):
+                    offset = log.tell()
+                    log.write(chunk)
                     log.flush()
-                    change = phases.consume(text, log_offset=log.tell())
+                    parts = chunk.split(b"\n")
+                    for index, part in enumerate(parts):
+                        complete = index < len(parts) - 1
+                        offset += len(part) + int(complete)
+                        # Bound marker parsing without limiting or truncating the log.
+                        # None skips an oversized line until its next newline.
+                        if pending is not None:
+                            pending = pending + part if len(pending) + len(part) <= 4096 else None
+                        if complete:
+                            if pending is not None:
+                                change = phases.consume(
+                                    pending.decode(errors="replace"), log_offset=offset
+                                )
+                                if change is not None and on_phase:
+                                    on_phase(change)
+                            pending = b""
+                if pending:
+                    change = phases.consume(pending.decode(errors="replace"), log_offset=log.tell())
                     if change is not None and on_phase:
                         on_phase(change)
             return int(await process.wait())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .models import (
+    FailedReview,
     PhaseEvent,
     ProjectConfig,
     ProjectHealth,
@@ -150,6 +152,8 @@ class Database:
         for name, declaration in (
             ("path_filter_key", "TEXT NOT NULL DEFAULT ''"),
             ("path_filter_passed", "INTEGER NOT NULL DEFAULT 0"),
+            ("approval_viewer", "TEXT NOT NULL DEFAULT ''"),
+            ("approved_by", "TEXT NOT NULL DEFAULT '[]'"),
         ):
             if name not in columns:
                 self.connection.execute(
@@ -162,6 +166,7 @@ class Database:
             ("phase", "TEXT NOT NULL DEFAULT ''"),
             ("phase_started_at", "TEXT"),
             ("phase_log_offset", "INTEGER NOT NULL DEFAULT 0"),
+            ("resume_on_restart", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in job_columns:
                 self.connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
@@ -320,7 +325,9 @@ class Database:
     def poll_followups(self, project: str) -> tuple[int, ...]:
         rows = self.connection.execute(
             "SELECT number FROM pull_requests "
-            "WHERE project = ? AND (eligible = 1 OR manual_watch = 1)",
+            "WHERE project = ? AND (eligible = 1 OR manual_watch = 1 OR EXISTS ("
+            "SELECT 1 FROM wrappers w WHERE w.repo = pull_requests.repo "
+            "AND w.pr_number = pull_requests.number))",
             (project,),
         ).fetchall()
         return tuple(int(row["number"]) for row in rows)
@@ -507,6 +514,8 @@ class Database:
                             )
                         )
 
+                self._store_approvals(record)
+
             missing_rows = self.connection.execute(
                 """
                 SELECT repo, number FROM pull_requests
@@ -593,6 +602,13 @@ class Database:
             (project, repo, number, head_sha, status, source, attempt, isoformat(), quiet_until),
         )
         return True
+
+    def _store_approvals(self, record: PullRequest) -> None:
+        self.connection.execute(
+            "UPDATE pull_requests SET approval_viewer = ?, approved_by = ? "
+            "WHERE repo = ? AND number = ?",
+            (record.approval_viewer, json.dumps(record.approved_by), record.repo, record.number),
+        )
 
     def _mark_manually_enqueued(self, job_id: int, source: str = "manual") -> None:
         self.connection.execute(
@@ -714,6 +730,7 @@ class Database:
                     record.number,
                 ),
             )
+            self._store_approvals(record)
             if enqueue:
                 self.connection.execute(
                     """
@@ -785,6 +802,7 @@ class Database:
         sql = f"""
             SELECT j.id AS job_id, j.project, j.repo, j.pr_number AS number,
                    pr.url, pr.title, pr.author, j.head_sha, pr.head_ref, pr.updated_at,
+                   pr.approval_viewer, pr.approved_by,
                    j.status, j.queued_at, j.quiet_until, j.error, j.source,
                    COALESCE(pp.priority, 0) AS project_priority,
                    COALESCE(a.priority, 0) AS author_priority,
@@ -834,6 +852,8 @@ class Database:
             error=row["error"],
             review_count=row["review_count"],
             manual_enqueued=row["source"] in {"manual", "manual-watch"},
+            approval_viewer=row["approval_viewer"],
+            approved_by=tuple(json.loads(row["approved_by"])),
         )
 
     def queue_items(self) -> tuple[QueueItem, ...]:
@@ -890,11 +910,12 @@ class Database:
                        WHEN 'succeeded' THEN 'complete'
                        WHEN 'failed' THEN 'failed'
                        WHEN 'ineligible' THEN 'ineligible'
+                       WHEN 'interrupted' THEN 'interrupted'
                        ELSE w.state
                    END AS display_state,
                    w.pinned, w.last_used_at, w.size_bytes,
                    COALESCE(w.cleanup_error, latest.error) AS display_error,
-                   pr.title, pr.author,
+                   pr.title, pr.author, pr.approval_viewer, pr.approved_by,
                    (SELECT COUNT(*) FROM jobs reviewed
                     WHERE reviewed.repo = w.repo
                       AND reviewed.pr_number = w.pr_number
@@ -923,6 +944,8 @@ class Database:
                 title=row["title"],
                 author=row["author"],
                 review_count=row["review_count"],
+                approval_viewer=row["approval_viewer"],
+                approved_by=tuple(json.loads(row["approved_by"])),
             )
             for row in rows
         )
@@ -937,7 +960,27 @@ class Database:
             "SELECT * FROM wrappers WHERE id = ?", (wrapper_id,)
         ).fetchone()
 
-    def wrapper_candidates(self) -> tuple[sqlite3.Row, ...]:
+    def recent_failures(self) -> tuple[FailedReview, ...]:
+        rows = self.connection.execute(
+            """
+            SELECT id, project, pr_number, finished_at, error, log_path
+            FROM jobs WHERE status = 'failed'
+            ORDER BY finished_at DESC, id DESC LIMIT 50
+            """
+        ).fetchall()
+        return tuple(
+            FailedReview(
+                job_id=row["id"],
+                project=row["project"],
+                number=row["pr_number"],
+                finished_at=row["finished_at"],
+                error=row["error"] or "review failed",
+                log_path=row["log_path"],
+            )
+            for row in rows
+        )
+
+    def wrapper_candidates(self, *, failed_only: bool = False) -> tuple[sqlite3.Row, ...]:
         rows = self.connection.execute(
             """
             SELECT w.*, pr.eligible, pr.state AS pr_state
@@ -949,6 +992,16 @@ class Database:
                   SELECT 1 FROM jobs j WHERE j.wrapper_id = w.id
                     AND j.status IN ('debouncing', 'queued', 'preparing', 'running', 'cancelling')
               )
+              AND (NOT ? OR (
+                  (SELECT status FROM jobs WHERE wrapper_id = w.id ORDER BY id DESC LIMIT 1)
+                      = 'failed'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs j WHERE j.repo = w.repo AND j.pr_number = w.pr_number
+                        AND j.status IN (
+                            'debouncing', 'queued', 'preparing', 'running', 'cancelling'
+                        )
+                  )
+              ))
             ORDER BY CASE
                          WHEN pr.state IN ('CLOSED', 'MERGED') THEN 0
                          WHEN pr.eligible = 0 THEN 1
@@ -956,6 +1009,7 @@ class Database:
                      END,
                      w.last_used_at ASC, w.id ASC
             """,
+            (failed_only,),
         ).fetchall()
         return tuple(rows)
 
@@ -1005,7 +1059,7 @@ class Database:
         if size_bytes is not None:
             assignments.append("size_bytes = ?")
             values.append(size_bytes)
-        if cleanup_error is not None or state == "idle":
+        if cleanup_error is not None or state in {"idle", "preparing", "running", "cleaning"}:
             assignments.append("cleanup_error = ?")
             values.append(cleanup_error)
         if touch:
@@ -1047,6 +1101,13 @@ class Database:
         supervisor_pid: int | None = None,
         supervisor_start_ticks: int | None = None,
     ) -> None:
+        if status == "cancelled":
+            row = self.connection.execute(
+                "SELECT resume_on_restart FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is not None and row["resume_on_restart"]:
+                status = "interrupted"
+                error = "queue stopped; review will retry after restart"
         terminal = status in {
             "succeeded",
             "failed",
@@ -1144,15 +1205,58 @@ class Database:
         if cursor.rowcount != 1:
             raise KeyError(f"unknown pull request: {repo}#{number}")
 
-    def mark_cancelling(self, job_id: int) -> None:
+    def mark_cancelling(self, job_id: int, *, resume_on_restart: bool = False) -> None:
         with self.connection:
             cursor = self.connection.execute(
-                "UPDATE jobs SET status = 'cancelling' "
+                "UPDATE jobs SET status = 'cancelling', resume_on_restart = ? "
                 "WHERE id = ? AND status IN ('preparing', 'running')",
-                (job_id,),
+                (resume_on_restart, job_id),
             )
         if cursor.rowcount != 1:
             raise ValueError(f"job {job_id} is not running")
+
+    def resume_interrupted_jobs(self, project: str) -> int:
+        """Retry previously authorized revisions after a successful GitHub poll."""
+        resumed = 0
+        with self.connection:
+            rows = self.connection.execute(
+                """
+                SELECT j.*, pr.head_sha AS current_head, pr.eligible, pr.ignored,
+                       pr.state AS pr_state, pr.is_draft, pr.path_filter_key,
+                       pr.path_filter_passed
+                FROM jobs j JOIN pull_requests pr
+                  ON pr.repo = j.repo AND pr.number = j.pr_number
+                WHERE j.project = ? AND j.status = 'interrupted' AND j.resume_on_restart = 1
+                ORDER BY j.id
+                """,
+                (project,),
+            ).fetchall()
+            for row in rows:
+                required_paths = self._path_filters.get(project, "")
+                if (
+                    row["head_sha"] == row["current_head"]
+                    and row["eligible"]
+                    and not row["ignored"]
+                    and row["pr_state"] == "OPEN"
+                    and not row["is_draft"]
+                    and (
+                        not required_paths
+                        or (row["path_filter_key"] == required_paths and row["path_filter_passed"])
+                    )
+                ):
+                    resumed += self._enqueue_locked(
+                        row["repo"],
+                        row["pr_number"],
+                        row["head_sha"],
+                        project,
+                        source="manual",
+                        quiet_until=None,
+                        manual=True,
+                    )
+                self.connection.execute(
+                    "UPDATE jobs SET resume_on_restart = 0 WHERE id = ?", (row["id"],)
+                )
+        return resumed
 
     def mark_waiting_cancelled(self, job_id: int) -> None:
         with self.connection:

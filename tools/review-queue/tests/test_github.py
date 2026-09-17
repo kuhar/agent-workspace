@@ -8,6 +8,23 @@ from review_queue.github import GitHubClient, GitHubError
 from review_queue.models import ProjectConfig
 
 
+def approval_payload(head="a" * 40, nodes=()):
+    return {
+        "data": {
+            "viewer": {"login": "me"},
+            "repository": {
+                "pullRequest": {
+                    "headRefOid": head,
+                    "latestOpinionatedReviews": {
+                        "nodes": list(nodes),
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            },
+        }
+    }
+
+
 class StubGitHub(GitHubClient):
     def __init__(self, payload: object):
         super().__init__()
@@ -16,6 +33,9 @@ class StubGitHub(GitHubClient):
 
     async def _run(self, *command: str) -> str:
         self.commands.append(command)
+        if command[:3] == ("gh", "api", "graphql"):
+            item = self.payload[0] if isinstance(self.payload, list) else self.payload
+            return json.dumps(approval_payload(item["headRefOid"]))
         return json.dumps(self.payload)
 
 
@@ -89,6 +109,8 @@ class FileGitHub(GitHubClient):
         self.change_during_read = False
 
     async def _run(self, *command: str) -> str:
+        if command[:3] == ("gh", "api", "graphql"):
+            return json.dumps(approval_payload(self.item["headRefOid"]))
         if command[:2] == ("gh", "api"):
             assert "--paginate" in command and "--slurp" in command
             self.file_calls += 1
@@ -98,6 +120,66 @@ class FileGitHub(GitHubClient):
         if command[:3] == ("gh", "pr", "list"):
             return json.dumps([self.item])
         return json.dumps(self.item)
+
+
+async def test_approvals_distinguish_viewer_and_other_current_approvers(project):
+    class Reviews(FileGitHub):
+        nodes = [
+            {"author": {"login": login}, "state": state}
+            for login, state in (
+                ("me", "APPROVED"),
+                ("alice", "APPROVED"),
+                ("bob", "CHANGES_REQUESTED"),
+                ("carol", "DISMISSED"),
+                ("dave", "COMMENTED"),
+            )
+        ]
+
+        async def _run(self, *command):
+            if command[:3] == ("gh", "api", "graphql"):
+                assert "latestOpinionatedReviews" in command[4]
+                return json.dumps(approval_payload(nodes=self.nodes))
+            return await super()._run(*command)
+
+    client = Reviews([])
+    listed = (await client.list_project(project)).records[0]
+    assert listed.approval_viewer == "me"
+    assert listed.approved_by == ("alice", "me")
+    client.nodes = [{"author": {"login": "alice"}, "state": "APPROVED"}]
+    viewed = await client.view(project, 42)
+    assert viewed.approved_by == ("alice",)  # Refresh on the same head removes old approvals.
+
+
+async def test_approvals_paginate_and_reject_partial_or_changed_responses(project):
+    class Reviews(FileGitHub):
+        broken = False
+        changed = False
+
+        async def _run(self, *command):
+            if command[:3] != ("gh", "api", "graphql"):
+                return await super()._run(*command)
+            second = "cursor=next" in command
+            payload = approval_payload(
+                head="b" * 40 if self.changed else "a" * 40,
+                nodes=[{"author": {"login": "alice" if second else "me"}, "state": "APPROVED"}],
+            )
+            if not second:
+                page = payload["data"]["repository"]["pullRequest"]["latestOpinionatedReviews"][
+                    "pageInfo"
+                ]
+                page.update(hasNextPage=True, endCursor="next")
+            elif self.broken:
+                return json.dumps({"errors": [{"message": "rate limited"}]})
+            return json.dumps(payload)
+
+    client = Reviews([])
+    assert (await client.view(project, 42)).approved_by == ("alice", "me")
+    client.broken = True
+    with pytest.raises(GitHubError, match="review query errors"):
+        await client.view(project, 42)
+    client.changed = True
+    with pytest.raises(GitHubError, match="PR changed"):
+        await client.view(project, 42)
 
 
 @pytest.mark.parametrize(

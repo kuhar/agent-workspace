@@ -52,6 +52,8 @@ class PullRequest:
     is_draft: bool = False
     path_filter_key: str = ""
     path_filter_passed: bool = False
+    approval_viewer: str = ""
+    approved_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,8 @@ class QueueItem:
     error: str | None = None
     review_count: int = 0
     manual_enqueued: bool = False
+    approval_viewer: str = ""
+    approved_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +126,8 @@ class WrapperView:
     title: str = ""
     author: str = ""
     review_count: int = 0
+    approval_viewer: str = ""
+    approved_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +137,16 @@ class ProjectHealth:
     last_poll_at: str | None
     last_success_at: str | None
     error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FailedReview:
+    job_id: int
+    project: str
+    number: int
+    finished_at: str
+    error: str
+    log_path: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +162,7 @@ class QueueSnapshot:
     projects: tuple[ProjectHealth, ...] = field(default_factory=tuple)
     manual_only: bool = False
     phase_events: tuple[PhaseEvent, ...] = field(default_factory=tuple)
+    failures: tuple[FailedReview, ...] = field(default_factory=tuple)
 
     @property
     def mode(self) -> str:

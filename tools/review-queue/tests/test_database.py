@@ -38,6 +38,82 @@ def database(tmp_path: Path, project: ProjectConfig) -> Database:
     return db
 
 
+def test_approval_state_persists_and_refreshes_in_queue_and_retained_views(tmp_path, project):
+    db = database(tmp_path, project)
+    record = replace(
+        pr(project, 1, head="a" * 40), approval_viewer="me", approved_by=("alice", "me")
+    )
+    db.apply_poll(project, [record], query_numbers={1}, bootstrap_hours=24, push_quiet_seconds=0)
+    db.create_wrapper(
+        project=project.name,
+        repo=project.repo,
+        number=1,
+        path=tmp_path / "wrapper",
+        token="owned",
+        head_ref="topic",
+    )
+    db.close()
+    db = database(tmp_path, project)
+    for view in (*db.queue_items(), *db.wrappers()):
+        assert view.approval_viewer == "me"
+        assert view.approved_by == ("alice", "me")
+    record = replace(record, approved_by=("alice",))
+    db.apply_poll(project, [record], query_numbers={1}, bootstrap_hours=24, push_quiet_seconds=0)
+    assert len(db.queue_items()) == 1  # Approval changes do not enqueue another review.
+    assert db.queue_items()[0].approved_by == ("alice",)
+    assert db.wrappers()[0].approved_by == ("alice",)
+    db.set_manual_watch(replace(record, approved_by=()), enqueue=False)
+    assert db.wrappers()[0].approved_by == ()
+    db.connection.execute("UPDATE pull_requests SET eligible=0, manual_watch=0")
+    assert db.poll_followups(project.name) == (1,)  # Retained rows still get approval updates.
+    db.close()
+
+
+@pytest.mark.parametrize(
+    "change", ["same", "new-head", "closed", "draft", "ignored", "ineligible", "filter", "queued"]
+)
+def test_restart_only_retries_current_eligible_revision_once(tmp_path, project, change):
+    db = database(tmp_path, project)
+    record = pr(project, 1, head="a" * 40)
+    db.apply_poll(project, [record], query_numbers={1}, bootstrap_hours=24, push_quiet_seconds=0)
+    db.update_job(1, status="running")
+    db.mark_cancelling(1, resume_on_restart=True)
+    db.update_job(1, status="cancelled")
+    assert db.job_row(1)["status"] == "interrupted"
+    if change == "new-head":
+        db.apply_poll(
+            project,
+            [replace(record, head_sha="b" * 40)],
+            query_numbers={1},
+            bootstrap_hours=24,
+            push_quiet_seconds=0,
+        )
+    elif change == "closed":
+        db.connection.execute("UPDATE pull_requests SET state = 'CLOSED'")
+    elif change == "draft":
+        db.connection.execute("UPDATE pull_requests SET is_draft = 1")
+    elif change == "ignored":
+        db.ignore_pr(record.repo, record.number)
+    elif change == "ineligible":
+        db.connection.execute("UPDATE pull_requests SET eligible = 0")
+    elif change == "filter":
+        db.seed((replace(project, include_paths=("new-path/",)),), start_paused=False)
+    elif change == "queued":
+        db.enqueue_current(record.repo, record.number)
+    db.connection.commit()
+    db.set_mode("manual")
+    resumed = db.resume_interrupted_jobs(project.name)
+    assert resumed == (1 if change == "same" else 0)
+    assert db.resume_interrupted_jobs(project.name) == 0
+    assert not db.job_row(1)["resume_on_restart"]
+    if change in {"same", "queued"}:
+        assert len(db.queue_items()) == 1
+        assert db.next_ready().head_sha == record.head_sha
+    else:
+        assert db.next_ready() is None
+    db.close()
+
+
 def test_manual_mode_holds_automatic_work_and_requires_each_new_head(tmp_path, project):
     db = database(tmp_path, project)
     first = pr(project, 1, head="a" * 40)

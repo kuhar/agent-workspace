@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
+import pytest
 from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Input, Static
 
@@ -11,7 +13,7 @@ from review_queue.tui import ConfirmModal, PriorityModal, ReviewQueueApp, WatchM
 from review_queue.util import isoformat, utc_now
 
 
-def seed(scheduler: Scheduler, project: ProjectConfig) -> None:
+def seed(scheduler: Scheduler, project: ProjectConfig, *, count: int = 2) -> None:
     records = tuple(
         PullRequest(
             project=project.name,
@@ -24,12 +26,13 @@ def seed(scheduler: Scheduler, project: ProjectConfig) -> None:
             head_ref=f"users/{author}/review-{number}",
             updated_at=isoformat(utc_now() - timedelta(minutes=number)),
         )
-        for number, author in ((1, "alice"), (2, "bob"))
+        for number, author in enumerate(("alice", "bob") * count, start=1)
+        if number <= count
     )
     scheduler.db.apply_poll(
         project,
         records,
-        query_numbers={1, 2},
+        query_numbers=set(range(1, count + 1)),
         bootstrap_hours=24,
         push_quiet_seconds=0,
     )
@@ -59,6 +62,47 @@ async def test_manual_mode_controls_and_enqueue_marker(config, project):
         assert app.snapshot.mode == "paused"
         await pilot.press("m")
         assert app.snapshot.mode == "active"
+
+
+@pytest.mark.parametrize("width", [80, 120])
+async def test_my_approval_is_distinct_from_others_in_both_tables(config, project, width):
+    scheduler = Scheduler(config)
+    seed(scheduler, project)
+    with scheduler.db.connection:
+        scheduler.db.connection.execute(
+            "UPDATE pull_requests SET approval_viewer='Me', approved_by='[\"me\",\"alice\"]' "
+            "WHERE number=1"
+        )
+        scheduler.db.connection.execute(
+            "UPDATE pull_requests SET approval_viewer='Me', approved_by='[\"bob\"]' WHERE number=2"
+        )
+    scheduler.db.create_wrapper(
+        project=project.name,
+        repo=project.repo,
+        number=1,
+        path=project.wrapper_root / "pr-1",
+        token="owned",
+        head_ref="topic",
+    )
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(width, 30)) as pilot:
+        await pilot.pause()
+        queue = app.query_one("#queue-table", DataTable)
+        reviews = app.query_one("#review-table", DataTable)
+        my_row = str(queue.get_row("1"))
+        other_row = str(queue.get_row("2"))
+        assert "You ✓" in my_row and "Others 1" in my_row
+        assert "You –" in other_row and "Others 1" in other_row
+        assert "You ✓" in str(reviews.get_row("1"))
+        assert "Others 1" in str(reviews.get_row("1"))
+        with scheduler.db.connection:
+            scheduler.db.connection.execute(
+                "UPDATE pull_requests SET approved_by='[]' WHERE number=1"
+            )
+        app.refresh_view()
+        await pilot.pause()
+        assert "You –" in str(reviews.get_row("1"))
+        assert "Others 0" in str(reviews.get_row("1"))
 
 
 async def test_headless_queue_rebalances_without_losing_selection(
@@ -109,6 +153,158 @@ async def test_priority_modal_and_compact_layout(
         assert app._selected_item().score == 23
 
 
+@pytest.mark.parametrize("table_id", ["queue-table", "review-table"])
+async def test_refresh_preserves_rows_selection_and_scrolled_view(config, project, table_id):
+    scheduler = Scheduler(config)
+    seed(scheduler, project, count=20)
+    for number in range(1, 21):
+        scheduler.db.create_wrapper(
+            project=project.name,
+            repo=project.repo,
+            number=number,
+            path=project.wrapper_root / str(number),
+            token=str(number),
+            head_ref="test",
+        )
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        table = app.query_one(f"#{table_id}", DataTable)
+        table.focus()
+        table.move_cursor(row=4)
+        await pilot.pause()
+        selected = app.selected_job if table_id == "queue-table" else app.selected_wrapper
+        table.scroll_to(y=10, animate=False, immediate=True, force=True)
+        await pilot.pause()
+        position = table.scroll_y
+        assert position > 0
+        rows = tuple(table.ordered_rows)
+        for _ in range(3):
+            app.refresh_view()
+            await pilot.pause()
+            assert all(
+                before is after for before, after in zip(rows, table.ordered_rows, strict=True)
+            )
+            assert table.scroll_y == position
+            assert table.cursor_row == 4
+            assert (
+                app.selected_job if table_id == "queue-table" else app.selected_wrapper
+            ) == selected
+
+        # Changed cells must not rebuild the table or scroll back to its cursor.
+        with scheduler.db.connection:
+            scheduler.db.connection.execute("UPDATE pull_requests SET title = 'Updated title'")
+        app.refresh_view()
+        await pilot.pause()
+        assert all(before is after for before, after in zip(rows, table.ordered_rows, strict=True))
+        assert all(table.get_row(row.key)[-1] == "Updated title" for row in table.ordered_rows)
+        assert table.scroll_y == position
+        assert table.cursor_row == 4
+
+        # Removing a different row keeps selection by key, not row number.
+        removed = int(rows[0].key.value)
+        if table_id == "queue-table":
+            scheduler.db.mark_waiting_cancelled(removed)
+        else:
+            scheduler.db.remove_wrapper(removed)
+        app.refresh_view()
+        await pilot.pause()
+        assert (app.selected_job if table_id == "queue-table" else app.selected_wrapper) == selected
+        assert table.ordered_rows[table.cursor_row].key.value == str(selected)
+        assert table.scroll_y == position
+
+
+async def test_review_order_stays_fixed_when_status_or_recency_changes(config, project):
+    scheduler = Scheduler(config)
+    seed(scheduler, project)
+    for number in (1, 2):
+        scheduler.db.create_wrapper(
+            project=project.name,
+            repo=project.repo,
+            number=number,
+            path=project.wrapper_root / str(number),
+            token=str(number),
+            head_ref="test",
+        )
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#review-table", DataTable)
+        order = [row.key for row in table.ordered_rows]
+        first = int(order[0].value)
+        scheduler.db.update_wrapper(first, state="preparing", touch=True)
+        app.refresh_view()
+        await pilot.pause()
+        assert [row.key for row in table.ordered_rows] == order
+        assert "preparing" in str(table.get_row(str(first)))
+        scheduler.db.update_wrapper(first, state="idle", touch=True)
+        app.refresh_view()
+        await pilot.pause()
+        assert [row.key for row in table.ordered_rows] == order
+        assert "idle" in str(table.get_row(str(first)))
+        second = int(order[1].value)
+        job = next(item for item in scheduler.db.queue_items() if item.number == 2)
+        scheduler.db.attach_job(
+            job.job_id,
+            second,
+            log_path=config.state_dir / "running.log",
+            result_path=config.state_dir / "result.json",
+        )
+        scheduler.db.update_job(job.job_id, status="running")
+        app.refresh_view()
+        await pilot.pause()
+        assert [row.key for row in table.ordered_rows] == order
+        assert "running" in str(table.get_row(str(second)))
+
+
+@pytest.mark.parametrize("width", [80, 120])
+async def test_review_panel_fits_wrappers_and_adapts_to_terminal(config, project, width):
+    scheduler = Scheduler(replace(config, max_running=3, max_wrappers=5))
+    seed(scheduler, project, count=5)
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(width, 30)) as pilot:
+        await pilot.pause()
+        pane = app.query_one("#reviews-pane")
+        table = app.query_one("#review-table", DataTable)
+        empty_height = pane.outer_size.height
+        ids = []
+        for number in range(1, 6):
+            ids.append(
+                scheduler.db.create_wrapper(
+                    project=project.name,
+                    repo=project.repo,
+                    number=number,
+                    path=project.wrapper_root / str(number),
+                    token=str(number),
+                    head_ref="test",
+                )
+            )
+        app.refresh_view()
+        await pilot.pause()
+        assert table.row_count == 5
+        assert pane.outer_size.height > empty_height
+        assert table.size.height >= 5
+        assert table.max_scroll_y == 0
+        assert app.query_one("#queue-pane").size.height >= 8
+
+        await pilot.resize_terminal(width, 18)
+        await pilot.pause()
+        assert table.size.height < 5
+        assert table.max_scroll_y > 0
+        assert app.screen.max_scroll_y == 0
+        assert app.query_one("#activity-pane").region.bottom < app.size.height
+
+        await pilot.resize_terminal(width, 40)
+        await pilot.pause()
+        assert table.size.height >= 5
+        assert table.max_scroll_y == 0
+        for wrapper_id in ids:
+            scheduler.db.remove_wrapper(wrapper_id)
+        app.refresh_view()
+        await pilot.pause()
+        assert pane.outer_size.height == empty_height
+
+
 async def test_theme_alias_and_cycle(config: QueueConfig, project: ProjectConfig) -> None:
     scheduler = Scheduler(config)
     seed(scheduler, project)
@@ -119,6 +315,20 @@ async def test_theme_alias_and_cycle(config: QueueConfig, project: ProjectConfig
         await pilot.press("t")
         await pilot.pause()
         assert app.theme == "monokai"
+
+
+async def test_failure_history_survives_recycled_workspace_and_restart(config, project):
+    scheduler = Scheduler(config)
+    seed(scheduler, project)
+    item = scheduler.db.queue_items()[0]
+    scheduler.db.update_job(item.job_id, status="failed", error="undefined symbol: missing")
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app.query_one("#review-table", DataTable).row_count == 0
+        assert sum("undefined symbol: missing" in message for message in app.activity) == 1
+        app.refresh_view()
+        assert sum("undefined symbol: missing" in message for message in app.activity) == 1
 
 
 async def test_ignore_removes_pr_and_future_heads(

@@ -246,6 +246,16 @@ def _size(value: int) -> str:
     return f"{value / 1024**3:.1f} GiB"
 
 
+def _approvals(item: QueueItem | WrapperView) -> str:
+    if not item.approval_viewer:
+        return "[dim]Approvals ?[/]"
+    mine = any(name.casefold() == item.approval_viewer.casefold() for name in item.approved_by)
+    others = sum(name.casefold() != item.approval_viewer.casefold() for name in item.approved_by)
+    you = "[b green]You ✓[/]" if mine else "[dim]You –[/]"
+    rest = f"[cyan]Others {others}[/]" if others else "[dim]Others 0[/]"
+    return f"{you} {rest}"
+
+
 def _reviews(count: int) -> str:
     return "R" * count if count else "·"
 
@@ -323,6 +333,14 @@ class HistoryDivider(Static):
         self.remove_class("dragging")
 
 
+class WaitingTable(DataTable):
+    # Keep priority shortcuts even when extra columns make the table scrollable.
+    BINDINGS = [
+        Binding("left", "app.lower_priority", "Prio −"),
+        Binding("right", "app.raise_priority", "Prio +"),
+    ]
+
+
 class ReviewQueueApp(App[None]):
     TITLE = "Review Queue"
     SUB_TITLE = "foreground scheduler"
@@ -373,7 +391,7 @@ class ReviewQueueApp(App[None]):
         color: $text-muted; background: $background;
     }
     #reviews-pane {
-        height: 5; background: $surface;
+        height: 3; background: $surface;
         border-bottom: solid $primary-background;
     }
     #review-table { height: 1fr; background: $surface; }
@@ -405,7 +423,6 @@ class ReviewQueueApp(App[None]):
     DataTable > .datatable--cursor {
         background: $accent 28%; color: $text; text-style: bold;
     }
-    Screen.narrow #reviews-pane { height: 5; }
     Footer { height: 1; }
     """
 
@@ -433,6 +450,7 @@ class ReviewQueueApp(App[None]):
         self._tables_configured_for: bool | None = None
         self.activity: deque[str] = deque(maxlen=50)
         self._last_phase_event = 0
+        self._seen_failure_ids: set[int] = set()
         self._record_activity(
             f"queue ready · {len(self.snapshot.queue)} waiting · "
             f"{len(self.snapshot.running)} active",
@@ -456,7 +474,7 @@ class ReviewQueueApp(App[None]):
                     id="queue-heading",
                     classes="panel-title",
                 )
-                yield DataTable(id="queue-table", cursor_type="row", zebra_stripes=True)
+                yield WaitingTable(id="queue-table", cursor_type="row", zebra_stripes=True)
             yield HistoryDivider()
             with Vertical(id="activity-pane"):
                 yield Static(id="detail")
@@ -474,6 +492,19 @@ class ReviewQueueApp(App[None]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._set_compact(event.size.width < 100)
+        self._size_review_panel(screen_height=event.size.height)
+
+    def _size_review_panel(self, *, screen_height: int | None = None) -> None:
+        if not self.query("#reviews-pane"):
+            return
+        # Keep room for the health bar, footer, waiting rows, divider and history.
+        reserved = 4 + 8 + 1 + 2
+        if self.query_one("#filter-input").has_class("visible"):
+            reserved += 3
+        rows = max(1, len(self.snapshot.wrappers))
+        self.query_one("#reviews-pane").styles.height = min(
+            rows + 2, max(3, (screen_height or self.size.height) - reserved)
+        )
 
     def _set_compact(self, compact: bool) -> None:
         changed = self.compact != compact
@@ -495,6 +526,7 @@ class ReviewQueueApp(App[None]):
                 ("Prio", 6),
                 ("R", 5),
                 ("Project / PR", 18),
+                ("Approvals", 14),
                 ("Age", 6),
             ):
                 queue.add_column(label, width=width)
@@ -503,6 +535,7 @@ class ReviewQueueApp(App[None]):
                 ("", 3),
                 ("R", 7),
                 ("Project / PR", 18),
+                ("Approvals", 14),
                 ("Progress", 26),
             ):
                 reviews.add_column(label, width=width)
@@ -512,6 +545,7 @@ class ReviewQueueApp(App[None]):
                 ("Prio", 6),
                 ("Reviewed", 9),
                 ("Project / PR", 19),
+                ("Approvals", 14),
                 ("Author", 15),
                 ("Age", 7),
             ):
@@ -521,6 +555,7 @@ class ReviewQueueApp(App[None]):
                 ("", 3),
                 ("Reviewed", 10),
                 ("Project / PR", 19),
+                ("Approvals", 14),
                 ("Author", 15),
                 ("Progress", 34),
             ):
@@ -580,7 +615,11 @@ class ReviewQueueApp(App[None]):
                     f"✓ {run.project}#{run.number} completed · {_reviews(wrapper.review_count)}",
                     "green",
                 )
-            elif wrapper and wrapper.state == "failed":
+            elif (
+                wrapper
+                and wrapper.state == "failed"
+                and not any(failure.job_id == job_id for failure in current.failures)
+            ):
                 self._record_activity(
                     f"× {run.project}#{run.number} failed · "
                     f"{wrapper.cleanup_error or 'press l for the launcher log'}",
@@ -592,6 +631,14 @@ class ReviewQueueApp(App[None]):
                     f"{wrapper.cleanup_error or 'ineligible'}",
                     "yellow",
                 )
+        for failure in reversed(current.failures):
+            if failure.job_id not in self._seen_failure_ids:
+                message = f"× {failure.project}#{failure.number} failed · {failure.error}"
+                self.activity.appendleft(
+                    f"[dim]{parse_time(failure.finished_at).astimezone().strftime('%H:%M')}[/] "
+                    f"[red]{escape(message)}[/]"
+                )
+                self._seen_failure_ids.add(failure.job_id)
 
     def _filtered_queue(self) -> list[QueueItem]:
         needle = self.filter_text.strip().lower()
@@ -671,7 +718,7 @@ class ReviewQueueApp(App[None]):
         ids = {item.job_id for item in items}
         if self.selected_job not in ids:
             self.selected_job = items[0].job_id if items else None
-        table.clear(columns=False)
+        rows: list[tuple[str, list[str]]] = []
         for item in items:
             reviewed = _reviews(item.review_count)
             if self.snapshot.manual_only and item.manual_enqueued:
@@ -682,28 +729,50 @@ class ReviewQueueApp(App[None]):
                 f"[b cyan]{item.score:+d}[/]",
                 reviewed,
                 f"{escape(item.project)}#{item.number}",
+                _approvals(item),
             ]
             if not self.compact:
                 values.append(escape(item.author))
             values.extend((_age(item.updated_at, now=self._now()), escape(item.title)))
-            table.add_row(*values, key=str(item.job_id))
-        if self.selected_job in ids:
-            table.move_cursor(row=table.get_row_index(str(self.selected_job)))
+            rows.append((str(item.job_id), values))
+        self._sync_table(table, rows, self.selected_job)
+
+    def _sync_table(
+        self, table: DataTable, rows: list[tuple[str, list[str]]], selected: int | None
+    ) -> None:
+        keys = [key for key, _ in rows]
+        current_keys = [row.key.value for row in table.ordered_rows]
+        with self.batch_update(), table.prevent(DataTable.RowHighlighted):
+            if keys != current_keys:
+                scroll_x, scroll_y = table.scroll_x, table.scroll_y
+                table.clear(columns=False)
+                for key, values in rows:
+                    table.add_row(*values, key=key)
+                if selected is not None and str(selected) in keys:
+                    table.move_cursor(row=keys.index(str(selected)), scroll=False)
+                # Restore after DataTable has recalculated dimensions and handled
+                # its deferred cursor scrolling. Refresh must not move the viewport.
+                table.call_after_refresh(
+                    table.scroll_to, x=scroll_x, y=scroll_y, animate=False, immediate=True
+                )
+            else:
+                for key, values in rows:
+                    previous = table.get_row(key)
+                    for column, old, new in zip(
+                        table.ordered_columns, previous, values, strict=True
+                    ):
+                        if old != new:
+                            table.update_cell(key, column.key, new, update_width=column.auto_width)
 
     def _refresh_reviews(self) -> None:
+        self._size_review_panel()
         table = self.query_one("#review-table", DataTable)
         running_by_path = {run.wrapper_path: run for run in self.snapshot.running}
-        wrappers = sorted(
-            self.snapshot.wrappers,
-            key=lambda wrapper: (
-                0 if wrapper.path in running_by_path else 1,
-                wrapper.last_used_at,
-            ),
-        )
+        wrappers = sorted(self.snapshot.wrappers, key=lambda wrapper: wrapper.wrapper_id)
         ids = {wrapper.wrapper_id for wrapper in wrappers}
         if self.selected_wrapper not in ids:
             self.selected_wrapper = wrappers[0].wrapper_id if wrappers else None
-        table.clear(columns=False)
+        rows: list[tuple[str, list[str]]] = []
         active_count = sum(wrapper.path in running_by_path for wrapper in wrappers)
         self.query_one("#reviews-heading", Static).update(
             f"ACTIVE REVIEWS  {active_count}/{self.snapshot.max_running}  ·  "
@@ -724,6 +793,10 @@ class ReviewQueueApp(App[None]):
                     phase = f"[yellow]cancelling[/] · {phase}"
                 if run.phase_started_at:
                     phase += f" [dim]{_age(run.phase_started_at, now=self._now())}[/]"
+            elif wrapper.state == "interrupted":
+                marker = "[yellow]↻[/]"
+                reviewed = _reviews(review_count)
+                phase = "[yellow]restart pending[/]"
             elif wrapper.state == "ineligible":
                 marker = "[yellow]–[/]"
                 reviewed = _reviews(review_count)
@@ -747,13 +820,13 @@ class ReviewQueueApp(App[None]):
                 marker,
                 reviewed,
                 f"{escape(wrapper.project)}#{wrapper.number}",
+                _approvals(wrapper),
             ]
             if not self.compact:
                 values.append(escape(run.author if run else wrapper.author))
             values.extend((phase, escape(run.title if run else wrapper.title)))
-            table.add_row(*values, key=str(wrapper.wrapper_id))
-        if self.selected_wrapper in ids:
-            table.move_cursor(row=table.get_row_index(str(self.selected_wrapper)))
+            rows.append((str(wrapper.wrapper_id), values))
+        self._sync_table(table, rows, self.selected_wrapper)
 
     def _selected_item(self) -> QueueItem | None:
         return next(
@@ -1081,6 +1154,7 @@ class ReviewQueueApp(App[None]):
         field = self.query_one("#filter-input", Input)
         field.add_class("visible")
         field.focus()
+        self._size_review_panel()
 
     def action_clear_filter(self) -> None:
         field = self.query_one("#filter-input", Input)
@@ -1150,7 +1224,8 @@ class ReviewQueueApp(App[None]):
         if self.scheduler.snapshot().running:
             self.push_screen(
                 ConfirmModal(
-                    "Quit review-queue and stop every active launcher?",
+                    "Stop active reviews and quit? They will retry on restart "
+                    "if the PR revision is unchanged.",
                     accept_label="Stop and quit",
                 ),
                 lambda accepted: self.exit() if accepted else None,

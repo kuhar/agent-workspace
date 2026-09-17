@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from review_queue.github import GitHubPoll
-from review_queue.launcher import LauncherClient, Protocol
+from review_queue.launcher import LauncherClient, LauncherError, Protocol
 from review_queue.models import ProjectConfig, PullRequest, QueueConfig
 from review_queue.scheduler import QueueError, Scheduler
 from review_queue.util import isoformat, process_start_ticks, utc_now
@@ -273,6 +273,151 @@ async def test_dispatch_allocates_named_wrapper_and_validates_result(
     assert scheduler.db.job_row(1)["wrapper_id"] is None
 
 
+@pytest.fixture
+async def failed_review(config, project):
+    class BuildFailure(FakeLauncher):
+        async def run_logged(self, **kwargs):
+            if kwargs["operation"] == "run":
+                Path(kwargs["log_path"]).write_text("mold: error: undefined symbol: missing\n")
+                return 1
+            return await super().run_logged(**kwargs)
+
+    scheduler = Scheduler(config, launcher=BuildFailure())
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    await scheduler._dispatch_available()
+    await next(iter(scheduler._job_tasks.values()))
+    assert scheduler.db.job_row(1)["status"] == "failed"
+    yield scheduler
+    scheduler.db.close()
+
+
+async def test_failed_review_automatically_recycles_and_keeps_failure_log(failed_review):
+    scheduler = failed_review
+    wrapper = scheduler.db.wrappers()[0]
+    scheduler.db.set_mode("manual")
+    await scheduler._dispatch_available()
+    assert scheduler.db.wrappers() == ()
+    assert not Path(wrapper.path).exists()
+    assert scheduler.db.job_row(1)["wrapper_id"] is None
+    failure = scheduler.snapshot().failures[0]
+    assert failure.number == 12
+    assert "undefined symbol" in failure.error
+    assert "undefined symbol" in Path(failure.log_path).read_text()
+    assert scheduler.db.queue_items() == ()
+
+
+@pytest.mark.parametrize("protection", ["pinned", "unsafe", "retry", "active"])
+async def test_failed_workspace_cleanup_preserves_protected_work(
+    failed_review, protection, monkeypatch
+):
+    scheduler = failed_review
+    wrapper = scheduler.db.wrappers()[0]
+    if protection == "pinned":
+        scheduler.db.set_wrapper_pinned(wrapper.wrapper_id, True)
+    elif protection == "unsafe":
+
+        async def unsafe(*args, **kwargs):
+            return {"safe": False, "reason": "source changes"}
+
+        monkeypatch.setattr(scheduler.launcher, "cleanup_check", unsafe)
+    elif protection == "retry":
+        scheduler.retry_wrapper(wrapper.wrapper_id)
+    else:
+        scheduler.db.update_wrapper(wrapper.wrapper_id, state="running")
+    await scheduler._recycle_failed_wrappers()
+    assert Path(wrapper.path).exists()
+    assert scheduler.db.wrapper_by_id(wrapper.wrapper_id) is not None
+    assert scheduler.snapshot().failures[0].job_id == 1
+
+
+@pytest.fixture
+async def full_wrapper_pool(config, project):
+    scheduler = Scheduler(replace(config, max_wrappers=2), launcher=FakeLauncher())
+    scheduler.db.apply_poll(
+        project,
+        tuple(replace(record(project), number=number) for number in (12, 13, 14)),
+        query_numbers={12, 13, 14},
+        bootstrap_hours=24,
+        push_quiet_seconds=0,
+    )
+    items = sorted(scheduler.db.queue_items(), key=lambda item: item.number)
+    wrappers = []
+    for item in items[:2]:
+        wrapper = await scheduler._ensure_wrapper(item)
+        scheduler.db.update_wrapper(wrapper["id"], state="idle")
+        scheduler.db.update_job(item.job_id, status="succeeded")
+        wrappers.append(scheduler.db.wrapper_by_id(wrapper["id"]))
+    yield scheduler, wrappers, items[2]
+    scheduler.db.close()
+
+
+@pytest.mark.parametrize("failure", ["unsafe", "check-error", "cleanup-error"])
+async def test_failed_cleanup_backs_off_without_reordering(full_wrapper_pool, monkeypatch, failure):
+    scheduler, wrappers, item = full_wrapper_pool
+    now = 100.0
+    monkeypatch.setattr("review_queue.scheduler.time.monotonic", lambda: now)
+    checks = []
+
+    async def check(project, *, cwd, env):
+        checks.append(env["REVIEW_QUEUE_WRAPPER"])
+        if failure == "check-error":
+            raise LauncherError("check failed")
+        return {"safe": failure == "cleanup-error", "reason": "unknown file"}
+
+    async def cleanup(project, *, cwd, env):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(scheduler.launcher, "cleanup_check", check)
+    monkeypatch.setattr(scheduler.launcher, "cleanup", cleanup)
+    assert await scheduler._ensure_wrapper(item) is None
+    assert checks == [row["path"] for row in wrappers]
+    for _ in range(5):
+        assert await scheduler._ensure_wrapper(item) is None
+    assert len(checks) == 2
+    now += 60
+    assert await scheduler._ensure_wrapper(item) is None
+    assert len(checks) == 4
+    candidates = scheduler.db.wrapper_candidates()
+    assert [row["id"] for row in candidates] == [row["id"] for row in wrappers]
+    assert [row["last_used_at"] for row in candidates] == [row["last_used_at"] for row in wrappers]
+    assert all(row["state"] == "cleanup_failed" for row in candidates)
+    assert "retry every 60s" in scheduler.snapshot().dispatch_blocked_reason
+    # Explicit recycling can immediately retry after the user fixes the blocker.
+    monkeypatch.setattr(scheduler.launcher, "cleanup_check", FakeLauncher().cleanup_check)
+    monkeypatch.setattr(scheduler.launcher, "cleanup", FakeLauncher().cleanup)
+    assert await scheduler.recycle_wrapper(wrappers[0]["id"])
+    assert not Path(wrappers[0]["path"]).exists()
+
+
+@pytest.mark.parametrize("state", ["idle", "preparing", "running", "cleaning"])
+async def test_wrapper_reuse_clears_previous_cleanup_error(full_wrapper_pool, state):
+    scheduler, wrappers, _ = full_wrapper_pool
+    wrapper_id = wrappers[0]["id"]
+    scheduler.db.update_wrapper(wrapper_id, state="cleanup_failed", cleanup_error="unknown file")
+    scheduler.db.update_wrapper(wrapper_id, state=state)
+    assert scheduler.db.wrapper_by_id(wrapper_id)["cleanup_error"] is None
+
+
+async def test_cleanup_tries_next_candidate_when_oldest_is_blocked(full_wrapper_pool, monkeypatch):
+    scheduler, wrappers, item = full_wrapper_pool
+    checks = []
+
+    async def check(project, *, cwd, env):
+        path = env["REVIEW_QUEUE_WRAPPER"]
+        checks.append(path)
+        return {"safe": path != wrappers[0]["path"], "reason": "unknown file"}
+
+    monkeypatch.setattr(scheduler.launcher, "cleanup_check", check)
+    allocated = await scheduler._ensure_wrapper(item)
+    assert allocated["pr_number"] == item.number
+    assert checks == [row["path"] for row in wrappers]
+    assert Path(wrappers[0]["path"]).exists()
+    assert not Path(wrappers[1]["path"]).exists()
+    assert len(scheduler.db.wrappers()) == 2
+
+
 async def test_poll_views_missing_eligible_pr_and_removes_it_when_merged(
     config: QueueConfig, project: ProjectConfig
 ) -> None:
@@ -364,6 +509,67 @@ async def test_cancel_during_prepare_run_gap_is_sticky(
     assert scheduler.db.job_row(1)["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("operation", ["prepare", "run"])
+@pytest.mark.parametrize("explicit_cancel", [False, True])
+async def test_exit_then_restart_recovers_active_review_once(
+    config, project, operation, explicit_cancel, monkeypatch
+):
+    project.launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "if sys.argv[2] == os.environ['TEST_BLOCK_OPERATION']:\n"
+        "    print('::group::Waiting', flush=True)\n"
+        "    time.sleep(60)\n"
+    )
+    monkeypatch.setenv("TEST_BLOCK_OPERATION", operation)
+    scheduler = Scheduler(config, launcher=LauncherClient(grace_seconds=0.1))
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    scheduler.db.set_mode("manual")
+    scheduler.db.enqueue_current(project.repo, 12)
+    await scheduler._dispatch_available()
+    task = next(iter(scheduler._job_tasks.values()))
+
+    async def wait_started():
+        while scheduler.db.job_row(1)["phase"] != "Waiting":
+            if task.done():
+                await task
+                raise AssertionError(dict(scheduler.db.job_row(1)))
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(wait_started(), timeout=10)
+        if explicit_cancel:
+            scheduler.cancel(1)
+    finally:
+        await scheduler.stop()
+    assert task.done()
+
+    class FreshGitHub(FakeGitHub):
+        async def list_project(self, project):
+            return GitHubPoll(records=(record(project),), query_numbers=frozenset({12}))
+
+    restarted = Scheduler(config, launcher=FakeLauncher(), github=FreshGitHub())
+    try:
+        assert restarted.db.job_row(1)["status"] == (
+            "cancelled" if explicit_cancel else "interrupted"
+        )
+        await restarted.reconcile_orphans()
+        assert restarted.db.queue_items() == ()  # Wait for fresh GitHub validation.
+        await restarted.poll_once()
+        await restarted.poll_once()
+        items = restarted.db.queue_items()
+        assert len(items) == (0 if explicit_cancel else 1)
+        if items:
+            assert items[0].head_sha == "a" * 40
+            assert items[0].manual_enqueued
+            assert restarted.db.next_ready().job_id == items[0].job_id
+            assert restarted.db.job_row(items[0].job_id)["attempt"] == 2
+    finally:
+        restarted.db.close()
+
+
 async def test_owned_orphan_is_stopped_before_reconciliation(config: QueueConfig) -> None:
     launcher = FakeLauncher()
     launcher.grace_seconds = 0.1
@@ -382,6 +588,24 @@ async def test_owned_orphan_is_stopped_before_reconciliation(config: QueueConfig
     assert await scheduler._stop_owned_supervisor(process.pid, ticks, token)
     await process.wait()
     assert process.returncode is not None
+
+
+async def test_shutdown_does_not_finish_an_unresolved_prior_supervisor(config, project):
+    from review_queue.database import Database
+
+    scheduler = Scheduler(config, launcher=FakeLauncher())
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    scheduler.db.update_job(1, status="running")
+    scheduler.db.mark_cancelling(1, resume_on_restart=True)
+    await scheduler.stop()
+    db = Database(config.state_dir / "queue.sqlite3")
+    try:
+        assert db.job_row(1)["status"] == "cancelling"
+        assert db.resume_interrupted_jobs(project.name) == 0
+    finally:
+        db.close()
 
 
 async def test_cancel_during_supervisor_registration_is_delivered(

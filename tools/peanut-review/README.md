@@ -174,6 +174,12 @@ curated result in the web UI, then use the UI's GitHub push modal when ready:
 "$PR_BIN" --session "$SESSION" delete c_9999ffff
 ```
 
+The curator prepares an `approve` review with `LGTM` when all existing
+non-nit findings are addressed and the completed review of the current head
+finds no new substantive issues. Tiny, optional nits do not block approval.
+The curator previews the review with `gh-push --dry-run`; publication remains
+with the user or orchestrator.
+
 `wait-all round-done --max-reviewer-failures N` tolerates up to N reviewers
 finishing without a `round-done` signal. It waits for every reviewer to finish
 before curation, reports the failed reviewers, and still fails if any reviewer

@@ -58,9 +58,13 @@ interpretation that matches the implementation.
    complete.
    State the expected contract and its evidence. Check the exact revision under
    review and compare with its base before calling something a regression.
-3. Choose a few inputs that distinguish the competing behaviors. Prefer raw
-   operand words and a decoded instruction reproducer over large random sweeps.
-   Use physical hardware early when available and the contract is uncertain.
+3. Try to break the changed contract with a few valid inputs or execution
+   sequences that existing tests do not distinguish. Trace the production entry
+   path: locate where assumed prerequisites are established or unsupported cases
+   rejected. Supplying a prerequisite in a test or deferring it to a TODO does
+   not establish production support. Prefer raw operand words and a decoded
+   instruction reproducer over large random sweeps. Use physical hardware early
+   when available and the contract is uncertain.
 4. Check both results and relevant side effects. Inspect the actual generated
    code, effective lane masks, register accesses, exception causes, and completion
    behavior. Prove that the optimized or translated path was exercised.

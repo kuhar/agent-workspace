@@ -149,6 +149,10 @@ ${PR_BIN} --session ${SESSION} note --file /tmp/test-report.md
 
 # Test execution (mandatory)
 
+An explicit persona-directed scope skip is exempt: record the reason and that
+no tests were run in a `note`, then follow "Finish this pass" without reviewing
+or testing.
+
 Run relevant tests and report:
 ```
 ${PR_BIN} --session ${SESSION} note --message "## Test Execution: <what you ran and results>"

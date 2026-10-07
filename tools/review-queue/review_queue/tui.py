@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from rich.markup import escape
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -893,10 +894,17 @@ class ReviewQueueApp(App[None]):
                     )
                 if wrapper.cleanup_error:
                     detail.update(
-                        f"[b]{escape(wrapper.project)}#{wrapper.number}[/] · "
-                        f"[dim]l: details/log[/] · {escape(wrapper.cleanup_error)}"
+                        Text.assemble(
+                            (f"{wrapper.project}#{wrapper.number}", "bold"),
+                            " · ",
+                            ("l: details/log", "dim"),
+                            " · ",
+                            wrapper.cleanup_error,
+                        )
                     )
-        activity.update("\n".join(self.activity))
+        # Match Rich's escaping with its parser; Textual also treats command
+        # arguments containing brackets and equals signs as markup.
+        activity.update(Text.from_markup("\n".join(self.activity)))
 
     def action_show_log(self) -> None:
         wrapper = self._selected_wrapper()

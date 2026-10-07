@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
+from subprocess import CalledProcessError
 
 import pytest
 from textual.containers import VerticalScroll
@@ -11,6 +12,11 @@ from review_queue.models import ProjectConfig, PullRequest, QueueConfig
 from review_queue.scheduler import Scheduler
 from review_queue.tui import ConfirmModal, PriorityModal, ReviewQueueApp, WatchModal
 from review_queue.util import isoformat, utc_now
+
+PYTEST_FAILURE = str(CalledProcessError(
+    1, ["python", "-m", "pytest", "tests", "--ignore=tests/test_corpus.py",
+        "-q", "-o", "cache_dir=/tmp/review/.pytest_cache"],
+))
 
 
 def seed(scheduler: Scheduler, project: ProjectConfig, *, count: int = 2) -> None:
@@ -317,18 +323,20 @@ async def test_theme_alias_and_cycle(config: QueueConfig, project: ProjectConfig
         assert app.theme == "monokai"
 
 
-async def test_failure_history_survives_recycled_workspace_and_restart(config, project):
+@pytest.mark.parametrize("error", ["undefined symbol: missing", PYTEST_FAILURE])
+async def test_failure_history_survives_recycled_workspace_and_restart(config, project, error):
     scheduler = Scheduler(config)
     seed(scheduler, project)
     item = scheduler.db.queue_items()[0]
-    scheduler.db.update_job(item.job_id, status="failed", error="undefined symbol: missing")
+    scheduler.db.update_job(item.job_id, status="failed", error=error)
     app = ReviewQueueApp(scheduler)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         assert app.query_one("#review-table", DataTable).row_count == 0
-        assert sum("undefined symbol: missing" in message for message in app.activity) == 1
+        assert error in str(app.query_one("#activity-feed", Static).render())
+        count = len(app.activity)
         app.refresh_view()
-        assert sum("undefined symbol: missing" in message for message in app.activity) == 1
+        assert len(app.activity) == count
 
 
 async def test_ignore_removes_pr_and_future_heads(
@@ -457,7 +465,8 @@ async def test_history_scrolls_older_entries_and_survives_refresh(config: QueueC
         assert history.scroll_y == position
 
 
-async def test_failure_reason_visible_and_full_log_opens(config, project):
+@pytest.mark.parametrize("error", ["Build failed: missing symbol", PYTEST_FAILURE])
+async def test_failure_reason_visible_and_full_log_opens(config, project, error):
     from review_queue.tui import LogModal
 
     scheduler = Scheduler(config)
@@ -469,15 +478,15 @@ async def test_failure_reason_visible_and_full_log_opens(config, project):
     scheduler.db.attach_job(
         item.job_id, wrapper["id"], log_path=log, result_path=config.state_dir / "failure.json"
     )
-    scheduler.db.update_job(item.job_id, status="failed", error="Build failed: missing symbol")
+    scheduler.db.update_job(item.job_id, status="failed", error=error)
     app = ReviewQueueApp(scheduler)
     async with app.run_test(size=(120, 40)) as pilot:
         app.query_one("#review-table", DataTable).focus()
         await pilot.pause()
-        assert "missing symbol" in str(app.query_one("#detail", Static).render())
+        assert error in str(app.query_one("#detail", Static).render())
         await pilot.press("l")
         assert isinstance(app.screen, LogModal)
-        assert app.screen.reason == "Build failed: missing symbol"
+        assert app.screen.reason == error
         assert "test.cpp:12: error" in app.screen.log_text
         await pilot.press("escape")
         scheduler.db.update_job(item.job_id, status="ineligible", error="PR is merged")

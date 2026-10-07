@@ -21,35 +21,11 @@ Idempotent: re-running with no upstream changes is a no-op.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import gh, models, session as sess, store
-
-
-# Match a "nit" prefix that humans actually use on GitHub:
-#   "nit: foo", "Nit - foo", "(nit) foo", "[nit] foo", "nit, foo".
-# We scan only the first two lines so a body that just mentions the word
-# "nit" in passing doesn't get reclassified.
-_NIT_PREFIX_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])nit[\s:,)\]\-]",
-    re.IGNORECASE,
-)
-
-
-def _classify_imported_severity(body: str) -> str:
-    head = "\n".join(body.splitlines()[:2])
-    if _NIT_PREFIX_RE.search(head):
-        return models.Severity.NIT.value
-    return models.Severity.FEEDBACK.value
-
-
-def _classify_imported_review_severity(raw: dict) -> str:
-    if raw.get("state") == "CHANGES_REQUESTED":
-        return models.Severity.WARNING.value
-    return _classify_imported_severity(raw.get("body", ""))
 
 
 def _classify_imported_review_category(raw: dict) -> str:
@@ -302,7 +278,6 @@ def pull_comments(
                       if raw.get("start_line") and raw["start_line"] != raw.get("line")
                       else None),
             body=body,
-            severity=_classify_imported_severity(body),
             head_sha=raw.get("commit_id"),
             external_source="github",
             external_id=ext_id,
@@ -366,7 +341,6 @@ def pull_comments(
             file=sess.GLOBAL_FILE,
             line=0,
             body=body,
-            severity=_classify_imported_severity(body),
             head_sha=session.current_head,
             external_source="github",
             external_id=ext_id,
@@ -395,7 +369,6 @@ def pull_comments(
                 login = raw.get("user", {}).get("login", "unknown")
                 store.edit_comment(
                     session_dir, existing.id, body=body,
-                    severity=_classify_imported_review_severity(raw),
                     edited_by=f"gh:{login}",
                 )
                 store.update_comment_external(
@@ -428,7 +401,6 @@ def pull_comments(
             file=sess.GLOBAL_FILE,
             line=0,
             body=body,
-            severity=_classify_imported_review_severity(raw),
             category=category,
             head_sha=raw.get("commit_id") or session.current_head,
             external_source="github-review",

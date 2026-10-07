@@ -29,52 +29,16 @@ _SINGLE_INLINE_NEUTRAL_TEMPLATES = (
     "Left one note to consider",
 )
 
-_SINGLE_INLINE_SUGGESTION_TEMPLATES = (
-    "Just one suggestion",
-    "One small suggestion",
-    "Left one thought",
-)
-
-_SINGLE_INLINE_NIT_TEMPLATES = (
-    "Just one nit",
-    "Left one nit",
-    "A quick nit",
-)
-
 _INLINE_NEUTRAL_TEMPLATES = (
     "Just {comments}",
     "Left {inline_comments}",
     "Added {comments}",
 )
 
-_INLINE_SUGGESTION_TEMPLATES = (
-    "Just {suggestions}",
-    "Left {inline_suggestions}",
-    "Added {new_suggestions}",
-)
-
-_INLINE_NIT_TEMPLATES = (
-    "Left {nits}.",
-    "Just {nits}.",
-    "Noted {nits}.",
-)
-
 _MIXED_NEUTRAL_TEMPLATES = (
     "{comments_cap}, plus {replies}",
     "Left {replies} and {new_comments}",
     "Added {comments} and {replies}",
-)
-
-_MIXED_SUGGESTION_TEMPLATES = (
-    "{suggestions_cap}, plus {replies}",
-    "Left {replies} and {new_suggestions}",
-    "Just {replies} and {comments_with_suggestions}.",
-)
-
-_MIXED_NIT_TEMPLATES = (
-    "{nits_cap}, plus {replies}.",
-    "Left {replies} and {nits}.",
-    "Left {nits} along with {replies}.",
 )
 
 
@@ -359,8 +323,8 @@ def _stable_choice(
     salt: str,
 ) -> str:
     """Vary wording per push while keeping retries reproducible."""
-    identities = [f"comment:{c.id}:{c.severity}" for c in inline_comments]
-    identities.extend(f"reply:{c.id}:{c.severity}" for c in replies)
+    identities = [f"comment:{c.id}" for c in inline_comments]
+    identities.extend(f"reply:{c.id}" for c in replies)
     material = "\0".join([salt, *sorted(identities)])
     digest = hashlib.sha256(material.encode()).digest()
     return choices[int.from_bytes(digest[:8], "big") % len(choices)]
@@ -412,27 +376,9 @@ def _default_review_body(
     if comment_count == 0:
         return ""
 
-    all_comments = [*inline_comments, *replies]
-    nit_tone = all(
-        c.severity == models.Severity.NIT.value for c in all_comments
-    )
-    suggestion_tone = all(
-        c.severity in {
-            models.Severity.SUGGESTION.value,
-            models.Severity.NIT.value,
-        }
-        for c in all_comments
-    )
-
     if comment_count == 1 and not replies:
-        if nit_tone:
-            templates = _SINGLE_INLINE_NIT_TEMPLATES
-        elif suggestion_tone:
-            templates = _SINGLE_INLINE_SUGGESTION_TEMPLATES
-        else:
-            templates = _SINGLE_INLINE_NEUTRAL_TEMPLATES
         return _stable_template(
-            templates, inline_comments, replies,
+            _SINGLE_INLINE_NEUTRAL_TEMPLATES, inline_comments, replies,
         )
 
     def count_phrase(
@@ -493,94 +439,16 @@ def _default_review_body(
             "a number of new comments",
         ),
     )
-    suggestions = count_phrase(
-        "suggestions",
-        one="one suggestion",
-        exact="{count} suggestions",
-        few=("a few suggestions", "some suggestions"),
-        several=("several suggestions", "a handful of suggestions"),
-        many=(
-            "a bunch of suggestions",
-            "quite a few suggestions",
-            "a number of suggestions",
-        ),
-    )
-    inline_suggestions = count_phrase(
-        "inline-suggestions",
-        one="one inline suggestion",
-        exact="{count} inline suggestions",
-        few=("a few inline suggestions", "some inline suggestions"),
-        several=(
-            "several inline suggestions",
-            "a handful of inline suggestions",
-        ),
-        many=(
-            "a bunch of inline suggestions",
-            "quite a few inline suggestions",
-            "a number of inline suggestions",
-        ),
-    )
-    new_suggestions = count_phrase(
-        "new-suggestions",
-        one="a new suggestion",
-        exact="{count} new suggestions",
-        few=("a few new suggestions", "some new suggestions"),
-        several=("several new suggestions", "a handful of new suggestions"),
-        many=(
-            "a bunch of new suggestions",
-            "quite a few new suggestions",
-            "a number of new suggestions",
-        ),
-    )
-    comments_with_suggestions = count_phrase(
-        "comments-with-suggestions",
-        one="a comment with a suggestion",
-        exact="{count} comments with suggestions",
-        few=(
-            "a few comments with suggestions",
-            "some comments with suggestions",
-        ),
-        several=(
-            "several comments with suggestions",
-            "a handful of comments with suggestions",
-        ),
-        many=(
-            "a bunch of comments with suggestions",
-            "quite a few comments with suggestions",
-            "a number of comments with suggestions",
-        ),
-    )
-    nits = count_phrase(
-        "nits",
-        one="one nit",
-        exact="{count} nits",
-        few=("a few nits", "some nits"),
-        several=("several nits", "a handful of nits"),
-        many=("a bunch of nits", "quite a few nits", "a number of nits"),
-    )
     values = {
         "comments": comments,
         "comments_cap": _capitalize(comments),
         "inline_comments": inline_comment_phrase,
         "new_comments": new_comments,
-        "suggestions": suggestions,
-        "suggestions_cap": _capitalize(suggestions),
-        "inline_suggestions": inline_suggestions,
-        "new_suggestions": new_suggestions,
-        "comments_with_suggestions": comments_with_suggestions,
-        "nits": nits,
-        "nits_cap": _capitalize(nits),
     }
 
     if not replies:
-        if nit_tone:
-            templates = _INLINE_NIT_TEMPLATES
-        elif suggestion_tone:
-            templates = _INLINE_SUGGESTION_TEMPLATES
-        else:
-            templates = _INLINE_NEUTRAL_TEMPLATES
         template = _stable_template(
-            templates, inline_comments, replies,
+            _INLINE_NEUTRAL_TEMPLATES, inline_comments, replies,
         )
         return template.format(**values)
 
@@ -600,13 +468,7 @@ def _default_review_body(
     values.update({
         "replies": reply_phrase,
     })
-    if nit_tone:
-        templates = _MIXED_NIT_TEMPLATES
-    elif suggestion_tone:
-        templates = _MIXED_SUGGESTION_TEMPLATES
-    else:
-        templates = _MIXED_NEUTRAL_TEMPLATES
-    template = _stable_template(templates, inline_comments, replies)
+    template = _stable_template(_MIXED_NEUTRAL_TEMPLATES, inline_comments, replies)
     return template.format(**values)
 
 

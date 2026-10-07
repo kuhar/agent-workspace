@@ -187,7 +187,7 @@ def _make_fake_codex(tmp_path: Path) -> tuple[Path, Path]:
         "calls=[\n"
         " base+['status'],\n"
         " base+['comments','--format','json'],\n"
-        " base+['add-comment','--file','code.py','--line','2','--severity','warning','--body',body],\n"
+        " base+['add-comment','--file','code.py','--line','2','--body',body],\n"
         " base+['note','--message',f'tests passed for {author}'],\n"
         " base+['signal','round-done'],\n"
         "]\n"

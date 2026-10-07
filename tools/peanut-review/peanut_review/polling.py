@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .models import _now_iso
@@ -71,14 +72,21 @@ def wait_round_completion(
     agents: list[str],
     timeout: int = 600,
     poll_interval: float = 2.0,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Wait for every selected agent to finish; return failed and unfinished names."""
+    """Return failed and unfinished names after waiting for selected agents.
+
+    Notify on_progress with successful, total, and failed counts on the first
+    poll and whenever they change. Failed agents do not count as successful.
+    """
     from . import runtime, session
     from .models import AgentStatus
 
     deadline = time.monotonic() + timeout
     remaining = set(agents)
+    total = len(remaining)
     failed = set()
+    previous_progress = None
     while remaining:
         current = {a.name: a for a in session.load_session(session_dir).agents}
         for name in sorted(remaining):
@@ -91,6 +99,10 @@ def wait_round_completion(
             elif status in {AgentStatus.FAILED.value, AgentStatus.TIMEOUT.value}:
                 failed.add(name)
                 remaining.remove(name)
+        progress = (total - len(remaining) - len(failed), total, len(failed))
+        if on_progress is not None and progress != previous_progress:
+            on_progress(*progress)
+            previous_progress = progress
         if not remaining or time.monotonic() >= deadline:
             break
         time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))

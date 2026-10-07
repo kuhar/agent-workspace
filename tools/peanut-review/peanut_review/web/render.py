@@ -346,12 +346,6 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         badges.append('<span class="round">stale</span>')
     if c.resolved and not is_reply:
         badges.append('<span class="round resolved-badge">resolved</span>')
-    # Replies don't carry their own severity — they inherit the thread's.
-    sev_html = (
-        ""
-        if is_reply
-        else f'<span class="sev {html.escape(c.severity)}">{html.escape(c.severity)}</span>'
-    )
     category_html = ""
     if not is_reply and c.category != "comment":
         label = "approved" if c.category == "approve" else "blocking"
@@ -386,7 +380,6 @@ def _render_comment(c: Comment, *, is_reply: bool = False) -> str:
         f'{collapse_html}'
         f'<span class="author">{html.escape(c.author or "unknown")}</span>'
         f'{time_html}'
-        f'{sev_html}'
         f'{category_html}'
         f'{"".join(badges)}'
         f'{edited_html}'
@@ -917,7 +910,6 @@ def _render_sidebar(
     top_level = [c for c in live if not c.reply_to]
     stale_count = sum(1 for c in top_level if c.stale)
     resolved = sum(1 for c in top_level if c.resolved)
-    crit = sum(1 for c in top_level if c.severity == "critical")
 
     # Per-file counts: unresolved and total live, top-level only. Keyed by
     # file path so the JS poller can update these in place. Globals
@@ -1086,7 +1078,6 @@ def _render_sidebar(
         f'<li data-k="total"><span>comments</span><span class="v">{len(live)}</span></li>'
         f'<li data-k="stale_comments"><span>stale</span><span class="v">{stale_count}</span></li>'
         f'<li data-k="resolved"><span>resolved</span><span class="v">{resolved}</span></li>'
-        f'<li data-k="critical"><span>critical</span><span class="v">{crit}</span></li>'
         f'{deleted_row}'
         '</ul>'
         '<div class="sidebar-heading agents-heading">'
@@ -1139,9 +1130,6 @@ def _render_sidebar(
         '<span class="desc">post / save</span></li>'
         '<li><span class="keys"><kbd>Esc</kbd></span>'
         '<span class="desc">cancel</span></li>'
-        f'<li><span class="keys"><kbd class="prefix">{COMPOSER_PREFIX_LABEL}</kbd>'
-        '<kbd>c</kbd><kbd>w</kbd><kbd>s</kbd><kbd>n</kbd><kbd>f</kbd></span>'
-        '<span class="desc">set severity</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{COMPOSER_PREFIX_LABEL}</kbd><kbd>a</kbd><kbd>b</kbd></span>'
         '<span class="desc">approve / block (global)</span></li>'
         f'<li><span class="keys"><kbd class="prefix">{COMPOSER_PREFIX_LABEL}</kbd><kbd>i</kbd></span>'
@@ -1213,7 +1201,6 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
     total = s.get("comment_count", 0)
     unresolved = s.get("unresolved_count", 0)
     stale = s.get("stale_count", 0)
-    crit = s.get("critical_count", 0)
     push_activity = _push_activity_tag(s.get("push_activity"))
     session_subtitle = html.escape(s.get("session_subtitle") or s.get("current_head", ""))
     github_url = html.escape(s.get("github_url", ""), quote=True)
@@ -1229,7 +1216,6 @@ def _render_session_row(s: dict, base_url: str = "") -> str:
         f'<span class="n">{total}</span>'
         f'<span class="sub"> total</span>'
         + (f' · <span class="n warn">{unresolved}</span><span class="sub"> open</span>' if unresolved else "")
-        + (f' · <span class="n crit">{crit}</span><span class="sub"> crit</span>' if crit else "")
         + (f' · <span class="n muted">{stale}</span><span class="sub"> stale</span>' if stale else "")
         + push_activity
     )

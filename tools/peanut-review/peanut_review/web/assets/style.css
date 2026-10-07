@@ -27,8 +27,6 @@
   --critical: #f44747;
   --warning: #d7ba7d;
   --suggestion: #89d185;
-  --nit: #808080;
-  --feedback: #3794ff;
   --approve: #89d185;
   --blocking: #cca700;
   --stale: #6b6b6b;
@@ -88,8 +86,6 @@
     --critical: #cf222e;
     --warning: #9a6700;
     --suggestion: #1a7f37;
-    --nit: #6e7781;
-    --feedback: #0969da;
     --approve: #1a7f37;
     --blocking: #bc4c00;
     --stale: #8c959f;
@@ -149,8 +145,6 @@
   --critical: #cf222e;
   --warning: #9a6700;
   --suggestion: #1a7f37;
-  --nit: #6e7781;
-  --feedback: #0969da;
   --approve: #1a7f37;
   --blocking: #bc4c00;
   --stale: #8c959f;
@@ -592,20 +586,6 @@ body.gutter-drag, body.gutter-drag * { user-select: none; cursor: ns-resize !imp
   align-items: center;
 }
 .comment-meta .author { color: var(--fg); font-weight: 600; }
-.comment-meta .sev {
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--on-label);
-  font-weight: 600;
-}
-.comment-meta .sev.critical { background: var(--critical); }
-.comment-meta .sev.warning { background: var(--warning); }
-.comment-meta .sev.suggestion { background: var(--suggestion); }
-.comment-meta .sev.nit { background: var(--nit); }
-.comment-meta .sev.feedback { background: var(--feedback); }
 .comment-meta .category, .push-meta .category {
   padding: 1px 6px;
   border-radius: 3px;
@@ -1040,7 +1020,6 @@ table.sessions td.workspace {
 }
 table.sessions td.counts .n { color: var(--fg); font-weight: 600; }
 table.sessions td.counts .n.warn { color: var(--warning); }
-table.sessions td.counts .n.crit { color: var(--critical); }
 table.sessions td.counts .n.muted { color: var(--muted); }
 table.sessions td.counts .sub { color: var(--muted); font-size: 11px; }
 table.sessions td.counts .push-activity {

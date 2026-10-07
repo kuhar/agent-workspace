@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import agent_control, gh, gh_pull, gh_push, launch, runtime, store
-from ..models import Comment, CommentCategory, Note, Severity, normalize_comment_category
+from ..models import Comment, CommentCategory, Note, normalize_comment_category
 from ..session import (
     GLOBAL_FILE,
     load_session,
@@ -248,7 +248,6 @@ class SessionRegistry:
             "comment_count": len(live),
             "unresolved_count": sum(1 for c in live if not c.resolved),
             "stale_count": sum(1 for c in live if c.stale),
-            "critical_count": sum(1 for c in live if c.severity == "critical"),
             "deleted_count": len(comments) - len(live),
             "note_count": len(notes),
             "progress": summarize_agent_progress(agents),
@@ -322,7 +321,6 @@ ROUTE_RE = re.compile(r"^/([^/]+)(/.*)?$")
 # Top-level path segments that are NOT session ids — reserved for future and
 # current global routes. Guards against a session-id slug called "api".
 RESERVED_ROOTS = {"api"}
-VALID_SEVERITIES = {s.value for s in Severity}
 VALID_CATEGORIES = {c.value for c in CommentCategory}
 MAX_DIFF_FOLD_FETCH_LINES = 200
 DEFAULT_SESSION_PAGE_SIZE = 50
@@ -579,7 +577,6 @@ class _Handler(BaseHTTPRequestHandler):
                 "comment_count": len(live),
                 "note_count": len(notes),
                 "stale_count": sum(1 for c in live if c.stale),
-                "critical_count": sum(1 for c in live if c.severity == "critical"),
                 "deleted_count": len(comments) - len(live),
                 # Compatibility field for older clients. Browsing is
                 # intentionally read-only; this now reports persistent
@@ -608,7 +605,6 @@ class _Handler(BaseHTTPRequestHandler):
                     comments,
                     agent=(q.get("agent", [None])[0]),
                     file=(q.get("file", [None])[0]),
-                    severity=(q.get("severity", [None])[0]),
                     category=(q.get("category", [None])[0]),
                     since=(q.get("since", [None])[0]),
                     unresolved="unresolved" in q,
@@ -700,9 +696,6 @@ class _Handler(BaseHTTPRequestHandler):
         if "body" not in data:
             return self._error(400, "missing field: body")
         body = str(data["body"])
-        severity = str(data.get("severity") or "suggestion")
-        if severity not in VALID_SEVERITIES:
-            return self._error(400, f"invalid severity: {severity}")
         try:
             category = normalize_comment_category(str(data.get("category") or "comment"))
         except ValueError as e:
@@ -773,7 +766,6 @@ class _Handler(BaseHTTPRequestHandler):
             line=line,
             end_line=end_line,
             body=body,
-            severity=severity,
             category=category,
             head_sha=session.current_head,
             reply_to=reply_to,
@@ -789,12 +781,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not cid:
             return self._error(400, "missing comment_id")
         body = data.get("body")
-        severity = data.get("severity")
         category = data.get("category")
-        if body is None and severity is None and category is None:
-            return self._error(400, "must supply body or severity or category")
-        if severity is not None and severity not in VALID_SEVERITIES:
-            return self._error(400, f"invalid severity: {severity}")
+        if body is None and category is None:
+            return self._error(400, "must supply body or category")
         if category is not None:
             try:
                 category = normalize_comment_category(str(category))
@@ -806,7 +795,6 @@ class _Handler(BaseHTTPRequestHandler):
             edited = store.edit_comment(
                 session_dir, cid,
                 body=str(body) if body is not None else None,
-                severity=str(severity) if severity is not None else None,
                 category=category,
                 edited_by=edited_by,
             )
@@ -891,7 +879,7 @@ class _Handler(BaseHTTPRequestHandler):
         for c in plan.new_top:
             promotion = plan.promoted_anchors.get(c.id)
             item = {
-                "id": c.id, "author": c.author, "severity": c.severity,
+                "id": c.id, "author": c.author,
                 "category": c.category,
                 "ref": _ref(c), "body": c.body,
                 **_item_defaults(c),
@@ -929,7 +917,7 @@ class _Handler(BaseHTTPRequestHandler):
                 **_item_defaults(c),
             })
         edits = [{
-            "id": c.id, "author": c.author, "severity": c.severity,
+            "id": c.id, "author": c.author,
             "category": c.category,
             "ref": _ref(c),
             "external_id": c.external_id,
@@ -1118,7 +1106,6 @@ def _comment_to_dict(c: Comment) -> dict:
         "line": c.line,
         "end_line": c.end_line,
         "body": c.body,
-        "severity": c.severity,
         "category": c.category,
         "resolved": c.resolved,
         "resolved_by": c.resolved_by,

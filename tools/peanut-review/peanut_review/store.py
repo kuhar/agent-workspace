@@ -167,7 +167,6 @@ def filter_comments(
     *,
     agent: str | None = None,
     file: str | None = None,
-    severity: str | None = None,
     category: str | None = None,
     since: str | None = None,
     unresolved: bool = False,
@@ -192,8 +191,6 @@ def filter_comments(
         result = [c for c in result if c.author == agent]
     if file:
         result = [c for c in result if c.file == file]
-    if severity:
-        result = [c for c in result if c.severity == severity]
     if category:
         category = normalize_comment_category(category)
         result = [c for c in result if c.category == category]
@@ -312,34 +309,30 @@ def undelete_comment(session_dir: str | Path, comment_id: str) -> bool:
 def edit_comment(
     session_dir: str | Path, comment_id: str, *,
     body: str | None = None,
-    severity: str | None = None,
     category: str | None = None,
     edited_by: str,
 ) -> bool:
-    """Rewrite a comment's body/severity/category, snapshotting prior state.
+    """Rewrite a comment's body/category, snapshotting prior state.
 
     `versions[0]` is always the original creator's state (edited_at/by null).
-    Each subsequent call appends the *prior* state, then bumps body/severity/
-    category/edited_at/edited_by to the new values. Caller must pass at least
-    one of body, severity, or category. Returns True if the comment was found.
+    Each subsequent call appends the *prior* state, then updates the body,
+    category, and edit attribution. Caller must pass body or category.
+    Returns True if the comment was found.
     """
-    if body is None and severity is None and category is None:
-        raise ValueError("edit_comment requires body, severity, or category")
+    if body is None and category is None:
+        raise ValueError("edit_comment requires body or category")
     normalized_category = (
         normalize_comment_category(category) if category is not None else None
     )
     def _apply(c: Comment) -> None:
         c.versions.append({
             "body": c.body,
-            "severity": c.severity,
             "category": c.category,
             "edited_at": c.edited_at,
             "edited_by": c.edited_by,
         })
         if body is not None:
             c.body = body
-        if severity is not None:
-            c.severity = severity
         if normalized_category is not None:
             c.category = normalized_category
         _validate_comment(c)

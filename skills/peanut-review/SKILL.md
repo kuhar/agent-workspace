@@ -39,9 +39,9 @@ author-facing comment set:
   smallest useful repro/test. Spend verification time on comments that might
   survive, not on likely deletes.
 - Rewrite kept comments as concise PR feedback. Start with the requested change
-  or scoped question, include only compact evidence, and align severity with
-  confidence. Avoid internal triage wording such as "confirmed" or "partly
-  confirmed".
+  or scoped question, include only compact evidence, and state impact and
+  uncertainty precisely. Avoid internal triage wording such as "confirmed"
+  or "partly confirmed".
 - Delete duplicate, incorrect, stale, nitpicky, speculative, praise-only,
   overly broad, or low-ROI comments. When merging duplicates, edit the kept
   comment first so it absorbs any useful detail, then delete the redundant
@@ -281,8 +281,8 @@ Use this when the orchestrator can modify the patch under review.
    but does not close the session or prevent later reruns:
 
    ```bash
-   "$PR_BIN" --session "$SESSION" verdict --approve --body "All critical issues addressed"
-   "$PR_BIN" --session "$SESSION" verdict --request-changes --body "Outstanding critical issue in X"
+   "$PR_BIN" --session "$SESSION" verdict --approve --body "All substantive findings addressed"
+   "$PR_BIN" --session "$SESSION" verdict --request-changes --body "X can lose data; please address before merging"
    "$PR_BIN" --session "$SESSION" archive
    ```
 

@@ -238,7 +238,7 @@ def test_remote_run_uses_same_cli_and_cleans_staged_secrets(tmp_path: Path, monk
         "base=[sys.executable, '-m', 'peanut_review']\n"
         "calls=[\n"
         " base+['status'],\n"
-        " base+['add-global-comment','--severity','warning','--body','remote finding'],\n"
+        " base+['add-global-comment','--body','remote finding'],\n"
         " base+['note','--message','tests passed'],\n"
         " base+['signal','round-done'],\n"
         "]\n"

@@ -170,13 +170,14 @@ class PRInfo:
     head_sha: str
     base_sha: str
     head_ref_name: str = ""
+    body: str = ""
 
 
 def fetch_pr_info(repo: str, number: int) -> PRInfo:
     out = _run([
         "pr", "view", str(number),
         "--repo", repo,
-        "--json", "number,headRefOid,baseRefOid,headRefName,url,title",
+        "--json", "number,headRefOid,baseRefOid,headRefName,url,title,body",
     ])
     d = json.loads(out)
     return PRInfo(
@@ -187,6 +188,7 @@ def fetch_pr_info(repo: str, number: int) -> PRInfo:
         head_sha=d["headRefOid"],
         base_sha=d["baseRefOid"],
         head_ref_name=d.get("headRefName") or "",
+        body=d.get("body") or "",
     )
 
 

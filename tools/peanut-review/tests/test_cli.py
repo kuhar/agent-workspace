@@ -23,6 +23,40 @@ def test_default_personas_dir_is_bundled():
     assert (personas / "vera.md").exists()
 
 
+@pytest.mark.parametrize("command", [
+    ["add-comment", "--global", "--body", "finding"],
+    ["add-global-comment", "--body", "finding"],
+    ["comments"],
+    ["edit", "c_existing", "--body", "updated"],
+])
+def test_removed_severity_flag_is_rejected(command, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main([*command, "--severity", "warning"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --severity warning" in capsys.readouterr().err
+
+
+def test_comments_reads_legacy_session_without_severity(tmp_path, capsys):
+    session_dir = str(tmp_path / "session")
+    _init_session(session_dir)
+    capsys.readouterr()
+    path = Path(session_dir) / "comments" / "vera.jsonl"
+    original = json.dumps({
+        "id": "c_legacy", "author": "vera", "body": "Current explanation",
+        "file": "foo.py", "line": 2, "severity": "critical", "resolved": True,
+        "versions": [{"body": "Earlier explanation", "severity": "nit"}],
+    }) + "\n"
+    path.write_text(original)
+
+    assert main(["--session", session_dir, "comments", "--format", "json"]) == 0
+    [comment] = json.loads(capsys.readouterr().out)
+    assert comment["body"] == "Current explanation"
+    assert comment["resolved"] is True
+    assert comment["versions"] == [{"body": "Earlier explanation"}]
+    assert "severity" not in comment
+    assert path.read_text() == original
+
+
 def test_babysitting_commands_are_not_registered():
     from peanut_review import cli
 
@@ -344,7 +378,11 @@ def test_wait_all_reviewer_failure_budget(
     assert mocked.call_count == int(not unfinished and failures <= allowed and failures < count)
     output = capsys.readouterr()
     markers = [line for line in output.out.splitlines() if line.startswith("::")]
-    expected_markers = ["::group::Reviewers"]
+    completed = count - failures - int(unfinished)
+    title = f"{completed}/{count} reviewers"
+    if failures:
+        title += f" ({failures} failed)"
+    expected_markers = [f"::group::{title}"]
     if mocked.call_count:
         expected_markers += ["::endgroup::", "::group::Curator"]
         if not curator_fails:
@@ -354,6 +392,41 @@ def test_wait_all_reviewer_failure_budget(
         assert "reviewer0" in output.err
     if failures:
         assert not (Path(sd) / "signals/reviewer0.round-done").exists()
+
+
+def test_wait_all_reports_live_progress_without_duplicate_updates(tmp_path, monkeypatch, capsys):
+    from peanut_review import polling, runtime
+
+    sd = str(tmp_path / "session")
+    with patch("peanut_review.session._run_git", side_effect=_mock_git):
+        sess.create_session(
+            workspace=_make_cursor_workspace(),
+            agents=[{"name": f"reviewer{i}", "model": "test"} for i in range(4)],
+            session_dir=sd,
+        )
+    ticks = iter([None, 0, 1, 2, 3])
+
+    def advance(_seconds):
+        reviewer = next(ticks)
+        if reviewer is None:
+            return
+        if reviewer == 3:
+            runtime.update_agent_meta(sd, f"reviewer{reviewer}", {"exit_code": 1})
+        else:
+            polling.write_signal(sd, f"reviewer{reviewer}", "round-done")
+
+    monkeypatch.setattr(polling.time, "sleep", advance)
+    rc = main([
+        "--session", sd, "wait-all", "round-done", "--timeout", "60",
+        "--max-reviewer-failures", "1", "--no-curate",
+    ])
+    assert rc == 0
+    markers = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::")]
+    expected = []
+    for title in ["0/4 reviewers", "1/4 reviewers", "2/4 reviewers", "3/4 reviewers",
+                  "3/4 reviewers (1 failed)"]:
+        expected.extend([f"::group::{title}", "::endgroup::"])
+    assert markers == expected
 
 
 def test_kill_agents_cli_prints_results():
@@ -427,7 +500,7 @@ def test_add_comment_and_list(mock_git):
     # Add comment
     rc = main(["--session", sd, "add-comment",
                "--file", "src/foo.cpp", "--line", "42",
-               "--body", "Null check needed", "--severity", "critical",
+               "--body", "Null check needed",
                "--author", "vera"])
     assert rc == 0
 
@@ -602,7 +675,7 @@ def test_verdict_flow(mock_git):
 
     main(["--session", sd, "add-comment",
           "--file", "a.py", "--line", "1", "--body", "Critical bug",
-          "--severity", "critical", "--author", "vera"])
+          "--author", "vera"])
 
     rc = main(["--session", sd, "verdict", "--approve", "--body", "LGTM"])
     assert rc == 0
@@ -907,7 +980,7 @@ def test_add_global_comment_via_subcommand_persists_with_empty_file():
     with redirect_stdout(out):
         rc = main(["--session", sd, "add-global-comment",
                    "--body", "Tests are missing for the new auth path",
-                   "--severity", "warning", "--author", "vera"])
+                   "--author", "vera"])
     assert rc == 0
     assert "(global)" in out.getvalue()
 
@@ -916,7 +989,6 @@ def test_add_global_comment_via_subcommand_persists_with_empty_file():
     assert len(comments) == 1
     assert comments[0].file == ""
     assert comments[0].line == 0
-    assert comments[0].severity == "warning"
     assert comments[0].body.startswith("Tests are missing")
 
 
@@ -968,7 +1040,7 @@ def test_comments_listing_shows_global_marker():
     _init_session(sd, workspace=ws)
 
     main(["--session", sd, "add-global-comment",
-          "--body", "scope concern", "--severity", "warning", "--author", "vera"])
+          "--body", "scope concern", "--author", "vera"])
     main(["--session", sd, "add-comment",
           "--file", "foo.py", "--line", "1",
           "--body", "anchored", "--author", "felix"])
@@ -1236,13 +1308,13 @@ def test_edit_command_replaces_body_and_keeps_history():
     _init_session(sd, workspace=ws)
     main(["--session", sd, "add-comment",
           "--file", "foo.py", "--line", "1",
-          "--body", "first take", "--severity", "nit",
+          "--body", "first take",
           "--author", "felix"])
     from peanut_review.store import read_all_comments
     cid = read_all_comments(sd)[0].id
 
     rc = main(["--session", sd, "edit", cid,
-               "--body", "second take", "--severity", "warning",
+               "--body", "second take",
                "--author", "jakub"])
     assert rc == 0
 
@@ -1252,15 +1324,13 @@ def test_edit_command_replaces_body_and_keeps_history():
     listed = json.loads(out.getvalue())
     assert len(listed) == 1
     assert listed[0]["body"] == "second take"
-    assert listed[0]["severity"] == "warning"
     assert listed[0]["edited_by"] == "jakub"
     assert listed[0]["edited_at"]
     assert len(listed[0]["versions"]) == 1
     assert listed[0]["versions"][0]["body"] == "first take"
-    assert listed[0]["versions"][0]["severity"] == "nit"
 
 
-def test_edit_command_requires_body_or_severity():
+def test_edit_command_requires_body_or_category():
     sd = os.path.join(tempfile.mkdtemp(prefix="pr-test-"), "session")
     _init_session(sd)
     err = io.StringIO()

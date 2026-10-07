@@ -135,6 +135,12 @@ the configuration, security boundary, lifecycle, and real localhost validation.
 
 Use this for changes that came from GitHub.
 
+PR setup saves the title, URL, and full description in `session.json`. The
+default reviewer and Curator prompts include that context directly, including
+for SSH reviewers, so agents do not need to fetch it. `start --reuse --sync`
+(used by `review-pr.sh`) and `sync-pr` refresh the description for the next
+launch. Custom prompt templates can include it with `${PR_CONTEXT}`.
+
 ```bash
 PR=https://github.com/owner/repo/pull/123
 
@@ -298,10 +304,10 @@ round signals are cleared before the selected reviewers start:
 ```bash
 "$PR_BIN" --session "$SESSION" status
 "$PR_BIN" --session "$SESSION" note --message "Ran targeted tests; passed."
-"$PR_BIN" --session "$SESSION" add-comment --file path/to/file.py --line 42 --severity warning --body-file /tmp/body.md
+"$PR_BIN" --session "$SESSION" add-comment --file path/to/file.py --line 42 --body-file /tmp/body.md
 "$PR_BIN" --session "$SESSION" comments --unresolved   # use this to find c_... ids
 "$PR_BIN" --session "$SESSION" curate                 # launch the comment curator
-"$PR_BIN" --session "$SESSION" add-global-comment --severity suggestion --body "A few comments."
+"$PR_BIN" --session "$SESSION" add-global-comment --body "A few comments."
 "$PR_BIN" --session "$SESSION" add-global-comment --category request-changes --body-file /tmp/blocking.md
 ```
 

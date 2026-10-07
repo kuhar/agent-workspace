@@ -786,6 +786,56 @@ def test_agents_use_cli_prompt_template():
     # CLI template self-identifies by instructing the agent to execute shell commands.
     assert "Shell tool" in cursor_rendered
     assert "Shell tool" in rendered
+    assert "# Pull request context" not in rendered
+    assert "${PR_CONTEXT}" not in rendered
+
+
+@pytest.mark.parametrize("body", [None, "", "## Intent\n\nKeep `$PATH`, ${SESSION}, and ✓.\n"])
+def test_pr_context_reaches_all_reviewers_and_curator(tmp_path, body):
+    from peanut_review import session as sess
+
+    agents = [
+        AgentConfig(name=runner, model="test", runner=runner, persona="vera.md")
+        for runner in ["cursor", "opencode", "codex"]
+    ] + [
+        AgentConfig(name="Curator", model="test", role="curator"),
+        AgentConfig(name="remote", model="test", runner="codex", ssh_target="host"),
+    ]
+    sd = tmp_path / "session"
+    with patch("peanut_review.session._run_git", side_effect=_mock_git):
+        sess.create_session(
+            workspace=str(tmp_path),
+            agents=[agent.to_dict() for agent in agents],
+            ssh_targets={"host": {
+                "host": "reviewer@host",
+                "controlPath": "/tmp/peanut-review-context.sock",
+                "gatewayUrl": "http://127.0.0.1:27184",
+                "workspaceRoot": "/srv/review",
+                "repoRelative": "repo",
+                "buildRoots": ["/srv/review/build"],
+                "peanutReviewBin": "/opt/peanut-review/bin/peanut-review",
+                "runtimeRoot": "/srv/runtime",
+            }},
+            session_dir=str(sd),
+            github=GitHubPR(repo="acme/foo", number=42, title="PR intent", body=body),
+        )
+
+    assert sess.load_session(sd).github.body == body
+    prompts = launch.render_all_prompts(
+        sd, agent_names=[agent.name for agent in agents],
+        remote_launch_ids={"remote": "launch1"},
+    )
+    assert set(prompts) == {agent.name for agent in agents}
+    for prompt in prompts.values():
+        text = prompt.read_text()
+        assert "Title: PR intent" in text
+        assert "URL: https://github.com/acme/foo/pull/42" in text
+        if body is None:
+            assert "PR description was not captured" in text
+        elif body == "":
+            assert "The PR has no description" in text
+        else:
+            assert body in text
 
 
 def test_prompt_uses_persona_filename_independent_of_agent_display_name():

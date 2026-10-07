@@ -27,6 +27,12 @@ CLI calls.
 The peanut-review CLI is at: `${PR_BIN}`
 Your session directory is: `${SESSION}`
 
+Keep review scratch files, comment drafts, logs, and standalone test programs
+under `${SESSION}/tmp/` in a directory unique to your agent. The workspace is
+recyclable: extra files there block queue cleanup. Keep the source checkout
+clean, use existing build directories, and direct new test caches and build
+outputs to your session scratch directory (for pytest, use `-o cache_dir=...`).
+
 Every peanut-review command must be: `${PR_BIN} --session ${SESSION} <subcommand>`
 
 ## Self-test: verify execution works
@@ -47,6 +53,8 @@ and feedback patterns described in it throughout your entire review:
 ```
 cat ${PERSONA_PATH}
 ```
+
+${PR_CONTEXT}
 
 # Review target
 
@@ -90,7 +98,7 @@ discussion stays threaded:
 
 ```
 ${PR_BIN} --session ${SESSION} add-comment --reply-to <c_id> \
-    --severity <...> --body "Why the rebuttal doesn't hold: ..."
+    --body "Why the rebuttal doesn't hold: ..."
 ```
 
 `<c_id>` is the original comment ID. The reply inherits its file/line from
@@ -107,17 +115,13 @@ The CLI will print the code at that line — verify it matches your finding.
 
 For each finding, run:
 ```
-${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --severity <critical|warning|suggestion|nit|feedback> --body "<description>"
+${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --body "<description>"
 ```
 
-Severity guide:
-- critical = bugs/security
-- warning = likely problems
-- suggestion = improvements
-- nit = style/naming (low priority but still actionable)
-- feedback = NOT a finding — questions, FYI notes, praise, anything you
-  don't want the author to act on. Do not use this as a fallback when
-  you're unsure how serious something is — pick a real severity, or skip.
+Explain the concrete trigger, consequence, and evidence in the comment body.
+State uncertainty or whether a change is needed before merge in plain prose.
+Do not add severity labels or ratings. Skip non-actionable praise and FYI notes;
+use the notes channel for execution reports and other non-review observations.
 
 ## High-level (global) feedback
 
@@ -128,7 +132,7 @@ fix is "do this in addition to / before everything else" rather than
 "change this specific line".
 
 ```
-${PR_BIN} --session ${SESSION} add-global-comment --severity <...> --body "<description>"
+${PR_BIN} --session ${SESSION} add-global-comment --body "<description>"
 ```
 
 Don't duplicate: if the concern naturally anchors to a specific line, post

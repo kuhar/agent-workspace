@@ -238,7 +238,7 @@ def test_bounded_diff_preserves_rename_delete_and_binary_shapes(tmp_path: Path):
 def test_render_page_smoke(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    c = Comment(author="felix", file="foo.py", line=2, body="nice", severity="suggestion")
+    c = Comment(author="felix", file="foo.py", line=2, body="nice")
     store.append_comment(session_dir, c)
     comments = store.read_all_comments(session_dir)
 
@@ -310,8 +310,7 @@ def test_render_page_keeps_comment_anchor_visible_in_large_file(tmp_path: Path):
     session_dir = _session_for_repo(tmp_path, repo)
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    c = Comment(author="vera", file="dense.py", line=2500, body="late comment",
-                severity="warning")
+    c = Comment(author="vera", file="dense.py", line=2500, body="late comment")
 
     html = render.render_page(s, s.id, files, [c], head_shifted=False)
 
@@ -327,8 +326,7 @@ def test_render_page_keeps_comment_anchor_visible_when_context_folded(
     session_dir = _session_for_repo(tmp_path, repo)
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    c = Comment(author="vera", file="long.py", line=5, body="look here",
-                severity="warning")
+    c = Comment(author="vera", file="long.py", line=5, body="look here")
 
     html = render.render_page(s, s.id, files, [c], head_shifted=False)
 
@@ -517,7 +515,7 @@ def test_render_comment_escapes_html(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     c = Comment(author="felix", file="foo.py", line=1,
-                body="<script>alert(1)</script>", severity="critical")
+                body="<script>alert(1)</script>")
     store.append_comment(session_dir, c)
 
     html = render.render_page(s, s.id, files, [c], head_shifted=False)
@@ -534,7 +532,6 @@ def test_render_comment_includes_relative_timestamp(session_dir: Path, repo: Pat
         file="foo.py",
         line=1,
         body="old note",
-        severity="nit",
     )
 
     html = render.render_page(s, s.id, files, [c], head_shifted=False)
@@ -565,8 +562,8 @@ def test_render_sidebar_files_list_with_counts(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     # Two comments on foo.py: one open + one resolved → 1 open / 2 total.
-    c_open = Comment(author="felix", file="foo.py", line=1, body="a", severity="nit")
-    c_done = Comment(author="vera", file="foo.py", line=2, body="b", severity="nit",
+    c_open = Comment(author="felix", file="foo.py", line=1, body="a")
+    c_done = Comment(author="vera", file="foo.py", line=2, body="b",
                      resolved=True)
     store.append_comment(session_dir, c_open)
     store.append_comment(session_dir, c_done)
@@ -684,10 +681,8 @@ def test_render_global_section_appears_above_files(session_dir: Path, repo: Path
     and includes any file=='' comment in its own block."""
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    g = Comment(author="vera", file="", line=0, body="scope concern",
-                severity="warning")
-    a = Comment(author="felix", file="foo.py", line=1, body="anchored",
-                severity="nit")
+    g = Comment(author="vera", file="", line=0, body="scope concern")
+    a = Comment(author="felix", file="foo.py", line=1, body="anchored")
     store.append_comment(session_dir, g)
     store.append_comment(session_dir, a)
     html = render.render_page(s, s.id, files,
@@ -729,8 +724,8 @@ def test_render_global_section_excludes_globals_from_per_file_counts(
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     # 2 globals (1 open + 1 resolved), 0 per-file → file row shows em-dash.
-    g1 = Comment(author="vera", file="", line=0, body="A", severity="warning")
-    g2 = Comment(author="vera", file="", line=0, body="B", severity="suggestion",
+    g1 = Comment(author="vera", file="", line=0, body="A")
+    g2 = Comment(author="vera", file="", line=0, body="B",
                  resolved=True)
     store.append_comment(session_dir, g1)
     store.append_comment(session_dir, g2)
@@ -750,7 +745,7 @@ def test_server_post_global_comment(session_dir: Path):
         code, data = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"scope": "global", "body": "missing rollback plan",
-             "severity": "warning", "author": "jakub"},
+             "author": "jakub"},
         )
         assert code == 201
         assert data["file"] == ""
@@ -799,7 +794,7 @@ def test_server_post_global_via_omitted_file_and_line(session_dir: Path):
     try:
         code, data = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
-            {"body": "high-level concern", "severity": "suggestion"},
+            {"body": "high-level concern"},
         )
         assert code == 201
         assert data["file"] == ""
@@ -812,11 +807,10 @@ def test_render_thread_includes_reply_button_and_replies_inset(
 ):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    parent = Comment(author="vera", file="foo.py", line=1, body="parent",
-                     severity="warning")
+    parent = Comment(author="vera", file="foo.py", line=1, body="parent")
     store.append_comment(session_dir, parent)
     reply = Comment(author="felix", file="foo.py", line=1, body="agreed",
-                    severity="suggestion", reply_to=parent.id)
+                    reply_to=parent.id)
     store.append_comment(session_dir, reply)
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -825,13 +819,11 @@ def test_render_thread_includes_reply_button_and_replies_inset(
     assert 'class="reply-btn"' in html_out
     assert f'data-reply-to="{parent.id}"' in html_out
     assert f'data-resolve="{parent.id}"' in html_out
-    # Reply renders with .reply class and no severity badge of its own.
+    # Replies remain inset within their parent thread.
     cid_idx = html_out.index(f'data-cid="{reply.id}"')
     div_open = html_out.rfind("<div ", 0, cid_idx)
     assert "comment reply" in html_out[div_open:cid_idx]
-    # The reply-block body contains its meta but no severity span.
-    body_end = html_out.index("</div>", cid_idx)
-    assert "sev suggestion" not in html_out[cid_idx:body_end]
+    assert 'class="sev ' not in html_out
 
 
 def test_render_thread_swaps_to_unresolve_when_resolved(
@@ -840,7 +832,7 @@ def test_render_thread_swaps_to_unresolve_when_resolved(
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     parent = Comment(author="vera", file="foo.py", line=1, body="x",
-                     severity="warning", resolved=True)
+                     resolved=True)
     store.append_comment(session_dir, parent)
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -855,11 +847,11 @@ def test_render_resolved_thread_collapsed_by_default(
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     parent = Comment(author="vera", file="foo.py", line=1, body="x",
-                     severity="warning", resolved=True)
+                     resolved=True)
     store.append_comment(session_dir, parent)
     store.append_comment(session_dir, Comment(
         author="felix", file="foo.py", line=1, body="reply",
-        severity="suggestion", reply_to=parent.id,
+        reply_to=parent.id,
     ))
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -877,8 +869,7 @@ def test_render_unresolved_thread_has_expanded_collapse_button(
 ):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    parent = Comment(author="vera", file="foo.py", line=1, body="x",
-                     severity="warning")
+    parent = Comment(author="vera", file="foo.py", line=1, body="x")
     store.append_comment(session_dir, parent)
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -894,13 +885,12 @@ def test_sidebar_counts_exclude_replies(session_dir: Path, repo: Path):
     """A chatty thread of replies must not inflate the open count."""
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    parent = Comment(author="vera", file="foo.py", line=1, body="P",
-                     severity="warning")
+    parent = Comment(author="vera", file="foo.py", line=1, body="P")
     store.append_comment(session_dir, parent)
     for i in range(5):
         store.append_comment(session_dir, Comment(
             author="felix", file="foo.py", line=1, body=f"r{i}",
-            severity="suggestion", reply_to=parent.id,
+            reply_to=parent.id,
         ))
     html_out = render.render_page(s, s.id, files,
                                   store.read_all_comments(session_dir),
@@ -1109,9 +1099,9 @@ def test_render_stale_and_resolved_classes(session_dir: Path, repo: Path):
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
     c1 = Comment(author="felix", file="foo.py", line=1, body="stale one",
-                 severity="nit", stale=True)
+                 stale=True)
     c2 = Comment(author="vera", file="foo.py", line=2, body="resolved one",
-                 severity="nit", resolved=True)
+                 resolved=True)
     html = render.render_page(s, s.id, files, [c1, c2], head_shifted=False)
     assert "comment stale" in html
     assert "comment resolved" in html or "resolved" in html
@@ -1336,7 +1326,6 @@ def test_server_gh_preview_marks_unreviewable_anchor_for_global_promotion(
     _mark_github_backed(sd)
     parent = Comment(
         author="jakub", file="long.py", line=5, body="far from hunk",
-        severity="warning",
     )
     reply = Comment(
         author="jakub", file="long.py", line=5, body="reply",
@@ -1435,7 +1424,7 @@ def test_server_post_comment(session_dir: Path):
         code, data = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "body": "looks good",
-             "severity": "suggestion", "author": "jakub"},
+             "author": "jakub"},
         )
         assert code == 201
         assert data["body"] == "looks good"
@@ -1462,18 +1451,39 @@ def test_server_post_comment_validates_line(session_dir: Path):
         srv.shutdown()
 
 
-def test_server_post_comment_invalid_severity(session_dir: Path):
+def test_render_legacy_comment_keeps_body_and_review_decision(session_dir: Path, repo: Path):
+    path = session_dir / "comments" / "vera.jsonl"
+    original = json.dumps({
+        "id": "c_legacy", "author": "vera", "body": "Fix the data loss first.",
+        "file": "", "line": 0, "category": "request-changes",
+        "severity": "critical",
+    }) + "\n"
+    path.write_text(original)
+    session = sess.load_session(session_dir)
+    files = diffmod.parse_diff(str(repo), session.base_ref, session.topic_ref)
+    page = render.render_page(session, session.id, files,
+                              store.read_all_comments(session_dir), head_shifted=False)
+    assert "Fix the data loss first." in page
+    assert 'class="category request-changes"' in page
+    assert 'class="sev ' not in page
+    assert 'data-k="critical"' not in page
+    assert "set severity" not in page
+    assert path.read_text() == original
+
+
+def test_server_post_comment_needs_no_classification(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
     try:
         code, data = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
-            {"file": "foo.py", "line": 1, "body": "x", "severity": "bogus"},
+            {"file": "foo.py", "line": 1, "body": "x"},
         )
-        assert code == 400
-        assert "severity" in data["error"]
+        assert code == 201
+        assert data["body"] == "x"
+        assert data["category"] == "comment"
+        assert "severity" not in data
     finally:
         srv.shutdown()
-
 
 def test_server_resolve(session_dir: Path):
     srv, session_id, port = _start_server(session_dir)
@@ -1535,7 +1545,7 @@ def test_server_post_delete_and_undelete(session_dir: Path):
     try:
         code, c = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
-            {"file": "foo.py", "line": 1, "body": "bad", "severity": "nit",
+            {"file": "foo.py", "line": 1, "body": "bad",
              "author": "felix"},
         )
         assert code == 201
@@ -1598,7 +1608,7 @@ def test_server_delete_button_rendered_on_each_comment(session_dir: Path):
     try:
         _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
-            {"file": "foo.py", "line": 1, "body": "x", "severity": "nit",
+            {"file": "foo.py", "line": 1, "body": "x",
              "author": "felix"},
         )
         _, body = _get(f"http://127.0.0.1:{port}/{session_id}/")
@@ -2047,7 +2057,7 @@ def test_server_post_range_comment_persists_end_line(session_dir: Path):
         code, data = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/comments",
             {"file": "foo.py", "line": 1, "end_line": 2,
-             "body": "range comment", "severity": "nit"},
+             "body": "range comment"},
         )
         assert code == 201
         assert data["line"] == 1
@@ -2065,11 +2075,11 @@ def test_render_range_comment_anchored_at_end_line(session_dir: Path, repo: Path
     """A comment with end_line must appear in the thread anchored at end_line."""
     store.append_comment(session_dir, Comment(
         author="vera", file="foo.py", line=1, end_line=2,
-        body="spans two lines", severity="warning",
+        body="spans two lines",
     ))
     store.append_comment(session_dir, Comment(
         author="vera", file="foo.py", line=1,
-        body="single line", severity="nit",
+        body="single line",
     ))
     s = sess.load_session(session_dir)
     from peanut_review.web import diff as diffmod
@@ -2359,18 +2369,17 @@ def test_client_comment_insertion_deduplicates_post_poll_races():
 
 
 def test_server_edit_endpoint_updates_body_and_history(session_dir: Path):
-    c = Comment(author="vera", file="foo.py", line=1, body="v1", severity="nit")
+    c = Comment(author="vera", file="foo.py", line=1, body="v1")
     store.append_comment(session_dir, c)
     srv, session_id, port = _start_server(session_dir)
     try:
         code, data = _post(
             f"http://127.0.0.1:{port}/{session_id}/api/edit",
-            {"comment_id": c.id, "body": "v2", "severity": "warning",
+            {"comment_id": c.id, "body": "v2",
              "author": "jakub"},
         )
         assert code == 200
         assert data["body"] == "v2"
-        assert data["severity"] == "warning"
         assert data["edited_by"] == "jakub"
         assert len(data["versions"]) == 1
         assert data["versions"][0]["body"] == "v1"
@@ -2391,7 +2400,7 @@ def test_server_edit_endpoint_unknown_comment_returns_404(session_dir: Path):
         srv.shutdown()
 
 
-def test_server_edit_endpoint_requires_body_or_severity(session_dir: Path):
+def test_server_edit_endpoint_requires_body_or_category(session_dir: Path):
     c = Comment(author="vera", file="foo.py", line=1, body="x")
     store.append_comment(session_dir, c)
     srv, session_id, port = _start_server(session_dir)
@@ -2401,7 +2410,7 @@ def test_server_edit_endpoint_requires_body_or_severity(session_dir: Path):
             {"comment_id": c.id},
         )
         assert code == 400
-        assert "body or severity" in data["error"]
+        assert "body or category" in data["error"]
     finally:
         srv.shutdown()
 
@@ -2413,8 +2422,7 @@ def test_render_edited_indicator_appears_after_edit(
     the JS can pop the version history without an extra round-trip."""
     s = sess.load_session(session_dir)
     files = diffmod.parse_diff(str(repo), s.base_ref, s.topic_ref)
-    c = Comment(author="vera", file="foo.py", line=1, body="v1",
-                severity="nit")
+    c = Comment(author="vera", file="foo.py", line=1, body="v1")
     store.append_comment(session_dir, c)
     store.edit_comment(session_dir, c.id, body="v2", edited_by="jakub")
     html_out = render.render_page(s, s.id, files,
@@ -2428,8 +2436,8 @@ def test_render_edited_indicator_appears_after_edit(
 def test_server_filter_comments_since_id(session_dir: Path):
     """The `--since <id>` cursor (replaces the old `--round N` filter) lets
     the orchestrator poll for new activity since they last looked."""
-    c1 = Comment(author="felix", file="foo.py", line=1, body="r1", severity="nit")
-    c2 = Comment(author="felix", file="foo.py", line=2, body="r2", severity="nit")
+    c1 = Comment(author="felix", file="foo.py", line=1, body="r1")
+    c2 = Comment(author="felix", file="foo.py", line=2, body="r2")
     store.append_comment(session_dir, c1)
     store.append_comment(session_dir, c2)
     srv, session_id, port = _start_server(session_dir)

@@ -317,9 +317,6 @@
     if (!isReply) cls.push("top-level");
     const editBtn = `<button data-edit="${esc(c.id)}">Edit</button>`;
     const deleteBtn = `<button class="danger" data-delete="${esc(c.id)}">Delete</button>`;
-    const sevHtml = isReply
-      ? ""
-      : `<span class="sev ${esc(c.severity)}">${esc(c.severity)}</span>`;
     const resolvedBadge = c.resolved && !isReply ? '<span class="round resolved-badge">resolved</span>' : "";
     return `
       <div class="${cls.join(" ")}" data-cid="${esc(c.id)}">
@@ -327,7 +324,6 @@
           ${collapseButton(c, isReply)}
           <span class="author">${esc(c.author || "unknown")}</span>
           ${commentTime(c)}
-          ${sevHtml}
           ${isReply ? "" : categoryBadge(c)}
           ${rangeBadge(c)}
           ${c.stale ? '<span class="round">stale</span>' : ""}
@@ -487,13 +483,6 @@
       <div class="controls">
         <button class="cancel">Cancel</button>
         <button class="suggest" title="Insert a code suggestion block for the selected lines">Suggest change</button>
-        <select class="sev">
-          <option value="suggestion">suggestion</option>
-          <option value="warning">warning</option>
-          <option value="critical">critical</option>
-          <option value="nit">nit</option>
-          <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
-        </select>
         <button class="submit">Post</button>
       </div>
     `;
@@ -503,7 +492,6 @@
 
     form.querySelector(".suggest").onclick = () => {
       insertSuggestionBlock(ta, file, lo, hi);
-      form.querySelector(".sev").value = "suggestion";
     };
 
     const cleanup = () => clearRangeHighlight(highlighted);
@@ -519,8 +507,7 @@
     form.querySelector(".submit").onclick = async () => {
       const body = form.querySelector("textarea").value.trim();
       if (!body) return;
-      const severity = form.querySelector(".sev").value;
-      const payload = { file, line: lo, body, severity };
+      const payload = { file, line: lo, body };
       if (isRange) payload.end_line = hi;
       try {
         const c = await api("POST", "/api/comments", payload);
@@ -699,13 +686,6 @@
       <textarea placeholder="High-level feedback (architecture, scope, testing strategy, etc.)..."></textarea>
       <div class="controls">
         <button class="cancel">Cancel</button>
-        <select class="sev">
-          <option value="suggestion">suggestion</option>
-          <option value="warning">warning</option>
-          <option value="critical">critical</option>
-          <option value="nit">nit</option>
-          <option value="feedback" title="Non-actionable: question, FYI, or praise">feedback</option>
-        </select>
         <select class="category" title="GitHub review category">
           <option value="comment">comment</option>
           <option value="approve">approve</option>
@@ -721,11 +701,10 @@
     form.querySelector(".submit").onclick = async () => {
       const body = form.querySelector("textarea").value.trim();
       if (!body) return;
-      const severity = form.querySelector(".sev").value;
       const category = form.querySelector(".category")?.value || "comment";
       try {
         const c = await api("POST", "/api/comments",
-                            { scope: "global", body, severity, category });
+                            { scope: "global", body, category });
         insertFetchedComment(c);
         knownCommentIds.add(c.id);
         form.remove();
@@ -1883,7 +1862,6 @@
       + `<div class="push-meta">`
       +   renderIncludeControl(it, "new")
       +   `<span class="mono">${esc(it.id)}</span>`
-      +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
       +   categoryBadge(it)
       +   `<span class="ref mono">${esc(ref)}</span>`
       +   promoted
@@ -1924,7 +1902,6 @@
       + `<div class="push-meta">`
       +   renderIncludeControl(it, "edit")
       +   `<span class="mono">${esc(it.id)}</span>`
-      +   `<span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>`
       +   categoryBadge(it)
       +   `<span class="ref mono">${esc(it.ref)}</span>`
       +   `<span class="muted">→ gh#${esc(it.external_id)}</span>`
@@ -2508,30 +2485,17 @@
     renderPendingIndicator();
   }
 
-  // Composer-scoped chord (severity/category + insert-suggestion). Captures the
+  // Composer-scoped chord (category + insert-suggestion). Captures the
   // composer in closure so a mid-chord focus change doesn't retarget.
   function startPendingComposerActions(composer) {
-    const sev = composer.querySelector(".sev");
     const category = composer.querySelector(".category");
     const suggest = composer.querySelector(".suggest");
-    const setSeverity = (value, label) => {
-      if (!sev) return;
-      sev.value = value;
-      flashToast(`severity → ${label}`, 1200);
-    };
     const setCategory = (value, label) => {
       if (!category) return;
       category.value = value;
       flashToast(`review → ${label}`, 1200);
     };
     const map = {};
-    if (sev) {
-      map.c = { label: "critical", run: () => setSeverity("critical", "critical") };
-      map.w = { label: "warning",  run: () => setSeverity("warning", "warning") };
-      map.s = { label: "suggestion", run: () => setSeverity("suggestion", "suggestion") };
-      map.n = { label: "nit",      run: () => setSeverity("nit", "nit") };
-      map.f = { label: "feedback", run: () => setSeverity("feedback", "feedback") };
-    }
     if (category) {
       map.a = { label: "approve", run: () => setCategory("approve", "approve") };
       map.b = { label: "blocking", run: () => setCategory("request-changes", "blocking") };
@@ -2585,7 +2549,7 @@
   // reply / edit) cancel and submit, respectively. Plain Enter still inserts
   // a newline so it never blocks typing. Same convention as GitHub, Slack,
   // JIRA, etc. Also handles Ctrl+Space / Alt+s as a composer-scoped chord
-  // entry (severity + insert-suggestion).
+  // entry (category + insert-suggestion).
   document.addEventListener("keydown", (ev) => {
     if (pendingMap) return;  // hoisted handler took it
     const composer = findComposer(document.activeElement);
@@ -2612,7 +2576,7 @@
       && !ev.altKey && !ev.shiftKey && ev.key === PREFIX_KEY;
     const isAltS = ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.key === "s";
     if (isCtrlPrefix || isAltS) {
-      if (!composer.querySelector(".sev") && !composer.querySelector(".category") &&
+      if (!composer.querySelector(".category") &&
           !composer.querySelector(".suggest")) return;
       ev.preventDefault();
       startPendingComposerActions(composer);

@@ -70,7 +70,7 @@ def _print_comments(rows: list[dict[str, Any]], args) -> None:
     if not comments:
         print("No comments found.")
         return
-    header = f"{'ID':<14} {'Agent':<10} {'Sev':<10} {'Cat':<15} {'File':<30} {'Line':>5}    {'Body'}"
+    header = f"{'ID':<14} {'Agent':<10} {'Cat':<15} {'File':<30} {'Line':>5}    {'Body'}"
     print(header)
     print("-" * len(header))
     for comment in comments:
@@ -87,7 +87,7 @@ def _print_comments(rows: list[dict[str, Any]], args) -> None:
         body = comment.body[:60].replace("\n", " ")
         file_column = "[global]" if comment.file == sess.GLOBAL_FILE else comment.file
         line_column = "" if comment.file == sess.GLOBAL_FILE else str(comment.line)
-        print(f"{comment.id:<14} {comment.author:<10} {comment.severity:<10} {comment.category:<15} {file_column:<30} {line_column:>5} {flag}  {body}")
+        print(f"{comment.id:<14} {comment.author:<10} {comment.category:<15} {file_column:<30} {line_column:>5} {flag}  {body}")
 
 
 def _print_notes(rows: list[dict[str, Any]], args) -> None:
@@ -129,7 +129,7 @@ def _print_status(payload: dict[str, Any]) -> None:
         print()
         print(
             "Comments: "
-            f"{counts['total']} total, {counts['critical']} critical, "
+            f"{counts['total']} total, "
             f"{counts['resolved']} resolved, {counts['stale']} stale, "
             f"{counts['deleted']} deleted"
         )
@@ -173,7 +173,7 @@ def maybe_dispatch(args) -> int | None:
             _print_status(client.request("GET", "status"))
         elif args.command == "comments":
             rows = client.request("GET", "comments", query=_query(args, [
-                "agent", "file", "severity", "category", "since",
+                "agent", "file", "category", "since",
                 "unresolved", "include_deleted",
             ]))
             _print_comments(rows, args)
@@ -183,7 +183,6 @@ def maybe_dispatch(args) -> int | None:
         elif args.command in {"add-comment", "add-global-comment"}:
             payload = {
                 "body": _body_from_args(args),
-                "severity": args.severity,
                 "category": args.category,
                 "file": getattr(args, "file", None),
                 "line": getattr(args, "line", None),

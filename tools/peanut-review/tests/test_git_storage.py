@@ -318,12 +318,13 @@ with patch("peanut_review.launch.launch_curator", side_effect=curate):
             assert scopes == ["Build", "default", build_failure]
             assert not (sd / "session.json").exists()
             continue
-        assert ("Review", "Reviewers") in entered
+        progress_title = f"{4 - failures}/4 reviewers ({failures} failed)"
+        assert ("Review", progress_title) in entered
         if failures == 2:
             assert ("Review", "Curator") in entered
             assert not scopes
         else:
-            assert scopes == ["Review", "Reviewers"]
+            assert scopes == ["Review", progress_title]
         assert result.returncode == (0 if failures == 2 else 1), result.stdout + result.stderr
         assert "allow up to 2 of 4 reviewers" in result.stdout
         assert (sd / "signals/Curator.round-done").exists() == (failures == 2)

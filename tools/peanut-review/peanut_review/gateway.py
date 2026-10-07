@@ -180,9 +180,6 @@ def _comment_result(session_dir: Path, author: str, payload: dict[str, Any]) -> 
     body = payload.get("body")
     if not isinstance(body, str):
         raise GatewayError("comment body must be a string")
-    severity = payload.get("severity", models.Severity.SUGGESTION.value)
-    if severity not in {item.value for item in models.Severity}:
-        raise GatewayError(f"invalid severity: {severity!r}")
     try:
         category = models.normalize_comment_category(payload.get("category"))
     except ValueError as exc:
@@ -238,7 +235,6 @@ def _comment_result(session_dir: Path, author: str, payload: dict[str, Any]) -> 
         line=line,
         end_line=end_line,
         body=body,
-        severity=severity,
         category=category,
         head_sha=session.current_head,
         reply_to=reply_to,
@@ -288,7 +284,6 @@ def _status_result(session_dir: Path) -> dict[str, Any]:
         "comments": {
             "total": len(live),
             "deleted": len(comments) - len(live),
-            "critical": sum(comment.severity == "critical" for comment in live),
             "resolved": sum(comment.resolved for comment in live),
             "stale": sum(comment.stale for comment in live),
         },
@@ -420,7 +415,6 @@ class _GatewayHandler(BaseHTTPRequestHandler):
                     store.read_all_comments(session_dir),
                     agent=query.get("agent", [None])[0],
                     file=query.get("file", [None])[0],
-                    severity=query.get("severity", [None])[0],
                     category=query.get("category", [None])[0],
                     since=query.get("since", [None])[0],
                     unresolved=_query_flag(query, "unresolved"),

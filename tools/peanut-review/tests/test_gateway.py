@@ -103,7 +103,7 @@ def test_remote_cli_full_reviewer_command_matrix(live_gateway, tmp_path: Path):
     anchored = _remote_cli(
         session_dir, url, token,
         "add-comment", "--file", "code.py", "--line", "2",
-        "--severity", "warning", "--body-file", str(body_file),
+        "--body-file", str(body_file),
         "--author", "not-the-capability-agent",
     )
     assert anchored.returncode == 0, anchored.stderr
@@ -111,14 +111,14 @@ def test_remote_cli_full_reviewer_command_matrix(live_gateway, tmp_path: Path):
     anchored_id = store.read_all_comments(session_dir)[0].id
     global_result = _remote_cli(
         session_dir, url, token,
-        "add-global-comment", "--severity", "feedback", "--body", "global",
+        "add-global-comment", "--body", "global",
     )
     assert global_result.returncode == 0, global_result.stderr
     assert global_result.stdout.strip().endswith("(global)")
     reply = _remote_cli(
         session_dir, url, token,
         "add-comment", "--reply-to", anchored_id,
-        "--severity", "suggestion", "--body", "reply",
+        "--body", "reply",
     )
     assert reply.returncode == 0, reply.stderr
     assert f"(reply to {anchored_id})" in reply.stdout

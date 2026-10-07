@@ -21,18 +21,6 @@ def _short_id(prefix: str = "c") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-class Severity(str, Enum):
-    CRITICAL = "critical"
-    WARNING = "warning"
-    SUGGESTION = "suggestion"
-    NIT = "nit"
-    # Non-actionable observations: questions, praise, FYI notes, and
-    # imported comments from external systems (e.g. GitHub) that carry no
-    # severity of their own. NOT a fallback for "I'm not sure how serious"
-    # — pick a real severity if you're asking for a change.
-    FEEDBACK = "feedback"
-
-
 class CommentCategory(str, Enum):
     COMMENT = "comment"
     APPROVE = "approve"
@@ -146,7 +134,6 @@ class Comment:
     end_line: int | None = None
     side: str = "right"
     body: str = ""
-    severity: str = Severity.SUGGESTION.value
     # GitHub review-level semantics. `approve` and `request-changes` are only
     # valid on top-level global comments; anchored comments and replies remain
     # ordinary review comments.
@@ -178,7 +165,7 @@ class Comment:
     external_url: str | None = None
     external_in_reply_to: str | None = None
     external_synced_body: str | None = None
-    # Edit history — `versions` stacks prior {body, severity, edited_at,
+    # Edit history — `versions` stacks prior {body, category, edited_at,
     # edited_by} snapshots in chronological order (versions[0] is the
     # original creator's state). edited_at/edited_by reflect the most recent
     # edit, or None on a never-edited comment.
@@ -197,6 +184,12 @@ class Comment:
         d = json.loads(line)
         if "category" in d:
             d["category"] = normalize_comment_category(d["category"])
+        # Old sessions remain readable without exposing retired metadata.
+        if "versions" in d:
+            d["versions"] = [
+                {k: v for k, v in version.items() if k != "severity"}
+                for version in d["versions"]
+            ]
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -204,7 +197,7 @@ class Comment:
 class Note:
     """A non-review report from a reviewer or curator.
 
-    Notes are intentionally separate from comments: they have no severity,
+    Notes are intentionally separate from comments: they have no review
     category, file anchor, resolution state, or GitHub synchronization fields.
     Use them for reports such as test execution and comment curation that
     should be visible in peanut-review but never pushed as PR review feedback.
@@ -295,9 +288,14 @@ class GitHubPR:
     base_sha: str = ""
     title: str = ""
     head_ref_name: str = ""
+    # None means an older session did not capture the description; "" is empty.
+    body: str | None = None
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in asdict(self).items() if v not in (None, "", 0)}
+        result = {k: v for k, v in asdict(self).items() if v not in (None, "", 0)}
+        if self.body is not None:
+            result["body"] = self.body
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> GitHubPR:

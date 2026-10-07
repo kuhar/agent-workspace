@@ -63,8 +63,6 @@
     ];
     if (s.unresolved_count)
       parts.push(`<span class="n warn">${s.unresolved_count}</span><span class="sub"> open</span>`);
-    if (s.critical_count)
-      parts.push(`<span class="n crit">${s.critical_count}</span><span class="sub"> crit</span>`);
     if (s.stale_count)
       parts.push(`<span class="n muted">${s.stale_count}</span><span class="sub"> stale</span>`);
     const counts = parts.join(" · ");

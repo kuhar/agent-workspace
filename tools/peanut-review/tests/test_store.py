@@ -30,16 +30,61 @@ def _make_session() -> str:
     return d
 
 
+def test_legacy_comments_preserve_history_and_state(tmp_path):
+    comments_dir = tmp_path / "comments"
+    comments_dir.mkdir()
+    legacy = {
+        "id": "c_legacy", "author": "vera", "file": "a.py", "line": 3,
+        "body": "This can lose data.", "severity": "critical",
+        "timestamp": "2026-01-01T00:00:00+00:00", "category": "comment",
+        "resolved": True, "resolved_by": "jakub", "stale": True,
+        "external_source": "github", "external_id": "123",
+        "external_url": "https://github.com/acme/repo/pull/1#discussion_r123",
+        "external_synced_body": "This can lose data.",
+        "edited_at": "2026-01-02T00:00:00+00:00", "edited_by": "jakub",
+        "versions": [{"body": "Earlier observation", "severity": "warning",
+                      "edited_at": None, "edited_by": None}],
+    }
+    reply = {
+        "id": "c_reply", "author": "vera", "file": "a.py", "line": 3,
+        "body": "Confirmed with a reproducer.", "reply_to": "c_legacy",
+        "severity": "feedback", "timestamp": "2026-01-03T00:00:00+00:00",
+    }
+    path = comments_dir / "vera.jsonl"
+    original = "\n".join(json.dumps(row) for row in (legacy, reply)) + "\n"
+    path.write_text(original)
+
+    parent, loaded_reply = read_all_comments(tmp_path)
+    assert path.read_text() == original  # Loading does not migrate old files.
+    for key, value in legacy.items():
+        if key not in {"severity", "versions"}:
+            assert getattr(parent, key) == value
+    assert parent.versions == [{"body": "Earlier observation",
+                               "edited_at": None, "edited_by": None}]
+    assert loaded_reply.reply_to == parent.id
+    assert "severity" not in json.loads(parent.to_json())
+
+    assert edit_comment(tmp_path, parent.id, body="Updated evidence", edited_by="vera")
+    updated, loaded_reply = read_all_comments(tmp_path)
+    assert updated.id == parent.id
+    assert updated.timestamp == parent.timestamp
+    assert updated.resolved and updated.stale
+    assert updated.external_url == parent.external_url
+    assert updated.external_synced_body == parent.external_synced_body
+    assert [v["body"] for v in updated.versions] == ["Earlier observation", parent.body]
+    assert all("severity" not in v for v in updated.versions)
+    assert loaded_reply.reply_to == updated.id
+
+
 def test_append_and_read():
     sd = _make_session()
-    c = Comment(author="vera", file="src/foo.cpp", line=42, body="Null check needed", severity="critical")
+    c = Comment(author="vera", file="src/foo.cpp", line=42, body="Null check needed")
     append_comment(sd, c)
 
     comments = read_agent_comments(sd, "vera")
     assert len(comments) == 1
     assert comments[0].id == c.id
     assert comments[0].file == "src/foo.cpp"
-    assert comments[0].severity == "critical"
 
 
 def test_multiple_agents():
@@ -84,14 +129,14 @@ def test_filter_notes_by_agent_and_since():
 
 def test_filter_comments():
     sd = _make_session()
-    append_comment(sd, Comment(author="vera", file="a.py", line=1, body="X", severity="critical"))
-    append_comment(sd, Comment(author="vera", file="b.py", line=2, body="Y", severity="nit"))
-    append_comment(sd, Comment(author="felix", file="a.py", line=5, body="Z", severity="warning"))
+    append_comment(sd, Comment(author="vera", file="a.py", line=1, body="X"))
+    append_comment(sd, Comment(author="vera", file="b.py", line=2, body="Y"))
+    append_comment(sd, Comment(author="felix", file="a.py", line=5, body="Z"))
 
     all_c = read_all_comments(sd)
     assert len(filter_comments(all_c, agent="vera")) == 2
     assert len(filter_comments(all_c, file="a.py")) == 2
-    assert len(filter_comments(all_c, severity="critical")) == 1
+    assert len(filter_comments(all_c)) == 3
 
 
 def test_filter_comments_since_id_returns_only_newer():
@@ -99,9 +144,9 @@ def test_filter_comments_since_id_returns_only_newer():
     old `--round N` filter. Same-second timestamps are handled by
     position-in-sorted-list, not raw timestamp comparison."""
     sd = _make_session()
-    a = Comment(author="vera", file="a.py", line=1, body="A", severity="nit")
-    b = Comment(author="felix", file="a.py", line=2, body="B", severity="nit")
-    c = Comment(author="vera", file="a.py", line=3, body="C", severity="nit")
+    a = Comment(author="vera", file="a.py", line=1, body="A")
+    b = Comment(author="felix", file="a.py", line=2, body="B")
+    c = Comment(author="vera", file="a.py", line=3, body="C")
     append_comment(sd, a)
     append_comment(sd, b)
     append_comment(sd, c)
@@ -224,7 +269,7 @@ def test_corrupt_line_recovery():
 def test_comment_round_trip_json():
     c = Comment(
         author="merlin", file="ir.mlir", line=10,
-        body="Check op semantics", severity="warning",
+        body="Check op semantics",
         end_line=15, head_sha="abc123",
     )
     line = c.to_json()
@@ -241,7 +286,7 @@ def test_empty_agent_file():
 
 def test_delete_marks_and_sets_metadata():
     sd = _make_session()
-    c = Comment(author="felix", file="a.py", line=1, body="bad take", severity="nit")
+    c = Comment(author="felix", file="a.py", line=1, body="bad take")
     append_comment(sd, c)
     assert delete_comment(sd, c.id, deleted_by="jakub") is True
 
@@ -352,8 +397,7 @@ def test_thread_for_returns_parent_then_replies_in_time_order():
 def test_global_comment_stores_with_empty_file_and_zero_line():
     """High-level / global comments use file="" and line=0 as the sentinel."""
     sd = _make_session()
-    g = Comment(author="vera", file="", line=0, body="scope concern",
-                severity="warning")
+    g = Comment(author="vera", file="", line=0, body="scope concern")
     append_comment(sd, g)
     cs = read_agent_comments(sd, "vera")
     assert len(cs) == 1
@@ -376,57 +420,49 @@ def test_reply_to_global_comment_is_rejected():
 
 def test_edit_rewrites_body_and_records_prior_version():
     sd = _make_session()
-    c = Comment(author="vera", file="a.py", line=1, body="v1", severity="nit")
+    c = Comment(author="vera", file="a.py", line=1, body="v1")
     append_comment(sd, c)
 
-    assert edit_comment(sd, c.id, body="v2", severity="warning",
+    assert edit_comment(sd, c.id, body="v2",
                         edited_by="jakub")
 
     [stored] = read_all_comments(sd)
     assert stored.id == c.id
     assert stored.body == "v2"
-    assert stored.severity == "warning"
     assert stored.edited_by == "jakub"
     assert stored.edited_at is not None
     assert len(stored.versions) == 1
     assert stored.versions[0]["body"] == "v1"
-    assert stored.versions[0]["severity"] == "nit"
     assert stored.versions[0]["edited_by"] is None  # original
 
 
 def test_multiple_edits_stack_versions_in_order():
     sd = _make_session()
-    c = Comment(author="vera", file="a.py", line=1, body="v1", severity="nit")
+    c = Comment(author="vera", file="a.py", line=1, body="v1")
     append_comment(sd, c)
     edit_comment(sd, c.id, body="v2", edited_by="jakub")
-    edit_comment(sd, c.id, severity="critical", edited_by="merlin")
+    edit_comment(sd, c.id, body="v3", edited_by="merlin")
 
     [stored] = read_all_comments(sd)
-    assert stored.body == "v2"
-    assert stored.severity == "critical"
+    assert stored.body == "v3"
     assert stored.edited_by == "merlin"
     assert len(stored.versions) == 2
-    # versions[0] = original (body=v1, severity=nit, no editor).
     assert stored.versions[0]["body"] == "v1"
-    assert stored.versions[0]["severity"] == "nit"
     assert stored.versions[0]["edited_by"] is None
-    # versions[1] = state after jakub's body edit (severity still nit).
     assert stored.versions[1]["body"] == "v2"
-    assert stored.versions[1]["severity"] == "nit"
     assert stored.versions[1]["edited_by"] == "jakub"
 
-
-def test_edit_only_severity_keeps_body():
+def test_edit_only_category_keeps_body():
     sd = _make_session()
-    c = Comment(author="vera", file="a.py", line=1, body="hi", severity="nit")
+    c = Comment(author="vera", file="", line=0, body="hi")
     append_comment(sd, c)
-    edit_comment(sd, c.id, severity="warning", edited_by="irene")
+    edit_comment(sd, c.id, category="approve", edited_by="irene")
 
     [stored] = read_all_comments(sd)
-    assert stored.body == "hi"  # unchanged
-    assert stored.severity == "warning"
+    assert stored.body == "hi"
+    assert stored.category == "approve"
+    assert stored.versions[0]["category"] == "comment"
     assert stored.edited_by == "irene"
-
 
 def test_edit_unknown_id_returns_false():
     sd = _make_session()

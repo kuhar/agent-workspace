@@ -1,11 +1,138 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from review_queue.github import GitHubClient, GitHubError
+from review_queue.github import GitHubClient, GitHubError, PullRequestNotFound
 from review_queue.models import ProjectConfig
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (1, b"", b"invalid character 'd' after object key"),
+        (1, b"", b"unexpected end of JSON input"),
+        (0, b'{"{"data":{}}', b""),
+    ],
+)
+async def test_malformed_json_retries_identical_read_with_private_cache(
+    monkeypatch, tmp_path, returncode, stdout, stderr
+):
+    cache = tmp_path / "shared-cache"
+    cache.mkdir()
+    poisoned = cache / "schema"
+    poisoned.write_bytes(b'{"{"data":{}}')
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setenv("GH_TOKEN", "test-credential")
+    calls = []
+    processes = [
+        Mock(returncode=returncode, communicate=AsyncMock(return_value=(stdout, stderr))),
+        Mock(returncode=0, communicate=AsyncMock(return_value=(b"[]", b""))),
+    ]
+
+    async def spawn(*command, **kwargs):
+        calls.append((command, kwargs["env"]))
+        if len(calls) == 2:
+            fresh = Path(kwargs["env"]["XDG_CACHE_HOME"])
+            assert fresh.is_dir() and not list(fresh.iterdir())
+        return processes[len(calls) - 1]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    command = ("gh", "pr", "list", "--search", "draft:false -author:@me", "--json", "number")
+    assert await GitHubClient()._run(*command) == "[]"
+    assert len(calls) == 2
+    assert calls[0] == (command, None)
+    assert calls[1][0] == command
+    retry_env = calls[1][1]
+    assert retry_env == dict(os.environ, XDG_CACHE_HOME=retry_env["XDG_CACHE_HOME"])
+    assert retry_env["XDG_CACHE_HOME"] != str(cache)
+    assert not Path(retry_env["XDG_CACHE_HOME"]).exists()
+    assert os.environ["XDG_CACHE_HOME"] == str(cache)
+    assert poisoned.read_bytes() == b'{"{"data":{}}'
+
+
+@pytest.mark.parametrize(
+    ("stderr", "attempts", "message"),
+    [
+        (b"invalid character 'd' after object key", 2, "fresh GitHub CLI cache retry failed"),
+        (b"HTTP 401: Bad credentials", 1, "gh pr list: HTTP 401"),
+        (b"API rate limit exceeded", 1, "gh pr list: API rate limit exceeded"),
+    ],
+)
+async def test_cache_retry_is_bounded_and_does_not_retry_auth_or_rate_errors(
+    monkeypatch, stderr, attempts, message
+):
+    process = Mock(returncode=1, communicate=AsyncMock(return_value=(b"", stderr)))
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(GitHubError, match=message):
+        await GitHubClient()._run("gh", "pr", "list")
+    assert spawn.await_count == attempts
+
+
+@pytest.mark.parametrize(
+    ("detail", "error_type"),
+    [
+        (
+            "GraphQL: Could not resolve to a PullRequest with the number of 12245. "
+            "(repository.pullRequest)",
+            PullRequestNotFound,
+        ),
+        ("GraphQL: Could not resolve to a Repository with the name 'owner/repo'.", GitHubError),
+        ("HTTP 401: Bad credentials", GitHubError),
+        ("API rate limit exceeded", GitHubError),
+        (
+            "GraphQL: Could not resolve to a PullRequest with the number of 12245. "
+            "(repository.pullRequest)\nHTTP 502: Bad Gateway",
+            GitHubError,
+        ),
+    ],
+)
+async def test_only_confirmed_missing_pr_is_classified_as_not_found(
+    monkeypatch, project, detail, error_type
+):
+    process = Mock(returncode=1, communicate=AsyncMock(return_value=(b"", detail.encode())))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    with pytest.raises(error_type) as raised:
+        await GitHubClient().view(project, "12245")
+    assert type(raised.value) is error_type
+
+
+async def test_missing_pr_after_fresh_cache_retry_preserves_error_type(monkeypatch, project):
+    detail = (
+        b"GraphQL: Could not resolve to a PullRequest with the number of 12245. "
+        b"(repository.pullRequest)"
+    )
+    processes = [
+        Mock(returncode=1, communicate=AsyncMock(return_value=(b"", b"invalid character 'x'"))),
+        Mock(returncode=1, communicate=AsyncMock(return_value=(b"", detail))),
+    ]
+    spawn = AsyncMock(side_effect=processes)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(PullRequestNotFound):
+        await GitHubClient().view(project, "12245")
+    assert spawn.await_count == 2
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_timeout_or_cancellation_reaps_command_without_retry(monkeypatch, cancelled):
+    process = Mock(
+        returncode=None,
+        communicate=AsyncMock(side_effect=asyncio.CancelledError if cancelled else TimeoutError),
+        wait=AsyncMock(),
+    )
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(asyncio.CancelledError if cancelled else GitHubError):
+        await GitHubClient()._run("gh", "pr", "list")
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
+    spawn.assert_awaited_once()
 
 
 def approval_payload(head="a" * 40, nodes=()):
@@ -187,6 +314,10 @@ async def test_approvals_paginate_and_reject_partial_or_changed_responses(projec
     [
         ([{"filename": "docs/emulation/guide.md"}], False),
         ([{"filename": "emulation-other/foo.cpp"}], False),
+        ([{"filename": "website-other/App.jsx"}], False),
+        ([{"filename": "docs/website/guide.md"}], False),
+        ([{"filename": "website/src/App.jsx"}], True),
+        ([{"filename": "emulation/rocjitsu/website/src/App.jsx"}], True),
         ([{"filename": "emulation/foo.cpp", "status": "removed"}], True),
         ([{"filename": "docs/foo.cpp", "previous_filename": "emulation/foo.cpp"}], True),
         ([{"filename": "emulation/foo.cpp", "previous_filename": "docs/foo.cpp"}], True),
@@ -196,7 +327,7 @@ async def test_approvals_paginate_and_reject_partial_or_changed_responses(projec
 async def test_required_directory_filters_list_and_manual_view(project, files, allowed):
     from dataclasses import replace
 
-    project = replace(project, include_paths=("emulation/",))
+    project = replace(project, include_paths=("emulation/", "website/"))
     client = FileGitHub(files)
     poll = await client.list_project(project)
     assert poll.query_numbers == {42}
@@ -225,6 +356,52 @@ async def test_path_filter_reads_later_pages_and_invalidates_cache(project):
     client.pages[-1] = [{"filename": "emulation/last.cpp"}]
     assert (await client.list_project(project)).records[0].path_filter_passed
     assert client.file_calls == 3
+
+
+@pytest.mark.parametrize(
+    "matching_file",
+    [
+        {"filename": "emulation/foo.cpp"},
+        {"filename": "emulation/foo.cpp", "status": "removed"},
+        {"filename": "docs/foo.cpp", "previous_filename": "emulation/foo.cpp"},
+    ],
+)
+async def test_capped_file_list_accepts_confirmed_match_and_caches(project, matching_file):
+    from dataclasses import replace
+
+    project = replace(project, include_paths=("emulation/",))
+    client = FileGitHub([{"filename": f"docs/{n}"} for n in range(2999)] + [matching_file])
+    client.item["changedFiles"] = 3019
+    assert (await client.list_project(project)).records[0].path_filter_passed
+    assert (await client.view(project, 42)).path_filter_passed
+    assert client.file_calls == 1
+
+
+@pytest.mark.parametrize("failure", ["no-match", "changed", "invalid", "duplicate"])
+async def test_capped_file_list_does_not_hide_missing_evidence_or_bad_data(project, failure):
+    from dataclasses import replace
+
+    project = replace(project, include_paths=("emulation/",))
+    client = FileGitHub(
+        [{"filename": "emulation/foo.cpp"}]
+        + [{"filename": f"docs/{n}"} for n in range(2999)]
+    )
+    client.item["changedFiles"] = 3019
+    if failure == "no-match":
+        client.pages[0][0] = {"filename": "docs/foo.cpp"}
+        reason = "3000-file limit without a matching path"
+    elif failure == "changed":
+        client.change_during_read = True
+        reason = "PR changed"
+    elif failure == "invalid":
+        client.pages[-1][-1] = {"filename": None}
+        reason = "invalid PR filename"
+    else:
+        client.pages[-1][-1] = client.pages[0][0]
+        reason = "duplicate entries"
+    with pytest.raises(GitHubError, match=reason):
+        await client.list_project(project)
+    assert not client._path_cache
 
 
 @pytest.mark.parametrize("failure", ["incomplete", "changed", "invalid", "duplicate"])

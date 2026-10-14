@@ -4,4 +4,4 @@
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 export PYTHONPATH="${PACKAGE_DIR}${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 -m peanut_review "$@"
+exec "${PR_PYTHON:-python3}" -m peanut_review "$@"

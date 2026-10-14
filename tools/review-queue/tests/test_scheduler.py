@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from review_queue.github import GitHubPoll
+from review_queue.github import GitHubError, GitHubPoll, PullRequestNotFound
 from review_queue.launcher import LauncherClient, LauncherError, Protocol
 from review_queue.models import ProjectConfig, PullRequest, QueueConfig
 from review_queue.scheduler import QueueError, Scheduler
@@ -161,6 +161,82 @@ class MergedGitHub:
     async def view(self, project: ProjectConfig, spec: str | int) -> PullRequest:
         self.views.append(int(spec))
         return replace(record(project), state="MERGED")
+
+
+async def test_discovered_pr_stays_queued_after_review_request_is_consumed(config, project):
+    class ReviewedGitHub(MergedGitHub):
+        current = record(project)
+
+        async def view(self, candidate, spec):
+            self.views.append(int(spec))
+            return self.current
+
+    github = ReviewedGitHub()
+    scheduler = Scheduler(config, github=github)
+    scheduler.db.set_mode("manual")
+    scheduler.db.apply_poll(
+        project, [github.current], query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    original_job = scheduler.db.queue_items()[0].job_id
+    scheduler.db.close()
+    scheduler = Scheduler(config, github=github)
+    try:
+        outcome = (await scheduler.poll_once())[project.name]
+        assert outcome.left_query == 0
+        assert scheduler.db.queue_items()[0].job_id == original_job
+        assert scheduler.db.next_ready() is None
+        assert scheduler.db.manual_watches(project.name) == ()
+
+        github.current = replace(github.current, head_sha="b" * 40)
+        outcome = (await scheduler.poll_once())[project.name]
+        assert outcome.changed_heads == 1
+        assert scheduler.db.job_row(original_job)["status"] == "superseded"
+        queued = scheduler.db.queue_items()[0]
+        assert queued.head_sha == github.current.head_sha
+        assert scheduler.db.next_ready() is None
+
+        scheduler.db.update_job(queued.job_id, status="succeeded")
+        assert (await scheduler.poll_once())[project.name].queued == 0
+        assert not scheduler.db.queue_items()
+        assert github.views == [12, 12, 12]
+    finally:
+        scheduler.db.close()
+
+
+@pytest.mark.parametrize("current_state", ["OPEN", "MERGED"])
+async def test_poll_recovers_waiting_work_dropped_by_old_query_filter(
+    config, project, current_state
+):
+    class DroppedGitHub(MergedGitHub):
+        async def view(self, candidate, spec):
+            self.views.append(int(spec))
+            return replace(record(candidate), state=current_state)
+
+    scheduler = Scheduler(config, github=DroppedGitHub())
+    scheduler.db.set_mode("manual")
+    scheduler.db.apply_poll(
+        project, [record(project)], query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    # Persist the state left by the old filter, as in PR 12937.
+    scheduler.db.apply_poll(
+        project, [], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
+    )
+    scheduler.db.close()
+    scheduler = Scheduler(config, github=DroppedGitHub())
+    try:
+        assert scheduler.db.poll_followups(project.name) == (12,)
+        outcome = await scheduler._poll_project(project)
+        assert outcome.queued == (1 if current_state == "OPEN" else 0)
+        assert scheduler.db.next_ready() is None
+        if current_state == "OPEN":
+            queued = scheduler.db.queue_items()[0]
+            assert not queued.manual_enqueued
+            assert queued.head_sha == record(project).head_sha
+            assert (await scheduler._poll_project(project)).queued == 0
+            scheduler.db.ignore_pr(project.repo, 12)
+        assert scheduler.db.poll_followups(project.name) == ()
+    finally:
+        scheduler.db.close()
 
 
 class GapLauncher(FakeLauncher):
@@ -384,6 +460,11 @@ async def test_failed_cleanup_backs_off_without_reordering(full_wrapper_pool, mo
     assert [row["last_used_at"] for row in candidates] == [row["last_used_at"] for row in wrappers]
     assert all(row["state"] == "cleanup_failed" for row in candidates)
     assert "retry every 60s" in scheduler.snapshot().dispatch_blocked_reason
+    for row in candidates:
+        assert (
+            f"#{row['pr_number']}: {row['cleanup_error']}"
+            in scheduler.snapshot().dispatch_blocked_reason
+        )
     # Explicit recycling can immediately retry after the user fixes the blocker.
     monkeypatch.setattr(scheduler.launcher, "cleanup_check", FakeLauncher().cleanup_check)
     monkeypatch.setattr(scheduler.launcher, "cleanup", FakeLauncher().cleanup)
@@ -461,6 +542,163 @@ async def test_manual_include_uses_url_repository_with_multiple_projects(
         await scheduler.add_manual("12")
 
 
+@pytest.fixture
+def number_lookup(config, project, tmp_path):
+    projects = (
+        replace(project, include_paths=("emulation/",)),
+        replace(
+            project,
+            name="llvm",
+            repo="llvm/llvm-project",
+            wrapper_root=tmp_path / "llvm-wrappers",
+            include_paths=("llvm/",),
+        ),
+    )
+
+    class LookupGitHub:
+        def __init__(self):
+            self.outcomes = {project.repo: record(project) for project in projects}
+            self.calls = []
+
+        async def view(self, project, spec):
+            self.calls.append((project, spec))
+            result = self.outcomes[project.repo]
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+    github = LookupGitHub()
+    scheduler = Scheduler(replace(config, projects=projects), github=github)
+    yield scheduler, github, projects
+    scheduler.db.close()
+
+
+@pytest.mark.parametrize("winner", [0, 1])
+@pytest.mark.parametrize("other_state", ["CLOSED", "MERGED", "missing"])
+async def test_number_resolves_only_open_match_and_bypasses_path_filters(
+    number_lookup, winner, other_state
+):
+    scheduler, github, projects = number_lookup
+    other = projects[1 - winner]
+    github.outcomes[other.repo] = (
+        PullRequestNotFound("no PR")
+        if other_state == "missing"
+        else replace(record(other), state=other_state)
+    )
+    await scheduler.add_manual(" 12 ")
+    queued = scheduler.snapshot().queue
+    assert len(queued) == 1
+    assert queued[0].repo == projects[winner].repo
+    assert queued[0].head_sha == "a" * 40
+    assert queued[0].manual_enqueued
+    assert scheduler.db.manual_watches(projects[winner].name) == (12,)
+    assert scheduler.db.manual_watches(other.name) == ()
+    assert {project.repo for project, _ in github.calls} == {p.repo for p in projects}
+    assert all(not project.include_paths and spec == "12" for project, spec in github.calls)
+
+
+@pytest.mark.parametrize("draft", [False, True])
+async def test_number_with_multiple_open_matches_is_ambiguous(number_lookup, draft):
+    scheduler, github, projects = number_lookup
+    github.outcomes[projects[1].repo] = replace(record(projects[1]), is_draft=draft)
+    with pytest.raises(QueueError, match="multiple repositories") as raised:
+        await scheduler.add_manual("12")
+    assert all(p.repo in str(raised.value) for p in projects)
+    assert "full GitHub PR URL" in str(raised.value)
+    assert not scheduler.snapshot().queue
+    assert all(not scheduler.db.manual_watches(p.name) for p in projects)
+
+
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED", "missing"])
+async def test_number_without_unique_match_does_not_enqueue(number_lookup, state):
+    scheduler, github, projects = number_lookup
+    for project in projects:
+        github.outcomes[project.repo] = (
+            PullRequestNotFound("no PR")
+            if state == "missing"
+            else replace(record(project), state=state)
+        )
+    reason = "no PR #12" if state == "missing" else "multiple repositories"
+    with pytest.raises(QueueError, match=reason):
+        await scheduler.add_manual("12")
+    assert not scheduler.snapshot().queue
+    assert all(not scheduler.db.manual_watches(p.name) for p in projects)
+
+
+@pytest.mark.parametrize("state,draft", [("CLOSED", False), ("MERGED", False), ("OPEN", True)])
+async def test_number_resolving_only_to_inactive_pr_can_enqueue(number_lookup, state, draft):
+    scheduler, github, projects = number_lookup
+    github.outcomes[projects[0].repo] = replace(record(projects[0]), state=state, is_draft=draft)
+    github.outcomes[projects[1].repo] = PullRequestNotFound("no PR")
+    await scheduler.add_manual("12")
+    assert scheduler.db.next_ready().repo == projects[0].repo
+    assert scheduler.db.manual_watches(projects[0].name) == (12,)
+
+
+@pytest.mark.parametrize(
+    "state,draft", [("OPEN", False), ("CLOSED", False), ("MERGED", False), ("OPEN", True)]
+)
+@pytest.mark.parametrize("use_url", [False, True])
+async def test_manual_include_survives_poll_and_dispatch(config, project, state, draft, use_url):
+    included = replace(record(project), state=state, is_draft=draft)
+
+    class LookupGitHub:
+        async def view(self, _project, _spec):
+            return included
+
+        async def list_project(self, _project):
+            return GitHubPoll(records=(), query_numbers=frozenset())
+
+    class ManualLauncher(FakeLauncher):
+        def __init__(self):
+            super().__init__()
+            self.operations = []
+
+        async def run_logged(self, **kwargs):
+            assert kwargs["env"]["REVIEW_QUEUE_MANUAL_INCLUDE"] == "1"
+            self.operations.append(kwargs["operation"])
+            return await super().run_logged(**kwargs)
+
+    launcher = ManualLauncher()
+    scheduler = Scheduler(config, github=LookupGitHub(), launcher=launcher)
+    try:
+        scheduler.db.set_mode("manual")
+        await scheduler.add_manual(included.url if use_url else "12")
+        await scheduler.poll_once()
+        item = scheduler.db.next_ready()
+        assert item is not None
+        await scheduler._dispatch_available()
+        await asyncio.gather(*scheduler._job_tasks.values())
+        assert scheduler.db.job_row(item.job_id)["status"] == "succeeded"
+        assert launcher.operations == ["prepare", "run"]
+        await scheduler.poll_once()
+        assert not scheduler.db.queue_items()
+    finally:
+        scheduler.db.close()
+
+
+@pytest.mark.parametrize(
+    "error", ["HTTP 401: Bad credentials", "API rate limit exceeded", "timeout"]
+)
+async def test_lookup_error_cannot_make_an_open_match_appear_unique(number_lookup, error):
+    scheduler, github, projects = number_lookup
+    github.outcomes[projects[1].repo] = GitHubError(error)
+    with pytest.raises(QueueError, match="cannot resolve PR #12") as raised:
+        await scheduler.add_manual("12")
+    assert projects[1].repo in str(raised.value)
+    assert error in str(raised.value)
+    assert not scheduler.snapshot().queue
+    assert all(not scheduler.db.manual_watches(p.name) for p in projects)
+
+
+async def test_cancelled_number_lookup_does_not_enqueue(number_lookup):
+    scheduler, github, projects = number_lookup
+    github.outcomes[projects[1].repo] = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler.add_manual("12")
+    assert not scheduler.snapshot().queue
+
+
 async def test_stale_project_does_not_block_healthy_project(
     config: QueueConfig, project: ProjectConfig, tmp_path: Path
 ) -> None:
@@ -484,6 +722,37 @@ async def test_stale_project_does_not_block_healthy_project(
     await scheduler._dispatch_available()
     await next(iter(scheduler._job_tasks.values()))
     assert scheduler.db.wrappers()[0].project == second.name
+
+
+async def test_failed_poll_holds_work_and_later_poll_resumes_dispatch(config, project):
+    class RecoveringGitHub:
+        fail = True
+
+        async def list_project(self, candidate):
+            if self.fail:
+                raise GitHubError("gh pr list: invalid JSON (fresh GitHub CLI cache retry failed)")
+            return GitHubPoll(records=(record(candidate),), query_numbers=frozenset({12}))
+
+    github = RecoveringGitHub()
+    scheduler = Scheduler(config, github=github, launcher=FakeLauncher())
+    scheduler.db.apply_poll(
+        project, (record(project),), query_numbers={12}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    job_id = scheduler.db.queue_items()[0].job_id
+    result = await scheduler.poll_once()
+    assert isinstance(result[project.name], GitHubError)
+    assert scheduler.db.stale_projects() == {project.name}
+    await scheduler._dispatch_available()
+    assert not scheduler._job_tasks
+    assert scheduler.db.job_row(job_id)["status"] == "queued"
+
+    github.fail = False
+    result = await scheduler.poll_once()
+    assert not isinstance(result[project.name], Exception)
+    assert not scheduler.db.stale_projects()
+    await scheduler._dispatch_available()
+    await next(iter(scheduler._job_tasks.values()))
+    assert scheduler.db.job_row(job_id)["status"] == "succeeded"
 
 
 async def test_cancel_during_prepare_run_gap_is_sticky(
@@ -710,7 +979,7 @@ async def test_reconcile_waits_for_unidentified_supervisor_shutdown(
         os.kill(child_pid, 0)
 
 
-async def test_path_check_failure_holds_dispatch_and_manual_inclusion(config, project):
+async def test_path_check_failure_holds_dispatch_but_allows_explicit_inclusion(config, project):
     from review_queue.github import GitHubError
 
     project = replace(project, include_paths=("emulation/",))
@@ -724,6 +993,7 @@ async def test_path_check_failure_holds_dispatch_and_manual_inclusion(config, pr
             raise GitHubError("incomplete PR file list")
 
         async def view(self, _project, _spec):
+            assert _project.include_paths == ()
             return replace(included, path_filter_passed=False)
 
     scheduler = Scheduler(config, github=FailingFiles(), launcher=FakeLauncher())
@@ -735,8 +1005,8 @@ async def test_path_check_failure_holds_dispatch_and_manual_inclusion(config, pr
     await scheduler._dispatch_available()
     assert not scheduler._job_tasks
     assert scheduler.db.stale_projects() == frozenset({project.name})
-    with pytest.raises(ValueError, match="include_paths"):
-        await scheduler.add_manual("12")
+    await scheduler.add_manual("12")
+    assert scheduler.db.manual_watches(project.name) == (12,)
 
 
 @pytest.mark.parametrize("operation", ["prepare", "run"])

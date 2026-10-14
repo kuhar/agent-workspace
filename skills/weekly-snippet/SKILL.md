@@ -13,7 +13,7 @@ Generate a concise weekly activity summary grouped by project and task, using th
 
 1. Run the activity script to get structured JSON:
    ```bash
-   /home/jakub/jakub-env/agent-workspace/scripts/my-activity --days 7 --json --detailed
+   $JAKUB_ENV_DIR/agent-workspace/scripts/my-activity --days 7 --json --detailed
    ```
 2. If the user specifies a different time range, adjust `--days` accordingly.
 

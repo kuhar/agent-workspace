@@ -38,14 +38,14 @@ def process_start_ticks(pid: int) -> int | None:
         # final ')' start at proc field 3. Start time is field 22.
         tail = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         return int(tail[19])
-    except (FileNotFoundError, PermissionError, ValueError, IndexError):
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError, IndexError):
         return None
 
 
 def process_has_token(pid: int, token: str) -> bool:
     try:
         entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
         return False
     expected = f"REVIEW_QUEUE_OWNER_TOKEN={token}".encode()
     return expected in entries

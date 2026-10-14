@@ -298,57 +298,70 @@ def test_leaving_query_cancels_waiting_but_manual_retry_is_allowed(
     assert db.job_row(retry)["attempt"] == 2
 
 
-def test_merged_manual_pr_leaves_queue_and_watch_set(
-    tmp_path: Path, project: ProjectConfig
-) -> None:
+@pytest.mark.parametrize("manual_include", [False, True])
+@pytest.mark.parametrize("state,draft", [("CLOSED", False), ("MERGED", False), ("OPEN", True)])
+def test_pr_state_changes_only_disqualify_automatic_work(
+    tmp_path, project, manual_include, state, draft
+):
     db = database(tmp_path, project)
     opened = pr(project, 18, head="e" * 40)
-    db.set_manual_watch(opened)
+    if manual_include:
+        db.set_manual_watch(opened)
+    else:
+        db.apply_poll(
+            project, [opened], query_numbers={18}, bootstrap_hours=24, push_quiet_seconds=0
+        )
     job_id = db.queue_items()[0].job_id
-
-    outcome = db.apply_poll(
-        project,
-        (replace(opened, state="MERGED"),),
-        query_numbers=set(),
-        bootstrap_hours=24,
-        push_quiet_seconds=0,
-    )
-
-    assert outcome.left_query == 1
-    assert db.queue_items() == ()
-    assert db.manual_watches(project.name) == ()
-    assert db.job_row(job_id)["status"] == "ineligible"
-    assert db.job_row(job_id)["error"] == "PR merged"
-    with pytest.raises(ValueError, match="not open"):
-        db.enqueue_current(project.repo, 18)
-
-
-def test_draft_manual_pr_remains_watched_until_it_returns(
-    tmp_path: Path, project: ProjectConfig
-) -> None:
+    db.close()
     db = database(tmp_path, project)
-    opened = pr(project, 19, head="f" * 40)
-    db.set_manual_watch(opened)
-
-    db.apply_poll(
-        project,
-        (replace(opened, is_draft=True),),
-        query_numbers=set(),
-        bootstrap_hours=24,
-        push_quiet_seconds=0,
-    )
-    assert db.queue_items() == ()
-    assert db.manual_watches(project.name) == (19,)
-
+    changed = replace(opened, state=state, is_draft=draft)
     outcome = db.apply_poll(
-        project,
-        (opened,),
-        query_numbers=set(),
-        bootstrap_hours=24,
-        push_quiet_seconds=0,
+        project, [changed], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
     )
-    assert outcome.queued == 1
-    assert db.queue_items()[0].number == 19
+    assert outcome.left_query == (0 if manual_include else 1)
+    assert db.manual_watches(project.name) == ((18,) if manual_include else ())
+    assert db.job_row(job_id)["status"] == ("queued" if manual_include else "ineligible")
+    if manual_include:
+        assert db.next_ready().job_id == job_id
+        assert db.enqueue_current(project.repo, 18) == job_id
+        db.update_job(job_id, status="failed")
+        retry = db.enqueue_current(project.repo, 18)
+        assert db.job_row(retry)["attempt"] == 2
+        db.ignore_pr(project.repo, 18)
+        db.apply_poll(
+            project, [changed], query_numbers={18}, bootstrap_hours=24, push_quiet_seconds=0
+        )
+        assert not db.queue_items()
+        assert not db.manual_watches(project.name)
+        db.set_manual_watch(changed)
+        assert db.next_ready().head_sha == changed.head_sha
+    else:
+        assert not db.queue_items()
+        with pytest.raises(ValueError, match="not open"):
+            db.enqueue_current(project.repo, 18)
+    db.close()
+
+
+@pytest.mark.parametrize("state,draft", [("CLOSED", False), ("MERGED", False), ("OPEN", True)])
+def test_manually_included_pr_can_resume_after_restart(tmp_path, project, state, draft):
+    project = replace(project, include_paths=("emulation/",))
+    db = database(tmp_path, project)
+    record = replace(pr(project, 1, head="a" * 40), state=state, is_draft=draft)
+    db.set_manual_watch(record)
+    db.set_mode("manual")
+    db.update_job(1, status="running")
+    db.mark_cancelling(1, resume_on_restart=True)
+    db.update_job(1, status="cancelled")
+    db.close()
+    db = database(tmp_path, project)
+    db.apply_poll(
+        project, [record], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
+    )
+    assert db.resume_interrupted_jobs(project.name) == 1
+    assert db.next_ready().head_sha == record.head_sha
+    assert db.next_ready().manual_enqueued
+    assert db.resume_interrupted_jobs(project.name) == 0
+    db.close()
 
 
 def test_new_head_reports_completed_review_count(tmp_path: Path, project: ProjectConfig) -> None:
@@ -517,33 +530,30 @@ def test_seed_rejects_project_repository_identity_change(
         db.seed((changed,), start_paused=False)
 
 
-def test_path_filter_blocks_automatic_manual_and_retry_until_matching_push(tmp_path, project):
+def test_path_filter_blocks_automatic_and_retry_until_matching_push(tmp_path, project):
     project = replace(project, include_paths=("emulation/",))
     db = database(tmp_path, project)
     outside = replace(pr(project, 42, head="a" * 40), path_filter_key=project.path_filter_key)
     db.apply_poll(project, [outside], query_numbers={42}, bootstrap_hours=24, push_quiet_seconds=0)
     assert not db.queue_items()
     with pytest.raises(ValueError, match="include_paths"):
-        db.set_manual_watch(outside)
-    with pytest.raises(ValueError, match="include_paths"):
         db.enqueue_current(project.repo, 42)
     included = replace(outside, head_sha="b" * 40, path_filter_passed=True)
     db.apply_poll(project, [included], query_numbers={42}, bootstrap_hours=24, push_quiet_seconds=0)
     assert db.next_ready().head_sha == included.head_sha
-    db.set_manual_watch(included)
     outside_again = replace(outside, head_sha="c" * 40)
     db.apply_poll(
-        project, [outside_again], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
+        project, [outside_again], query_numbers={42}, bootstrap_hours=24, push_quiet_seconds=0
     )
     assert not db.queue_items()
-    assert db.manual_watches(project.name) == (42,)
+    assert db.manual_watches(project.name) == ()
     assert db.connection.execute("SELECT ignored FROM pull_requests").fetchone()[0] == 0
     assert all(row[0] != "queued" for row in db.connection.execute("SELECT status FROM jobs"))
     with pytest.raises(ValueError, match="include_paths"):
         db.enqueue_current(project.repo, 42)
     included_again = replace(included, head_sha="d" * 40)
     db.apply_poll(
-        project, [included_again], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
+        project, [included_again], query_numbers={42}, bootstrap_hours=24, push_quiet_seconds=0
     )
     assert db.next_ready().head_sha == included_again.head_sha
 
@@ -566,4 +576,49 @@ def test_enabling_or_changing_path_filter_holds_old_queue_until_rechecked(tmp_pa
     db = database(tmp_path, replace(project, include_paths=("other/",)))
     assert db.next_ready() is None
     with pytest.raises(ValueError, match="include_paths"):
-        db.set_manual_watch(checked)
+        db.enqueue_current(project.repo, 42)
+
+
+def test_explicit_inclusion_bypasses_paths_across_poll_restart_push_and_retry(tmp_path, project):
+    project = replace(project, include_paths=("emulation/",))
+    db = database(tmp_path, project)
+    outside = replace(pr(project, 42, head="a" * 40), path_filter_key=project.path_filter_key)
+    db.set_manual_watch(outside)
+    first = db.next_ready()
+    assert first is not None
+    db.apply_poll(project, [outside], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0)
+    assert db.next_ready().job_id == first.job_id
+    db.update_job(first.job_id, status="running")
+    db.mark_cancelling(first.job_id, resume_on_restart=True)
+    db.update_job(first.job_id, status="cancelled")
+    db.close()
+
+    changed_filter = replace(project, include_paths=("website/",))
+    db = database(tmp_path, changed_filter)
+    db.apply_poll(
+        changed_filter, [outside], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
+    )
+    assert db.resume_interrupted_jobs(project.name) == 1
+    assert db.resume_interrupted_jobs(project.name) == 0
+    resumed = db.next_ready()
+    assert resumed.head_sha == outside.head_sha
+    db.update_job(resumed.job_id, status="failed")
+    assert db.enqueue_current(project.repo, 42) != resumed.job_id
+    db.set_mode("manual")
+    pushed = replace(outside, head_sha="b" * 40)
+    db.apply_poll(
+        changed_filter, [pushed], query_numbers=set(), bootstrap_hours=24, push_quiet_seconds=0
+    )
+    assert db.manual_watches(project.name) == (42,)
+    assert db.queue_items()[0].head_sha == pushed.head_sha
+    assert db.next_ready() is None  # A new head still needs manual enqueue in manual mode.
+    db.enqueue_current(project.repo, 42)
+    assert db.next_ready().head_sha == pushed.head_sha
+    db.ignore_pr(project.repo, 42)
+    assert db.manual_watches(project.name) == ()
+    db.apply_poll(
+        changed_filter, [pushed], query_numbers={42}, bootstrap_hours=24, push_quiet_seconds=0
+    )
+    assert not db.queue_items()
+    with pytest.raises(ValueError, match="include_paths"):
+        db.enqueue_current(project.repo, 42)

@@ -19,7 +19,7 @@ Environment overrides:
   BUILD_TARGETS   default: check-mlir
   DEFAULT_REPO    default: llvm/llvm-project
   FETCH_REMOTE    default: origin
-  PR_BIN          default: $HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review
+  PR_BIN          default: Peanut beside this launcher; override with PR_BIN
   REVIEW_WAIT_TIMEOUT default: reviewAgentTimeoutSeconds from the config (900)
   ALLOW_DIRTY=1   allow switching with tracked local changes
 EOF
@@ -64,14 +64,17 @@ if [[ -z "$PR_SPEC" ]]; then
   exit 2
 fi
 
-REVIEW_PARENT="${REVIEW_PARENT:-$HOME/llvm/review}"
+REVIEW_PARENT="${REVIEW_PARENT:-${LLVMS:-$HOME/llvm}/review}"
 WORKSPACE="${WORKSPACE:-$REVIEW_PARENT/llvm-project}"
 BUILD_DIR="${BUILD_DIR:-$REVIEW_PARENT/build}"
 BUILD_TARGETS="${BUILD_TARGETS:-check-mlir}"
 CONFIG="$REVIEW_PARENT/.peanut-review.json"
 DEFAULT_REPO="${DEFAULT_REPO:-llvm/llvm-project}"
 FETCH_REMOTE="${FETCH_REMOTE:-origin}"
-PR_BIN="${PR_BIN:-$HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review}"
+AGENT_WORKSPACE_DIR="${AGENT_WORKSPACE_DIR:-${JAKUB_ENV_DIR:+$JAKUB_ENV_DIR/agent-workspace}}"
+AGENT_WORKSPACE_DIR="${AGENT_WORKSPACE_DIR:-$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]}")")")}"
+JAKUB_ENV_DIR="${JAKUB_ENV_DIR:-$(dirname "$AGENT_WORKSPACE_DIR")}"
+PR_BIN="${PR_BIN:-$AGENT_WORKSPACE_DIR/tools/peanut-review/bin/peanut-review}"
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then

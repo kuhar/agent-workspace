@@ -279,6 +279,11 @@ def test_remote_run_uses_same_cli_and_cleans_staged_secrets(tmp_path: Path, monk
 
 def test_remote_cursor_uses_launch_private_runtime(tmp_path: Path, monkeypatch):
     session_dir, payload, server, thread = _probe_fixture(tmp_path, monkeypatch)
+    remote_home = tmp_path / "remote user"
+    (remote_home / ".codex").mkdir(parents=True)
+    (remote_home / ".codex" / "AGENTS.md").write_text("Use ~/manuals for references.\n")
+    monkeypatch.setenv("HOME", str(remote_home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     token = gateway.issue_capability(
         session_dir, agent="remote", launch_id="cursor-run", ttl_seconds=300,
     )
@@ -290,6 +295,8 @@ def test_remote_cursor_uses_launch_private_runtime(tmp_path: Path, monkeypatch):
         "keys = ['HOME', 'CURSOR_CONFIG_DIR', 'CURSOR_DATA_DIR', "
         "'XDG_CONFIG_HOME', 'PEANUT_CURSOR_HOME']\n"
         "(out / 'cursor-env.json').write_text(json.dumps({k: os.environ[k] for k in keys}))\n"
+        "prompt = pathlib.Path(sys.argv[sys.argv.index('--prompt-file') + 1]).read_text()\n"
+        "(out / 'captured-prompt.txt').write_text(prompt)\n"
     )
     fake_wrapper.chmod(0o755)
     monkeypatch.setattr(
@@ -326,6 +333,10 @@ def test_remote_cursor_uses_launch_private_runtime(tmp_path: Path, monkeypatch):
     assert captured["CURSOR_DATA_DIR"] == captured["CURSOR_CONFIG_DIR"]
     assert captured["PEANUT_CURSOR_HOME"] == str(cursor_home)
     assert captured["XDG_CONFIG_HOME"] == expected_xdg
+    prompt = (run_dir / "log" / "captured-prompt.txt").read_text()
+    assert str(remote_home / "manuals") in prompt
+    assert "~/manuals" not in prompt
+    assert prompt.endswith("prompt")
     assert not cursor_home.exists()
 
 

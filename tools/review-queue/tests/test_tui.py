@@ -70,6 +70,29 @@ async def test_manual_mode_controls_and_enqueue_marker(config, project):
         assert app.snapshot.mode == "active"
 
 
+async def test_poll_errors_and_recovery_are_visible_without_repeated_messages(config, project):
+    scheduler = Scheduler(config)
+    seed(scheduler, project)
+    error = "gh pr list: invalid character 'd' after object key"
+    scheduler.db.mark_poll_failure(project.name, error)
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        activity = "\n".join(app.activity)
+        assert f"{project.name} GitHub refresh failed" in activity
+        assert error in activity and "g retries now" in activity
+        count = len(app.activity)
+        scheduler.db.mark_poll_failure(project.name, error)
+        app.refresh_view()
+        await pilot.pause()
+        assert len(app.activity) == count
+        seed(scheduler, project)
+        app.refresh_view()
+        await pilot.pause()
+        assert f"{project.name} GitHub refresh recovered" in "\n".join(app.activity)
+        assert len(app.activity) == count + 1
+
+
 @pytest.mark.parametrize("width", [80, 120])
 async def test_my_approval_is_distinct_from_others_in_both_tables(config, project, width):
     scheduler = Scheduler(config)

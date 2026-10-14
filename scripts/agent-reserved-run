@@ -2,6 +2,105 @@
 # Run one command in the active agent CPU reservation.
 set -euo pipefail
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<'EOF'
+Usage:
+  agent-reserved-run [--wait-lock SECONDS] [--] COMMAND [ARGUMENTS...]
+  agent-reserved-run --profile stable [OPTIONS] -- COMMAND [ARGUMENTS...]
+
+The first form uses an existing agent CPU reservation, as before.
+The stable profile creates a reservation for one command or interactive shell,
+fixes clocks, and restores prior settings when it ends. It requires normal sudo.
+
+Options before --:
+  --cores N             Physical cores to reserve (default: 24)
+  --cpus LIST           Explicit CPUs, exactly one thread per physical core
+  --reserve-cpus LIST   Optional larger physical-core pool; excludes its SMT peers
+  --scheduler NAME      bpfland (default) or native
+  --frequency-mhz N     Fixed target; default: each core's nominal frequency
+  --timeout SECONDS     Maximum active profile duration (default: 7200)
+  --wait-lock SECONDS   Wait for another reservation (default: 0, fail immediately)
+  --keep-aslr           Leave address randomization enabled
+  --keep-deep-idle      Leave CPU idle settings unchanged
+  --session             Keep a shared shell/session; lock its benchmark commands separately
+  --plan                Show selection and prerequisites without changing settings
+
+Examples:
+  agent-reserved-run --profile stable --cpus 16-39 -- ./benchmark
+  agent-reserved-run --profile stable --cores 24 --session -- bash
+  agent-reserved-run --profile stable --scheduler native --cores 24 --plan
+EOF
+    exit 0
+fi
+
+if [[ "${1:-}" == "--profile" ]]; then
+    if [[ "${2:-}" != "stable" ]]; then
+        echo "Error: the supported profile is stable" >&2
+        exit 2
+    fi
+    shift 2
+    OPTIONS=()
+    PLAN=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --) shift; break ;;
+            --cores|--cpus|--reserve-cpus|--scheduler|--frequency-mhz|--timeout|--wait-lock)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: $1 requires a value" >&2
+                    exit 2
+                fi
+                OPTIONS+=("$1" "$2"); shift 2 ;;
+            --keep-aslr|--keep-deep-idle|--session) OPTIONS+=("$1"); shift ;;
+            --plan) PLAN=true; shift ;;
+            *) echo "Error: expected profile option or --, got: $1" >&2; exit 2 ;;
+        esac
+    done
+    HELPER=/usr/local/libexec/agent-cpu-reserve
+    if [[ ! -x "$HELPER" ]]; then
+        echo "Error: install the helpers with setup-agent-cpu-reserve.sh --no-sudoers" >&2
+        exit 1
+    fi
+    if $PLAN; then
+        "$HELPER" benchmark-plan "${OPTIONS[@]}"
+        exit $?
+    fi
+    if [[ $# -eq 0 ]]; then
+        echo "Error: supply a command after -- (use bash for a session)" >&2
+        exit 2
+    fi
+    case "$1" in
+        /*) EXECUTABLE="$1" ;;
+        */*) EXECUTABLE="$(realpath "$1")" ;;
+        *) EXECUTABLE="$(type -P -- "$1" || true)" ;;
+    esac
+    if [[ -z "$EXECUTABLE" || ! -x "$EXECUTABLE" ]]; then
+        echo "Error: executable not found: $1" >&2
+        exit 127
+    fi
+    shift
+    sudo -- "$HELPER" benchmark --caller-pid "$$" "${OPTIONS[@]}" -- "$EXECUTABLE" "$@" <&0 &
+    BENCH_PID=$!
+    trap 'kill -TERM "$BENCH_PID" 2>/dev/null || true; wait "$BENCH_PID" || true; exit 130' INT
+    trap 'kill -TERM "$BENCH_PID" 2>/dev/null || true; wait "$BENCH_PID" || true; exit 143' TERM
+    trap 'kill -TERM "$BENCH_PID" 2>/dev/null || true; wait "$BENCH_PID" || true; exit 129' HUP
+    set +e
+    wait "$BENCH_PID"
+    RESULT=$?
+    trap - INT TERM HUP
+    exit "$RESULT"
+fi
+
+WORKLOAD_WAIT=0
+if [[ "${1:-}" == "--wait-lock" ]]; then
+    if [[ ! "${2:-}" =~ ^[0-9]+$ || ${#2} -gt 5 || "$2" -gt 86400 ]]; then
+        echo "Error: --wait-lock requires 0 to 86400 seconds" >&2
+        exit 2
+    fi
+    WORKLOAD_WAIT="$2"
+    shift 2
+fi
+if [[ "${1:-}" == "--" ]]; then shift; fi
+
 if [[ $# -eq 0 ]]; then
     echo "Usage: agent-reserved-run COMMAND [ARGUMENTS...]" >&2
     exit 2
@@ -25,6 +124,57 @@ if [[ -z "$EXECUTABLE" || ! -x "$EXECUTABLE" ]]; then
 fi
 shift
 
+# Commands already in the reserved cgroup need no privileged helper.
+RESERVED_CGROUP="$(cat /proc/self/cgroup)"
+if [[ "$RESERVED_CGROUP" =~ ^0::/benchmark\.slice/agent-reserved-[^/]+\.scope$ ]]; then
+    AGENT_RESERVED_CPUS="$(cat "/sys/fs/cgroup${RESERVED_CGROUP#0::}/cpuset.cpus.effective")"
+    export AGENT_RESERVED_CPUS
+    LOCK_FILE=/run/agent-reserved-workload.lock
+    # Reentrant calls within the same benchmark process tree keep its lock.
+    # A sibling agent cannot inherit this marker from a shared session shell,
+    # because --session does not acquire the per-workload lock itself.
+    INHERITED=false
+    OWNER="${AGENT_RESERVED_WORKLOAD_LOCK_PID:-}"
+    if [[ "$OWNER" =~ ^[0-9]+$ ]]; then
+        ANCESTOR="$$"
+        for ((depth=0; depth<128 && ANCESTOR>1; depth++)); do
+            if [[ "$ANCESTOR" == "$OWNER" && "$(readlink "/proc/$OWNER/fd/200" 2>/dev/null || true)" == "$LOCK_FILE" ]]; then
+                INHERITED=true; break
+            fi
+            PARENT=1
+            if [[ -r "/proc/$ANCESTOR/status" ]]; then
+                while IFS=$'\t' read -r key value; do
+                    if [[ "$key" == PPid: ]]; then PARENT="$value"; break; fi
+                done < "/proc/$ANCESTOR/status"
+            fi
+            ANCESTOR="$PARENT"
+        done
+    fi
+    if ! $INHERITED; then
+        if [[ ! -r "$LOCK_FILE" ]]; then
+            echo "Error: workload lock is missing; restart the reservation with the updated helper" >&2
+            exit 1
+        fi
+        exec 200< "$LOCK_FILE"
+        if ! /usr/bin/flock --exclusive --wait "$WORKLOAD_WAIT" 200; then
+            echo "Error: another benchmark command holds the workload lock" >&2
+            exit 75
+        fi
+        export AGENT_RESERVED_WORKLOAD_LOCK_PID="$$"
+    fi
+    "$EXECUTABLE" "$@" <&0 &
+    WORKLOAD_PID=$!
+    trap 'kill -TERM "$WORKLOAD_PID" 2>/dev/null || true; wait "$WORKLOAD_PID" || true; exit 130' INT
+    trap 'kill -TERM "$WORKLOAD_PID" 2>/dev/null || true; wait "$WORKLOAD_PID" || true; exit 143' TERM
+    trap 'kill -TERM "$WORKLOAD_PID" 2>/dev/null || true; wait "$WORKLOAD_PID" || true; exit 129' HUP
+    set +e
+    wait "$WORKLOAD_PID"
+    RESULT=$?
+    trap - INT TERM HUP
+    exit "$RESULT"
+fi
+
 sudo -n -- /usr/local/libexec/agent-cpu-reserve exec \
     --caller-pid "$$" \
+    --lock-wait "$WORKLOAD_WAIT" \
     -- "$EXECUTABLE" "$@"

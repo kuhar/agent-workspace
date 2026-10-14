@@ -15,7 +15,7 @@ Environment overrides:
   REVIEW_PARENT   default: $HOME/iree/review
   BUILD_DIR       default: $REVIEW_PARENT/build
   DEFAULT_REPO    default: iree-org/iree
-  PR_BIN          default: $HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review
+  PR_BIN          default: Peanut beside this launcher; override with PR_BIN
   ALLOW_DIRTY=1   allow switching with tracked local changes
 EOF
 }
@@ -59,12 +59,15 @@ if [[ -z "$PR_SPEC" ]]; then
   exit 2
 fi
 
-REVIEW_PARENT="${REVIEW_PARENT:-$HOME/iree/review}"
+REVIEW_PARENT="${REVIEW_PARENT:-${IREES:-$HOME/iree}/review}"
 WORKSPACE="$REVIEW_PARENT/iree"
 BUILD_DIR="${BUILD_DIR:-$REVIEW_PARENT/build}"
 CONFIG="$REVIEW_PARENT/.peanut-review.json"
 DEFAULT_REPO="${DEFAULT_REPO:-iree-org/iree}"
-PR_BIN="${PR_BIN:-$HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review}"
+AGENT_WORKSPACE_DIR="${AGENT_WORKSPACE_DIR:-${JAKUB_ENV_DIR:+$JAKUB_ENV_DIR/agent-workspace}}"
+AGENT_WORKSPACE_DIR="${AGENT_WORKSPACE_DIR:-$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]}")")")}"
+JAKUB_ENV_DIR="${JAKUB_ENV_DIR:-$(dirname "$AGENT_WORKSPACE_DIR")}"
+PR_BIN="${PR_BIN:-$AGENT_WORKSPACE_DIR/tools/peanut-review/bin/peanut-review}"
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then

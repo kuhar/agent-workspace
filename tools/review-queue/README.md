@@ -12,7 +12,7 @@ status, logs, and result JSON.
 ## Run
 
 ```bash
-cd /home/jakub/jakub-env/agent-workspace/tools/review-queue
+cd "$JAKUB_ENV_DIR"/agent-workspace/tools/review-queue
 ./bin/review-queue init
 ./bin/review-queue doctor
 ./bin/review-queue
@@ -38,11 +38,21 @@ the workspace and incremental build output; it starts a new launcher attempt.
 Explicitly cancelled reviews stay cancelled. A newer revision requires its own
 manual enqueue. Interrupted attempts and their logs remain in the state database.
 
+Use `review-queue watch 12245` or enter a number in the TUI's Include (`n`) dialog
+to enqueue a PR by number. With multiple projects configured, the queue checks
+each repository and prefers open matches, including drafts. If none are open,
+it accepts a unique closed or merged match. If multiple repositories match,
+use a full GitHub PR URL; the error lists the matching repositories.
+A failed lookup also prevents resolution until it succeeds or you supply a URL.
+
 The scheduler polls once at startup, every configured interval (120 seconds by
-default), and immediately after a review job finishes. PRs that merge or close
-are removed from waiting work on that poll; terminal manually included PRs are
-also removed from the persistent watch set. An already-running review is
-allowed to finish.
+default), and immediately after a review job finishes. The GitHub query discovers
+PRs; once discovered, they remain tracked after pending review requests disappear,
+including after another team member submits a review. Later pushes are still
+picked up. Automatically discovered PRs that merge, close, become drafts, or no
+longer match `include_paths` are removed from waiting work on that poll. Manually
+included PRs remain eligible and watched until ignored, regardless of state.
+An already-running review is allowed to finish.
 
 The RocJITsu adapter retains review commits in the repository's shared Git
 directory before launching reviewers. Saved peanut-review pages and comment
@@ -101,34 +111,52 @@ that PR. The decision is saved in SQLite and survives restarts. A running
 review is allowed to finish. Press `n` and enter the PR to include it again.
 
 For recurring categories, edit the project's `query` in
-`~/.config/review-queue/config.toml`. The default RocJITsu query excludes
-Dependabot and PRs authored by the authenticated GitHub user:
+`~/.config/review-queue/config.toml`. The default RocJITsu query includes pending
+review requests for either `ROCm/rocjitsu-core-team` or the authenticated GitHub
+user directly. It excludes Dependabot and PRs authored by that user:
 
 ```toml
-query = "draft:false team-review-requested:ROCm/rocjitsu-core-team -author:app/dependabot -author:@me"
-include_paths = ["emulation/"]
+query = "draft:false (team-review-requested:ROCm/rocjitsu-core-team OR user-review-requested:@me) -author:app/dependabot -author:@me"
+include_paths = ["emulation/", "website/"]
 ```
 
 Other GitHub search exclusions, such as `-author:LOGIN` or `-label:LABEL`,
 can be appended to the same query. Restart the TUI after editing configuration.
-Query exclusions affect automatic discovery; explicitly included PRs remain
-watched until ignored with `i`. The TUI's text filter only changes what is
-displayed and does not exclude PRs from scheduling.
+Query exclusions affect new automatic discovery. Use `i` to stop tracking an
+already discovered PR. Explicitly included PRs remain watched until ignored
+with `i`. The TUI's text filter only changes what is displayed and does not
+exclude PRs from scheduling.
 
 `include_paths` requires at least one changed file under one of the listed
-repository-relative directories. RocJITsu uses `emulation/`, so a PR touching
-only other parts of `rocm-systems` is excluded even if the team is requested
-for review or the PR is manually included. Manual retry cannot bypass this
-rule. Deletions and either side of a rename count as touching a directory.
-An excluded PR can become eligible when a later push adds a matching change.
+repository-relative directories. RocJITsu uses `emulation/` (including
+`emulation/rocjitsu/website/`) and `website/`. Automatic discovery excludes PRs
+touching only other parts of `rocm-systems`, even if the user or team is requested.
+Explicit Include (`n`, or `review-queue watch <PR URL>`) allows draft, closed, and
+merged PRs, bypasses the path filter, and keeps those exceptions across polls,
+pushes, retries, and restarts. Ignore removes them. Retrying a PR that was never
+explicitly included still requires a path match. Deletions and either side of
+a rename count as touching a directory. An automatically excluded PR can become
+eligible when a later push adds a matching change.
+
+GitHub's file-list API stops at 3,000 files. A matching path in that capped list
+is enough to include a PR after rechecking its revision. Without a match, the
+refresh fails because the missing files could still affect eligibility.
 
 The queue paginates GitHub's file list and verifies the base/head commits
 before accepting a result. Results are cached for that commit pair and filter.
-An incomplete file list or API failure marks the project stale and holds its
-waiting work until a successful poll. After enabling or changing the filter,
-existing waiting PRs must be checked against the new rule before dispatch.
+An unexpectedly incomplete file list or API failure marks the project stale and
+holds its waiting work until a successful poll. After enabling or changing the filter,
+automatically discovered waiting PRs must be checked against the new rule
+before dispatch; explicitly included PRs retain their exception.
 Already-running reviews may finish. Omit `include_paths` or use `[]` for
 projects that do not need a directory filter.
+
+If `gh` reports malformed JSON, the queue retries that same read once with a
+temporary empty CLI cache. This bypasses damaged cached schema responses without
+changing the shared cache, authentication, or discovery query. A failed retry
+keeps the project stale until a later successful poll. The activity pane shows
+the project and polling error, records recovery, and avoids repeating identical
+errors. Press `g` to request an immediate poll.
 
 ## Accelerated demo
 
@@ -143,8 +171,9 @@ Demo mode does not read the real configuration or state database, call `gh`,
 invoke a launcher, or create worktrees. It continuously replays PR arrivals,
 pushes, a PR returning after author changes, a temporary GitHub outage, staged
 review progress, successful reviews, one first-attempt test failure, and
-wrapper-cap recycling. Each completed pass adds an `R` marker, so a PR returning
-for a third pass is shown as `RR`.
+wrapper-cap recycling. Both the waiting and active review tables show completed
+passes as a count: `R3` means three successful review passes, and `·` means none.
+An active fourth pass is shown as `R3 #4`.
 
 The default clock runs at 300×. Press `1`, `2`, `3`, or `4` for 1×, 60×,
 300×, or 1800×; `0` pauses only simulated time and `R` restarts the trace.
@@ -220,6 +249,9 @@ The queue exports these variables for every operation:
 - `REVIEW_QUEUE_OWNER_TOKEN`: random token also stored in
   `.review-queue.json` inside the wrapper
 - `REVIEW_QUEUE_TARGET_HEAD`: full Git commit ID (`cleanup` during cleanup)
+- `REVIEW_QUEUE_MANUAL_INCLUDE`: `1` for explicitly included PRs; `0` otherwise.
+  Launchers must allow draft, closed, and merged PRs when this is `1`, while
+  still checking the target head in both `prepare` and `run`.
 - `REVIEW_QUEUE_RESULT`: path where `run` must atomically write its result JSON
 
 A successful `run` exits zero and writes:
@@ -239,8 +271,9 @@ The queue accepts success only when both commit IDs equal the head it scheduled.
 On a nonzero exit, either `prepare` or `run` may write a failure result with
 `protocol`, `repository`, `pr`, `requested_head`, `exit_code`, `status`, and
 `error`. The queue verifies the job identity and exit code before using it.
-Use `status: "ineligible"` for a PR that has merged, closed, or become a draft;
-use `status: "failed"` for an actual failure. `error` is a readable reason.
+Use `status: "ineligible"` for an automatically discovered PR that has merged,
+closed, or become a draft; manually included PRs bypass those restrictions.
+Use `status: "failed"` for an actual failure. `error` is a readable reason.
 Without a matching failure result, the queue extracts diagnostics from the
 operation's log and retains the launcher exit code. The TUI shows the reason
 in selected-review details and history; press `l` for the full reason and the
@@ -285,9 +318,9 @@ Monokai, Catppuccin Mocha, and Tokyo Night.
 - `x`: cancel the selected running review.
 - `P`: pin or unpin its retained wrapper.
 - `e`: recycle an idle wrapper after confirmation.
-- `n`: include an open PR even when it does not match the project's GitHub
-  filter. This manual inclusion persists across future pushes and also restores
-  a previously ignored PR.
+- `n`: include a PR, including drafts and closed or merged PRs, even when it does
+  not match the project's GitHub filter. This persists across future pushes and
+  also restores a previously ignored PR.
 - `i`: permanently ignore the selected PR. Waiting work is removed and future
   pushed heads remain excluded; an already-running review is allowed to finish.
 - `/`: filter, `g`: refresh, `?`: help, `q`: quit.

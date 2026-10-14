@@ -52,6 +52,27 @@ def render_prompt(template_path: str | Path, variables: dict[str, str]) -> str:
     return Template(text).safe_substitute(variables)
 
 
+def _cursor_global_instructions() -> str:
+    """Load shared guidance before Cursor switches to its isolated home."""
+    user_home = Path.home()
+    codex_dir = Path(os.environ.get("CODEX_HOME") or user_home / ".codex")
+    instructions_path = codex_dir / "AGENTS.md"
+    try:
+        instructions = instructions_path.read_text()
+    except FileNotFoundError:
+        return ""
+    if not instructions.strip():
+        return ""
+    # Cursor's private HOME is for runtime state, not reference checkouts.
+    instructions = instructions.replace("~/", f"{user_home}/")
+    return (
+        f"# Shared user instructions\n\nLoaded from `{instructions_path}`. "
+        f"Home-relative paths below refer to `{user_home}`, not the isolated "
+        "Cursor runtime directory.\n\n"
+        f"{instructions.rstrip()}\n\n"
+    )
+
+
 def _format_workspace_layout(workspace: str, repo: str, repo_relative: str) -> str:
     workspace_path = Path(workspace)
     repo_path = Path(repo)
@@ -266,6 +287,8 @@ def render_all_prompts(
         }
         tpl = _resolve_template(template_path, agent)
         rendered = render_prompt(tpl, variables)
+        if agent.runner == "cursor" and not agent.ssh_target:
+            rendered = _cursor_global_instructions() + rendered
         prompt_path = prompts_dir / f"{agent.name}.md"
         prompt_path.write_text(rendered)
         result[agent.name] = prompt_path

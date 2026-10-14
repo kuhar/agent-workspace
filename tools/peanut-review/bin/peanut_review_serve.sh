@@ -22,12 +22,15 @@ BASE_URL="${PR_BASE_URL:-/pr}"
 
 mkdir -p "$ROOT"
 
-if [[ -x "$PACKAGE_DIR/.venv/bin/python" ]]; then
+if [[ -n "${PR_PYTHON:-}" ]]; then
+  PY="$PR_PYTHON"
+elif [[ -x "$PACKAGE_DIR/.venv/bin/python" ]]; then
   PY="$PACKAGE_DIR/.venv/bin/python"
 else
   PY="python3"
-  export PYTHONPATH="${PACKAGE_DIR}${PYTHONPATH:+:$PYTHONPATH}"
 fi
+
+export PYTHONPATH="${PACKAGE_DIR}${PYTHONPATH:+:$PYTHONPATH}"
 
 exec "$PY" -m peanut_review serve \
   --root "$ROOT" \

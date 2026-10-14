@@ -676,6 +676,50 @@ def test_cursor_agents_get_isolated_homes_without_mcp_config(tmp_path):
     assert not (Path(results[1]["cursor_home"]) / ".cursor" / "mcp.json").exists()
 
 
+@pytest.mark.parametrize("custom_codex_home", [False, True])
+def test_cursor_prompt_inherits_live_global_guidance(tmp_path, monkeypatch, custom_codex_home):
+    user_home = tmp_path / "user home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    codex_dir = user_home / ".codex"
+    if custom_codex_home:
+        codex_dir = tmp_path / "custom codex"
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    codex_dir.mkdir()
+    guidance = codex_dir / "AGENTS.md"
+    guidance.write_text("Use ~/projects/isa-manuals for ISA references.\n")
+    sd = _make_session_dir([
+        AgentConfig(name="lisa", model="test", runner="cursor"),
+        AgentConfig(name="vera", model="test", runner="codex"),
+        AgentConfig(name="Curator", model="test", runner="cursor", role="curator"),
+    ])
+
+    prompts = launch.render_all_prompts(sd, agent_names=["lisa", "vera", "Curator"])
+    expected_path = str(user_home / "projects" / "isa-manuals")
+    for name in ["lisa", "Curator"]:
+        text = prompts[name].read_text()
+        assert str(guidance) in text
+        assert expected_path in text
+        assert "~/projects/isa-manuals" not in text
+    assert "# Shared user instructions" not in prompts["vera"].read_text()
+
+    guidance.write_text("Use ~/llvm/main for LLVM references.\n")
+    text = launch.render_all_prompts(sd, agent_names=["lisa"])["lisa"].read_text()
+    assert str(user_home / "llvm" / "main") in text
+    assert expected_path not in text
+
+
+@pytest.mark.parametrize("contents", [None, "", " \n"])
+def test_cursor_global_guidance_is_optional(tmp_path, monkeypatch, contents):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    if contents is not None:
+        (tmp_path / ".codex").mkdir()
+        (tmp_path / ".codex" / "AGENTS.md").write_text(contents)
+    assert launch._cursor_global_instructions() == ""
+
+
 def test_cursor_launch_fails_when_cli_json_missing(tmp_path):
     workspace = str(tmp_path / "repo")
     Path(workspace).mkdir()

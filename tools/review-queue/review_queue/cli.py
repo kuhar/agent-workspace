@@ -48,7 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     state = subcommands.add_parser("state", help="print the persistent queue snapshot")
     state.add_argument("--json", action="store_true")
     watch = subcommands.add_parser("watch", help="watch and enqueue one PR")
-    watch.add_argument("pr")
+    watch.add_argument("pr", help="PR number (prefers open matches) or full GitHub PR URL")
     subcommands.add_parser("pause", help="pause all dispatch")
     subcommands.add_parser("resume", help="resume the previous active/manual mode")
     mode = subcommands.add_parser("mode", help="select persistent dispatch mode")

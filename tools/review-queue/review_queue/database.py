@@ -223,7 +223,7 @@ class Database:
                 if project.include_paths:
                     self.connection.execute(
                         "UPDATE pull_requests SET eligible = 0, path_filter_passed = 0 "
-                        "WHERE project = ? AND path_filter_key != ?",
+                        "WHERE project = ? AND path_filter_key != ? AND manual_watch = 0",
                         (project.name, project.path_filter_key),
                     )
                 existing = self.connection.execute(
@@ -323,9 +323,17 @@ class Database:
         return tuple(int(row["number"]) for row in rows)
 
     def poll_followups(self, project: str) -> tuple[int, ...]:
+        # Recheck waiting work dropped by older versions when a review request
+        # disappeared, without retrying completed reviews or explicit exclusions.
         rows = self.connection.execute(
             "SELECT number FROM pull_requests "
-            "WHERE project = ? AND (eligible = 1 OR manual_watch = 1 OR EXISTS ("
+            "WHERE project = ? AND (eligible = 1 OR manual_watch = 1 OR "
+            "(state = 'OPEN' AND is_draft = 0 AND ignored = 0 "
+            "AND (path_filter_key = '' OR path_filter_passed = 1) AND EXISTS ("
+            "SELECT 1 FROM jobs j WHERE j.id = ("
+            "SELECT MAX(id) FROM jobs WHERE repo = pull_requests.repo "
+            "AND pr_number = pull_requests.number) "
+            "AND j.status = 'ineligible' AND j.error = 'PR left configured query')) OR EXISTS ("
             "SELECT 1 FROM wrappers w WHERE w.repo = pull_requests.repo "
             "AND w.pr_number = pull_requests.number))",
             (project,),
@@ -367,16 +375,17 @@ class Database:
                 ).fetchone()
                 is_open = record.state.upper() == "OPEN" and not record.is_draft
                 manual_watch = bool(existing and existing["manual_watch"])
-                keep_manual_watch = manual_watch and record.state.upper() == "OPEN"
                 ignored = bool(existing and existing["ignored"])
                 paths_match = not project.include_paths or (
                     record.path_filter_key == project.path_filter_key and record.path_filter_passed
                 )
                 eligible = (
-                    is_open
+                    (is_open or manual_watch)
                     and not ignored
-                    and paths_match
-                    and (record.number in query_numbers or manual_watch)
+                    and (paths_match or manual_watch)
+                    # Review requests can disappear after another team member reviews.
+                    # The query discovers PRs; direct follow-ups keep known PRs eligible.
+                    and (record.number in query_numbers or existing is not None)
                 )
 
                 if existing is None:
@@ -450,7 +459,7 @@ class Database:
                             record.state.upper(),
                             int(record.is_draft),
                             int(eligible),
-                            int(keep_manual_watch),
+                            int(manual_watch),
                             now_text,
                             record.path_filter_key,
                             int(record.path_filter_passed),
@@ -619,18 +628,21 @@ class Database:
 
     def enqueue_current(self, repo: str, number: int, *, manual: bool = True) -> int:
         row = self.connection.execute(
-            "SELECT project, head_sha, state, is_draft, path_filter_key, path_filter_passed "
+            "SELECT project, head_sha, state, is_draft, manual_watch, "
+            "path_filter_key, path_filter_passed "
             "FROM pull_requests "
             "WHERE repo = ? AND number = ?",
             (repo, number),
         ).fetchone()
         if row is None:
             raise KeyError(f"unknown pull request: {repo}#{number}")
-        if row["state"] != "OPEN" or bool(row["is_draft"]):
+        if not row["manual_watch"] and (row["state"] != "OPEN" or row["is_draft"]):
             raise ValueError(f"pull request is not open for review: {repo}#{number}")
         required_paths = self._path_filters.get(row["project"], "")
-        if required_paths and (
-            row["path_filter_key"] != required_paths or not row["path_filter_passed"]
+        if (
+            required_paths
+            and not row["manual_watch"]
+            and (row["path_filter_key"] != required_paths or not row["path_filter_passed"])
         ):
             raise ValueError(f"PR does not touch configured include_paths: {repo}#{number}")
         with self.connection:
@@ -672,17 +684,6 @@ class Database:
         return self.enqueue_current(row["repo"], int(row["pr_number"]), manual=True)
 
     def set_manual_watch(self, record: PullRequest, *, enqueue: bool = True) -> None:
-        if record.state.upper() != "OPEN" or record.is_draft:
-            raise ValueError(
-                f"manual pull request must be open and non-draft: {record.repo}#{record.number}"
-            )
-        required_paths = self._path_filters.get(record.project, "")
-        if required_paths and (
-            record.path_filter_key != required_paths or not record.path_filter_passed
-        ):
-            raise ValueError(
-                f"PR does not touch configured include_paths: {record.repo}#{record.number}"
-            )
         now = isoformat()
         with self.connection:
             self.connection.execute(
@@ -1142,7 +1143,7 @@ class Database:
     def job_row(self, job_id: int) -> sqlite3.Row | None:
         return self.connection.execute(
             """
-            SELECT j.*, pr.url, pr.title, pr.author, pr.head_ref,
+            SELECT j.*, pr.url, pr.title, pr.author, pr.head_ref, pr.manual_watch,
                    w.path AS wrapper_path, w.owner_token
             FROM jobs j
             JOIN pull_requests pr ON pr.repo = j.repo AND pr.number = j.pr_number
@@ -1223,7 +1224,7 @@ class Database:
                 """
                 SELECT j.*, pr.head_sha AS current_head, pr.eligible, pr.ignored,
                        pr.state AS pr_state, pr.is_draft, pr.path_filter_key,
-                       pr.path_filter_passed
+                       pr.path_filter_passed, pr.manual_watch
                 FROM jobs j JOIN pull_requests pr
                   ON pr.repo = j.repo AND pr.number = j.pr_number
                 WHERE j.project = ? AND j.status = 'interrupted' AND j.resume_on_restart = 1
@@ -1237,10 +1238,10 @@ class Database:
                     row["head_sha"] == row["current_head"]
                     and row["eligible"]
                     and not row["ignored"]
-                    and row["pr_state"] == "OPEN"
-                    and not row["is_draft"]
+                    and (row["manual_watch"] or (row["pr_state"] == "OPEN" and not row["is_draft"]))
                     and (
                         not required_paths
+                        or row["manual_watch"]
                         or (row["path_filter_key"] == required_paths and row["path_filter_passed"])
                     )
                 ):

@@ -30,8 +30,8 @@ Environment overrides:
   PYTEST_CMD          optional full command override, run from $PYTEST_WORKDIR
   PYTEST_REQUIRED=1   make pytest failures block session launch
   DEFAULT_REPO        default: ROCm/rocm-systems
-  PR_BIN              default: $HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review
-  REVIEW_WAIT_TIMEOUT default: reviewAgentTimeoutSeconds from the config (900)
+  PR_BIN              default: Peanut beside this launcher; override with PR_BIN
+  REVIEW_WAIT_TIMEOUT default: reviewAgentTimeoutSeconds from the config (2700)
   ALLOW_DIRTY=1       allow switching with tracked local changes
   UPDATE_SUBMODULES=1 update rocm-systems submodules after checkout
 EOF
@@ -90,9 +90,9 @@ else
   fi
 fi
 
-DEFAULT_REVIEW_PARENT="$HOME/rocjitsu/review"
+DEFAULT_REVIEW_PARENT="${ROCJITSUS:-$HOME/rocjitsu}/review"
 INVOCATION_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-if [[ "$INVOCATION_DIR" == "$HOME/rocjitsu/"* && -f "$INVOCATION_DIR/.peanut-review.json" ]]; then
+if [[ "$INVOCATION_DIR" == "${ROCJITSUS:-$HOME/rocjitsu}/"* && -f "$INVOCATION_DIR/.peanut-review.json" ]]; then
   DEFAULT_REVIEW_PARENT="$INVOCATION_DIR"
 fi
 REVIEW_PARENT="${REVIEW_PARENT:-$DEFAULT_REVIEW_PARENT}"
@@ -119,7 +119,10 @@ PYTEST_WORKDIR="${PYTEST_WORKDIR:-$ROCJITSU_SOURCE/lib/python}"
 PYTEST_ARGS_SPEC="${PYTEST_ARGS:-amdisa/tests/ -x}"
 PYTEST_PYTHON="${PYTEST_PYTHON:-python}"
 DEFAULT_REPO="${DEFAULT_REPO:-ROCm/rocm-systems}"
-PR_BIN="${PR_BIN:-$HOME/jakub-env/agent-workspace/tools/peanut-review/bin/peanut-review}"
+AGENT_WORKSPACE_DIR="${AGENT_WORKSPACE_DIR:-${JAKUB_ENV_DIR:+$JAKUB_ENV_DIR/agent-workspace}}"
+AGENT_WORKSPACE_DIR="${AGENT_WORKSPACE_DIR:-$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]}")")")}"
+JAKUB_ENV_DIR="${JAKUB_ENV_DIR:-$(dirname "$AGENT_WORKSPACE_DIR")}"
+PR_BIN="${PR_BIN:-$AGENT_WORKSPACE_DIR/tools/peanut-review/bin/peanut-review}"
 
 phase_start() {
   local title="$1"
@@ -235,7 +238,8 @@ queue_resolve_pr() {
     OPEN:false|OPEN:true|MERGED:false|MERGED:true|CLOSED:false|CLOSED:true) ;;
     *) echo "invalid PR state returned by GitHub: $state (draft: $draft)" >&2; return 1 ;;
   esac
-  if [[ "$state" != "OPEN" || "$draft" != false ]]; then
+  if [[ "${REVIEW_QUEUE_MANUAL_INCLUDE:-0}" != 1 \
+        && ( "$state" != "OPEN" || "$draft" != false ) ]]; then
     local reason timestamp
     reason="PR #$QUEUE_PR_NUMBER is ${state,,}"
     [[ "$draft" == true ]] && reason="PR #$QUEUE_PR_NUMBER is a draft"
@@ -266,8 +270,8 @@ queue_prepare() {
   phase_end
 
   local main_workspace worktree_script fetch_ref
-  main_workspace="${ROCJITSU_MAIN_WORKSPACE:-$HOME/rocjitsu/develop/rocm-systems}"
-  worktree_script="${ROCJITSU_WORKTREE_SCRIPT:-$HOME/jakub-env/worktree-scripts/rocjitsu/rocjitsu-worktree.sh}"
+  main_workspace="${ROCJITSU_MAIN_WORKSPACE:-${ROCJITSUS:-$HOME/rocjitsu}/develop/rocm-systems}"
+  worktree_script="${ROCJITSU_WORKTREE_SCRIPT:-$JAKUB_ENV_DIR/worktree-scripts/rocjitsu/rocjitsu-worktree.sh}"
   if [[ ! -x "$worktree_script" ]]; then
     echo "missing RocJITsu worktree script: $worktree_script" >&2
     return 1
@@ -366,7 +370,7 @@ queue_cleanup() {
   need flock
   queue_validate_wrapper
   local worktree_script
-  worktree_script="${ROCJITSU_WORKTREE_SCRIPT:-$HOME/jakub-env/worktree-scripts/rocjitsu/rocjitsu-worktree.sh}"
+  worktree_script="${ROCJITSU_WORKTREE_SCRIPT:-$JAKUB_ENV_DIR/worktree-scripts/rocjitsu/rocjitsu-worktree.sh}"
   if [[ ! -x "$worktree_script" ]]; then
     echo "missing RocJITsu worktree script: $worktree_script" >&2
     return 1
@@ -472,7 +476,12 @@ if [[ ! -f "$CONFIG" ]]; then
   echo "missing peanut-review config: $CONFIG" >&2
   exit 1
 fi
-REVIEW_WAIT_TIMEOUT="${REVIEW_WAIT_TIMEOUT:-$(jq -r '.reviewAgentTimeoutSeconds // 900' "$CONFIG")}"
+REVIEW_AGENT_TIMEOUT="$(jq -r '.reviewAgentTimeoutSeconds // 2700' "$CONFIG")"
+if ! [[ "$REVIEW_AGENT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "reviewAgentTimeoutSeconds must be a positive integer: $REVIEW_AGENT_TIMEOUT" >&2
+  exit 2
+fi
+REVIEW_WAIT_TIMEOUT="${REVIEW_WAIT_TIMEOUT:-$REVIEW_AGENT_TIMEOUT}"
 if ! [[ "$REVIEW_WAIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   echo "REVIEW_WAIT_TIMEOUT must be a positive integer: $REVIEW_WAIT_TIMEOUT" >&2
   exit 2
@@ -690,7 +699,8 @@ phase_end
 phase_start "Prepare review session"
 ensure_review_checkout "session setup"
 DRY_RUN="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" \
-  --base "$BASE_SHA" --topic "$HEAD_SHA" --dry-run --no-launch)"
+  --base "$BASE_SHA" --topic "$HEAD_SHA" --timeout "$REVIEW_AGENT_TIMEOUT" \
+  --dry-run --no-launch)"
 SESSION="$(awk '/^Session:/ {print $2; exit}' <<<"$DRY_RUN")"
 if [[ -z "$SESSION" ]]; then
   echo "could not resolve session path from peanut-review dry-run" >&2
@@ -722,7 +732,8 @@ if [[ -f "$SESSION/session.json" ]]; then
 fi
 
 START_OUTPUT="$("$PR_BIN" start "$PR_URL" --config "$CONFIG" \
-  --base "$BASE_SHA" --topic "$HEAD_SHA" --reuse --sync --no-launch)"
+  --base "$BASE_SHA" --topic "$HEAD_SHA" --timeout "$REVIEW_AGENT_TIMEOUT" \
+  --reuse --sync --no-launch)"
 printf '%s\n' "$START_OUTPUT"
 
 # Session reads must survive queue cleanup of this execution worktree.
@@ -823,7 +834,7 @@ Useful commands:
   ctest --test-dir $BUILD_DIR --output-on-failure
   $PR_BIN --session $SESSION status
   $PR_BIN --session $SESSION inbox
-  $PR_BIN --session $SESSION wait-all round-done --timeout 900
+  $PR_BIN --session $SESSION wait-all round-done --timeout $REVIEW_WAIT_TIMEOUT
   $PR_BIN --session $SESSION kill-agents
   $PR_BIN --session $SESSION comments --since ${LAST_COMMENT_ID:-<last-comment-id>}
   $PR_BIN --session $SESSION comments --unresolved

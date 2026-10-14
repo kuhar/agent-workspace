@@ -6,7 +6,23 @@ from pathlib import Path
 
 import pytest
 
-from review_queue.launcher import LauncherClient
+from review_queue.launcher import LauncherClient, launcher_environment
+
+
+@pytest.mark.parametrize("manual_include", [False, True])
+def test_launcher_environment_sets_explicit_inclusion(
+    project, tmp_path, monkeypatch, manual_include
+):
+    monkeypatch.setenv("REVIEW_QUEUE_MANUAL_INCLUDE", "1")
+    env = launcher_environment(
+        project=project,
+        wrapper=tmp_path,
+        target_head="a" * 40,
+        result=tmp_path / "result.json",
+        token="test",
+        **({"manual_include": True} if manual_include else {}),
+    )
+    assert env["REVIEW_QUEUE_MANUAL_INCLUDE"] == ("1" if manual_include else "0")
 
 
 @pytest.mark.parametrize("terminated", [True, False])
@@ -114,8 +130,10 @@ async def test_started_callback_failure_terminates_and_forgets_supervisor(
     ],
 )
 @pytest.mark.parametrize("operation", ["prepare", "run"])
-def test_rocjitsu_adapter_reports_ineligible_before_setup(
-    tmp_path, state, draft, reason, operation
+@pytest.mark.parametrize("manual_include", [False, True])
+@pytest.mark.parametrize("head_changed", [False, True])
+def test_rocjitsu_adapter_checks_eligibility_and_head_before_setup(
+    tmp_path, state, draft, reason, operation, manual_include, head_changed
 ):
     import json
     import subprocess
@@ -141,12 +159,14 @@ def test_rocjitsu_adapter_reports_ineligible_before_setup(
         "REVIEW_QUEUE_ROOT": str(root),
         "REVIEW_QUEUE_TARGET_HEAD": "a" * 40,
         "REVIEW_QUEUE_RESULT": str(result),
+        "REVIEW_QUEUE_MANUAL_INCLUDE": "1" if manual_include else "0",
+        "ROCJITSU_WORKTREE_SCRIPT": str(tmp_path / "missing-worktree-script"),
         "TEST_PR_JSON": json.dumps(
             {
                 "number": 12,
                 "state": state,
                 "isDraft": draft,
-                "headRefOid": "b" * 40,
+                "headRefOid": ("b" if head_changed else "a") * 40,
                 "url": "https://github.com/test/repo/pull/12",
             }
         ),
@@ -154,6 +174,16 @@ def test_rocjitsu_adapter_reports_ineligible_before_setup(
     run = subprocess.run(
         [adapter, "queue", operation, "test/repo#12"], env=env, capture_output=True, text=True
     )
+    if manual_include:
+        assert run.returncode == (75 if head_changed else 1), run.stdout + run.stderr
+        if head_changed:
+            assert "PR head changed" in run.stderr
+        elif operation == "prepare":
+            assert str(tmp_path / "missing-worktree-script") in run.stderr
+        else:
+            assert "queue wrapper was not prepared" in run.stderr
+        assert not result.exists()
+        return
     assert run.returncode == 1, run.stdout + run.stderr
     log = tmp_path / "log"
     log.write_text(run.stdout + run.stderr)

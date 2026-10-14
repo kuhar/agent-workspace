@@ -284,7 +284,13 @@ class LauncherClient:
 
 
 def launcher_environment(
-    *, project: ProjectConfig, wrapper: Path, target_head: str, result: Path, token: str
+    *,
+    project: ProjectConfig,
+    wrapper: Path,
+    target_head: str,
+    result: Path,
+    token: str,
+    manual_include: bool = False,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -295,6 +301,7 @@ def launcher_environment(
             "REVIEW_QUEUE_TARGET_HEAD": target_head,
             "REVIEW_QUEUE_RESULT": str(result),
             "REVIEW_QUEUE_OWNER_TOKEN": token,
+            "REVIEW_QUEUE_MANUAL_INCLUDE": "1" if manual_include else "0",
         }
     )
     return env

@@ -1,10 +1,9 @@
 #!/bin/bash
 # Sandboxed agent runner using bwrap (bubblewrap).
 #
-# Restricts the agent to read-write access on a single project directory
-# while providing read-only access to system tools and agent runtimes.
-# The entire home directory is mounted read-only, with specific paths
-# overlaid as read-write where the selected harness needs to persist state.
+# Mounts the project, configured work tree and development drive read-write.
+# System tools and selected dotfiles are read-only. A private home contains
+# those dotfiles and writable overlays for harness state and caches.
 #
 # SETUP (one-time, requires sudo):
 #   Ubuntu 24.04+ blocks unprivileged user namespaces via AppArmor.
@@ -20,9 +19,21 @@
 #   agent-sandbox --harness opencode ~/iree/constraints
 #   agent-sandbox codex ~/iree/constraints -- "fix the build"
 #   agent-sandbox --im-feeling-lucky ~/iree/constraints
-#   agent-sandbox  # uses current directory
+#   agent-sandbox  # uses current directory, or WORK_ROOT when launched from home
 
 set -euo pipefail
+
+# Load machine paths even when launched outside an initialized interactive shell.
+PATH_SETTINGS="${JAKUB_ENV_PATHS:-${XDG_CONFIG_HOME:-$HOME/.config}/jakub-env/paths.sh}"
+if [[ -r "$PATH_SETTINGS" ]]; then
+    # shellcheck source=/dev/null
+    source "$PATH_SETTINGS"
+fi
+# Derive the checkout root when the caller has not configured it.
+JAKUB_ENV_DIR="${JAKUB_ENV_DIR:-$(dirname "$(dirname "$(dirname "$(realpath "$0")")")")}"
+WORK_ROOT="${WORK_ROOT:-$HOME/work}"
+SANDBOX_DEV_ROOT="${AGENT_SANDBOX_DEV_ROOT:-/mnt/dev}"
+export JAKUB_ENV_DIR WORK_ROOT
 
 # --- Parse arguments ---
 usage() {
@@ -32,15 +43,19 @@ Usage:
   agent-sandbox claude|opencode|codex [--im-feeling-lucky] [--airgap|--no-network] [--memory-limit-gb N] [--reserve-cores N] [project-dir] [-- harness-args...]
 
 Options:
-  --harness, -H NAME       Select claude, opencode, or codex (default: claude)
+  --harness, -H NAME       Select claude, opencode, or codex (machine default or claude)
   --im-feeling-lucky      Use real gh/git/ssh credentials instead of sandbox credentials
   --airgap, --no-network  Disable shell command networking and Codex web tools
   --memory-limit-gb N     Limit aggregate agent process-tree cgroup memory to N GiB
   --reserve-cores N       Reserve N complete physical cores for this harness
+  --daemon               Own a persistent Codex daemon with phone remote control
   -h, --help              Show this help
 
 All runs use a systemd cgroup to isolate OOM handling. --reserve-cores uses
 the system manager through a root helper; other runs use the user manager.
+The configured WORK_ROOT and AGENT_SANDBOX_DEV_ROOT (default /mnt/dev) are
+writable in every sandbox. AGENT_SANDBOX_HARNESS selects the default harness.
+Regular Codex launches use --no-daemon; --daemon explicitly owns a server here.
 
 Examples:
   agent-sandbox ~/iree/constraints
@@ -53,8 +68,9 @@ EOF
 }
 
 PROJECT_DIR=""
-HARNESS="claude"
+HARNESS="${AGENT_SANDBOX_HARNESS:-claude}"
 HARNESS_ARGS=()
+CODEX_DAEMON=false
 IM_FEELING_LUCKY=false
 AIRGAP=false
 MEMORY_LIMIT_GB=""
@@ -87,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --harness=*)
             HARNESS="${1#*=}"
+            shift
+            ;;
+        --daemon)
+            CODEX_DAEMON=true
             shift
             ;;
         --im-feeling-lucky)
@@ -149,6 +169,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if $CODEX_DAEMON && [[ "$HARNESS" != "codex" || ${#HARNESS_ARGS[@]} -ne 0 ]]; then
+    echo "Error: --daemon requires the codex harness and no harness arguments." >&2
+    exit 1
+fi
+
+if $CODEX_DAEMON && $AIRGAP; then
+    echo "Error: --daemon does not support --airgap." >&2
+    exit 1
+fi
+
 if $MEMORY_LIMIT_SET && [[ ! "$MEMORY_LIMIT_GB" =~ ^[1-9][0-9]*$ ]]; then
     echo "Error: --memory-limit-gb requires a positive integer (GiB), got '$MEMORY_LIMIT_GB'" >&2
     exit 1
@@ -194,6 +224,9 @@ case "$HARNESS" in
         ;;
 esac
 
+if [[ -z "$PROJECT_DIR" && "$PWD" == "$HOME" && -d "$WORK_ROOT" ]]; then
+    PROJECT_DIR="$WORK_ROOT"
+fi
 PROJECT_DIR="$(realpath "${PROJECT_DIR:-.}")"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
@@ -295,96 +328,105 @@ case "$HARNESS" in
         ;;
     codex)
         CODEX_BIN="$(resolve_command CODEX_BIN codex)"
-        CODEX_ARGS=()
-        CODEX_HAS_CD=false
-        CODEX_HAS_SANDBOX_OVERRIDE=false
-        CODEX_HAS_APPROVAL_OVERRIDE=false
-        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=false
-        CODEX_EXPECTS_SANDBOX_VALUE=false
-        CODEX_EXPECTS_ENABLE_VALUE=false
-        CODEX_EXPECTS_CONFIG_VALUE=false
-        for arg in "${HARNESS_ARGS[@]}"; do
-            if $CODEX_EXPECTS_SANDBOX_VALUE; then
-                CODEX_EXPECTS_SANDBOX_VALUE=false
-                continue
-            fi
-            if $CODEX_EXPECTS_ENABLE_VALUE; then
-                if codex_airgap_blocks_feature "$arg"; then
-                    CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+        if $CODEX_DAEMON; then
+            CODEX_RUNNER_DIR="$(dirname "$(readlink -f "$INVOCATION_PATH")")"
+            AGENT_CMD=("$CODEX_RUNNER_DIR/agent-codex-daemon" "$CODEX_BIN" "$PROJECT_DIR" "$INVOCATION_PATH" "$PWD" "${ORIGINAL_ARGS[@]}")
+        else
+            CODEX_ARGS=(--no-daemon)
+            CODEX_HAS_CD=false
+            CODEX_HAS_SANDBOX_OVERRIDE=false
+            CODEX_HAS_APPROVAL_OVERRIDE=false
+            CODEX_AIRGAP_WEB_TOOL_OVERRIDE=false
+            CODEX_EXPECTS_SANDBOX_VALUE=false
+            CODEX_EXPECTS_ENABLE_VALUE=false
+            CODEX_EXPECTS_CONFIG_VALUE=false
+            for arg in "${HARNESS_ARGS[@]}"; do
+                if $CODEX_EXPECTS_SANDBOX_VALUE; then
+                    CODEX_EXPECTS_SANDBOX_VALUE=false
+                    continue
                 fi
-                CODEX_EXPECTS_ENABLE_VALUE=false
-                continue
-            fi
-            if $CODEX_EXPECTS_CONFIG_VALUE; then
-                if codex_airgap_config_enables_blocked_feature "$arg"; then
-                    CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                if $CODEX_EXPECTS_ENABLE_VALUE; then
+                    if codex_airgap_blocks_feature "$arg"; then
+                        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                    fi
+                    CODEX_EXPECTS_ENABLE_VALUE=false
+                    continue
                 fi
-                CODEX_EXPECTS_CONFIG_VALUE=false
-                continue
-            fi
+                if $CODEX_EXPECTS_CONFIG_VALUE; then
+                    if codex_airgap_config_enables_blocked_feature "$arg"; then
+                        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                    fi
+                    CODEX_EXPECTS_CONFIG_VALUE=false
+                    continue
+                fi
 
-            case "$arg" in
-                --cd|--cd=*|-C) CODEX_HAS_CD=true ;;
-                --search) CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true ;;
-                --enable) CODEX_EXPECTS_ENABLE_VALUE=true ;;
-                --enable=*)
-                    if codex_airgap_blocks_feature "${arg#*=}"; then
-                        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
-                    fi
-                    ;;
-                -c|--config) CODEX_EXPECTS_CONFIG_VALUE=true ;;
-                --config=*)
-                    if codex_airgap_config_enables_blocked_feature "${arg#*=}"; then
-                        CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
-                    fi
-                    ;;
-                --sandbox|-s)
-                    CODEX_HAS_SANDBOX_OVERRIDE=true
-                    CODEX_EXPECTS_SANDBOX_VALUE=true
-                    ;;
-                --sandbox=*)
-                    CODEX_HAS_SANDBOX_OVERRIDE=true
-                    ;;
-                --full-auto)
-                    CODEX_HAS_SANDBOX_OVERRIDE=true
-                    CODEX_HAS_APPROVAL_OVERRIDE=true
-                    ;;
-                --dangerously-bypass-approvals-and-sandbox)
-                    CODEX_HAS_SANDBOX_OVERRIDE=true
-                    ;;
-                --ask-for-approval|--ask-for-approval=*|-a) CODEX_HAS_APPROVAL_OVERRIDE=true ;;
-            esac
-        done
-        if $AIRGAP && $CODEX_AIRGAP_WEB_TOOL_OVERRIDE; then
-            echo "Error: codex airgap mode disables Codex web/search/browser tools; remove --search or blocked feature overrides." >&2
-            exit 1
-        fi
-        if ! $CODEX_HAS_CD; then
-            CODEX_ARGS+=(--cd "$PROJECT_DIR")
-        fi
-        if $AIRGAP; then
-            CODEX_ARGS+=(-c 'web_search="disabled"')
-            for feature in browser_use browser_use_external computer_use image_generation in_app_browser standalone_web_search search_tool; do
-                CODEX_ARGS+=(--disable "$feature")
+                case "$arg" in
+                    --remote|--remote=*)
+                        echo "Error: --remote connects to another server; use --daemon to start a server inside this sandbox." >&2
+                        exit 1
+                        ;;
+                    --cd|--cd=*|-C) CODEX_HAS_CD=true ;;
+                    --search) CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true ;;
+                    --enable) CODEX_EXPECTS_ENABLE_VALUE=true ;;
+                    --enable=*)
+                        if codex_airgap_blocks_feature "${arg#*=}"; then
+                            CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                        fi
+                        ;;
+                    -c|--config) CODEX_EXPECTS_CONFIG_VALUE=true ;;
+                    --config=*)
+                        if codex_airgap_config_enables_blocked_feature "${arg#*=}"; then
+                            CODEX_AIRGAP_WEB_TOOL_OVERRIDE=true
+                        fi
+                        ;;
+                    --sandbox|-s)
+                        CODEX_HAS_SANDBOX_OVERRIDE=true
+                        CODEX_EXPECTS_SANDBOX_VALUE=true
+                        ;;
+                    --sandbox=*)
+                        CODEX_HAS_SANDBOX_OVERRIDE=true
+                        ;;
+                    --full-auto)
+                        CODEX_HAS_SANDBOX_OVERRIDE=true
+                        CODEX_HAS_APPROVAL_OVERRIDE=true
+                        ;;
+                    --dangerously-bypass-approvals-and-sandbox)
+                        CODEX_HAS_SANDBOX_OVERRIDE=true
+                        ;;
+                    --ask-for-approval|--ask-for-approval=*|-a) CODEX_HAS_APPROVAL_OVERRIDE=true ;;
+                esac
             done
-            if ! $CODEX_HAS_SANDBOX_OVERRIDE; then
-                CODEX_ARGS+=(--sandbox danger-full-access)
+            if $AIRGAP && $CODEX_AIRGAP_WEB_TOOL_OVERRIDE; then
+                echo "Error: codex airgap mode disables Codex web/search/browser tools; remove --search or blocked feature overrides." >&2
+                exit 1
             fi
-            if ! $CODEX_HAS_APPROVAL_OVERRIDE; then
-                CODEX_ARGS+=(--ask-for-approval never)
+            if ! $CODEX_HAS_CD; then
+                CODEX_ARGS+=(--cd "$PROJECT_DIR")
             fi
-        elif ! $CODEX_HAS_SANDBOX_OVERRIDE; then
-            CODEX_ARGS+=(--dangerously-bypass-approvals-and-sandbox)
+            if $AIRGAP; then
+                CODEX_ARGS+=(-c 'web_search="disabled"')
+                for feature in browser_use browser_use_external computer_use image_generation in_app_browser standalone_web_search search_tool; do
+                    CODEX_ARGS+=(--disable "$feature")
+                done
+                if ! $CODEX_HAS_SANDBOX_OVERRIDE; then
+                    CODEX_ARGS+=(--sandbox danger-full-access)
+                fi
+                if ! $CODEX_HAS_APPROVAL_OVERRIDE; then
+                    CODEX_ARGS+=(--ask-for-approval never)
+                fi
+            elif ! $CODEX_HAS_SANDBOX_OVERRIDE; then
+                CODEX_ARGS+=(--dangerously-bypass-approvals-and-sandbox)
+            fi
+            CODEX_ARGS+=("${HARNESS_ARGS[@]}")
+            AGENT_CMD=("$CODEX_BIN" "${CODEX_ARGS[@]}")
         fi
-        CODEX_ARGS+=("${HARNESS_ARGS[@]}")
-        AGENT_CMD=("$CODEX_BIN" "${CODEX_ARGS[@]}")
         ;;
 esac
 
 # --- Preflight check ---
 if ! /usr/bin/bwrap --ro-bind / / -- true 2>/dev/null; then
     echo "Error: bwrap cannot create user namespaces." >&2
-    echo "Run the one-time AppArmor setup (see setup-bwrap-apparmor.sh next to this script)." >&2
+    echo "Check the host's user-namespace policy. Ubuntu AppArmor setup is described in setup-bwrap-apparmor.sh." >&2
     exit 1
 fi
 
@@ -443,7 +485,7 @@ for gitfile in "$PROJECT_DIR/.git" "$PROJECT_DIR"/*/.git; do
     add_git_dir_bind "Worktree common git dir" "$git_common_dir"
 done
 
-if [[ "$HARNESS" == "codex" && ${#GIT_DIR_BIND_PATHS[@]} -gt 0 ]]; then
+if [[ "$HARNESS" == "codex" && "$CODEX_DAEMON" == false && ${#GIT_DIR_BIND_PATHS[@]} -gt 0 ]]; then
     CODEX_ADD_DIR_ARGS=()
     for path in "${GIT_DIR_BIND_PATHS[@]}"; do
         CODEX_ADD_DIR_ARGS+=(--add-dir "$path")
@@ -526,6 +568,20 @@ BWRAP_ARGS=(
     --dev-bind-try /dev/nvidia-modeset /dev/nvidia-modeset
 )
 
+# Use the matching helper inside the sandbox without changing the host install.
+if [[ -f /usr/local/bin/agent-reserved-run ]]; then
+    RESERVED_RUN_SOURCE="$(dirname "$(readlink -f "$INVOCATION_PATH")")/agent-reserved-run"
+    add_bind_if_exists --ro-bind "$RESERVED_RUN_SOURCE" /usr/local/bin/agent-reserved-run
+fi
+
+# Preserve the host locks' inodes: --ro-bind-data would create a private copy and
+# allow benchmarks in different sandboxes to overlap despite taking flock.
+for lock_file in /run/agent-reserved-workload.lock /run/lock/agent-cpu-reserve.lock; do
+    if [[ -r "$lock_file" ]]; then
+        BWRAP_ARGS+=(--ro-bind "$lock_file" "$lock_file")
+    fi
+done
+
 add_bind_if_exists --ro-bind /opt /opt
 # Codex needs network for its control plane. In airgap mode, keep Codex in the
 # outer bwrap sandbox only so ROCm runtime dispatch can open GPU device nodes.
@@ -541,6 +597,10 @@ BWRAP_ARGS+=(--tmpfs "$HOME")
 for path in \
     "$HOME/.bash_aliases" \
     "$HOME/.bashrc" \
+    "$HOME/.zshrc" \
+    "$HOME/.zprofile" \
+    "$HOME/.zshenv" \
+    "$HOME/.p10k.zsh" \
     "$HOME/.cargo" \
     "$HOME/.config" \
     "$HOME/.gitconfig" \
@@ -550,6 +610,7 @@ for path in \
     "$HOME/.nvm" \
     "$HOME/.profile" \
     "$HOME/.rustup" \
+    "$HOME/.steam" \
     "$HOME/.tmux" \
     "$HOME/go" \
     "$HOME/new-the-rock" ; do
@@ -567,18 +628,34 @@ else
     add_bind_if_exists --ro-bind "$HOME/.ssh-sandbox" "$HOME/.ssh"
 fi
 
-# --- Symlink targets needed by dotfiles and ~/.claude/agents ---
+# --- Writable work roots ---
+for path in "$WORK_ROOT" "$SANDBOX_DEV_ROOT"; do
+    add_bind_if_exists --bind "$path" "$path"
+done
+
+# Dotfile symlink targets outside the writable work roots still need visibility.
 for path in \
-    "$HOME/jakub-env" \
+    "$JAKUB_ENV_DIR" \
     "$HOME/bin"; do
+    if [[ "$path" == "$WORK_ROOT" || "$path" == "$WORK_ROOT/"* ||
+          "$path" == "$SANDBOX_DEV_ROOT" || "$path" == "$SANDBOX_DEV_ROOT/"* ]]; then
+        continue
+    fi
     add_bind_if_exists --ro-bind "$path" "$path"
 done
 
 for path in \
+    "${LLVMS:-$HOME/llvm}" \
+    "${IREES:-$HOME/iree}" \
+    "${ROCJITSUS:-$HOME/rocjitsu}" \
+    "${PR_ROOT:-$HOME/reviews}" \
     "$HOME/llvm" \
     "$HOME/iree" \
-    "$HOME/rocjitsu" \
-    "$HOME/reviews"; do
+    "$HOME/rocjitsu"; do
+    if [[ "$path" == "$WORK_ROOT" || "$path" == "$WORK_ROOT/"* ||
+          "$path" == "$SANDBOX_DEV_ROOT" || "$path" == "$SANDBOX_DEV_ROOT/"* ]]; then
+        continue
+    fi
     add_bind_if_exists --bind "$path" "$path"
 done
 
@@ -594,10 +671,42 @@ for path in \
     "$HOME/.opencode" \
     "$HOME/.config/opencode" \
     "$HOME/.codex" \
+    "$HOME/.local/share/direnv" \
     "$HOME/.local/state/claude" \
     "$HOME/.local/share/opencode"; do
     add_bind_if_exists --bind "$path" "$path"
 done
+if [[ -n "${CODEX_HOME:-}" && "$CODEX_HOME" != "$HOME/.codex" ]]; then
+    add_bind_if_exists --bind "$CODEX_HOME" "$CODEX_HOME"
+fi
+
+# --- Windows games and compatibility runtimes ---
+# Prefixes, saves, Proton fixes, and Steam runtime updates need writable storage.
+for path in \
+    "$HOME/Games" \
+    "$HOME/.local/share/Steam/compatibilitytools.d" \
+    "$HOME/.local/share/umu"; do
+    add_bind_if_exists --bind "$path" "$path"
+done
+
+# Share the desktop sockets needed by Wine/Proton while keeping the rest of
+# the user runtime directory private. X11 sockets are in the shared /tmp.
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" ]]; then
+    BWRAP_ARGS+=(--perms 0700 --dir "$XDG_RUNTIME_DIR")
+    add_bind_if_exists --bind "$XDG_RUNTIME_DIR/pulse" "$XDG_RUNTIME_DIR/pulse"
+    for socket in "${WAYLAND_DISPLAY:-wayland-0}" pipewire-0; do
+        case "$socket" in
+            /*) socket_path="$socket" ;;
+            *) socket_path="$XDG_RUNTIME_DIR/$socket" ;;
+        esac
+        if [[ -S "$socket_path" ]]; then
+            BWRAP_ARGS+=(--bind "$socket_path" "$socket_path")
+        fi
+    done
+fi
+if [[ -n "${XAUTHORITY:-}" ]]; then
+    add_bind_if_exists --ro-bind "$XAUTHORITY" "$XAUTHORITY"
+fi
 
 # --- Environment ---
 BWRAP_ARGS+=(
@@ -606,7 +715,7 @@ BWRAP_ARGS+=(
     --setenv USER "${USER:-$(id -un)}"
     --setenv LOGNAME "${LOGNAME:-${USER:-$(id -un)}}"
     --setenv SHELL "${SHELL:-/bin/bash}"
-    --setenv PATH "$HOME/.local/bin:$HOME/.opencode/bin:$HOME/bin:$HOME/.nvm/versions/node/v22.14.0/bin:/usr/local/bin:/usr/bin:/bin"
+    --setenv PATH "$HOME/.local/bin:$HOME/.opencode/bin:$HOME/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 )
 
 for name in \
@@ -616,6 +725,12 @@ for name in \
     TZ \
     TERM \
     COLORTERM \
+    DISPLAY \
+    WAYLAND_DISPLAY \
+    XAUTHORITY \
+    XDG_RUNTIME_DIR \
+    DBUS_SESSION_BUS_ADDRESS \
+    PULSE_SERVER \
     NO_COLOR \
     EDITOR \
     VISUAL \
@@ -630,6 +745,28 @@ for name in \
     NVM_INC \
     NVM_CD_FLAGS \
     JAKUB_ENV_DIR \
+    JAKUB_ENV_PATHS \
+    WORK_ROOT \
+    LLVMS \
+    IREES \
+    ROCJITSUS \
+    PR_ROOT \
+    CODEX_HOME \
+    AGENT_SANDBOX_HARNESS \
+    AGENT_SANDBOX_DEV_ROOT \
+    VIRTUAL_ENV \
+    ROCM_PATH \
+    ROCM_HOME \
+    CMAKE_PREFIX_PATH \
+    LD_LIBRARY_PATH \
+    CCACHE_DIR \
+    CCACHE_BASEDIR \
+    CCACHE_NOHASHDIR \
+    CCACHE_MAXSIZE \
+    UV_CACHE_DIR \
+    UV_PYTHON_INSTALL_DIR \
+    AGENT_SANDBOX_RESERVED_CPUS \
+    AGENT_RESERVED_CPUS \
     ANTHROPIC_API_KEY \
     OPENAI_API_KEY; do
     add_env_if_set "$name"

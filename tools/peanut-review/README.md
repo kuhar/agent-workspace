@@ -125,6 +125,12 @@ cp "$PEANUT_REVIEW_DIR/peanut_review/templates/cli.sample.json" \
   "$WORKSPACE/.cursor/cli.json"
 ```
 
+Cursor prompts include the shared user guidance from `~/.codex/AGENTS.md`
+(or `$CODEX_HOME/AGENTS.md`) when present. This is loaded on each launch before
+Cursor switches to its private runtime home; `~/` paths in the guidance are
+expanded to the user's actual home so reference checkouts remain discoverable.
+SSH Cursor reviewers use the remote user's guidance and home directory.
+
 Selected reviewer agents can instead use an existing persistent SSH
 ControlMaster, an independent remote checkout/build tree, and a reverse-forwarded
 capability gateway while retaining the same reviewer CLI. Curator, web, and

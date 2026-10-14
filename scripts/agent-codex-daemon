@@ -1,0 +1,132 @@
+#!/usr/bin/python3
+"""Hold the sandbox and CPU reservation while the managed Codex daemon runs."""
+
+import errno
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+
+def identity(pid):
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if stat[0] == "Z":
+            return None
+        return int(stat[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def context(pid):
+    return (
+        os.stat(f"/proc/{pid}/ns/mnt").st_ino,
+        Path(f"/proc/{pid}/cgroup").read_text(),
+        sorted(os.sched_getaffinity(pid)),
+    )
+
+
+def main():
+    if len(sys.argv) < 6:
+        sys.exit("Usage: agent-codex-daemon CODEX PROJECT LAUNCHER WORKING_DIRECTORY [LAUNCHER_ARGS...]")
+    codex, project, launcher, working_directory, *arguments = sys.argv[1:]
+    state_dir = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    metadata = state_dir / "sandbox-daemon.json"
+    pidfile = state_dir / "app-server-daemon" / "daemon.pid"
+    lock = (state_dir / "sandbox-daemon.lock").open("a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("A sandbox daemon supervisor is already running.")
+
+    def command(*args, capture=False):
+        return subprocess.run([codex, *args], check=True, text=True,
+                              stdout=subprocess.PIPE if capture else None)
+
+    # `daemon version` fails when no server exists. Probe the socket instead:
+    # both a missing path and a leftover socket with no listener permit startup.
+    control_socket = state_dir / "app-server-control" / "app-server-control.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(2)
+        try:
+            probe.connect(str(control_socket))
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+                raise
+        else:
+            sys.exit("Stop the existing server from a normal terminal first; disconnect Desktop SSH if it reconnects.")
+
+    # Daemon management reads durable shared feature overrides when spawning.
+    # Populate those from this CLI so equal versions also have equal settings.
+    selected = {"api_key_model_discovery", "auth_elicitation", "code_mode_host",
+                "mcp_oauth_refresh_coordination"}
+    features = {}
+    for line in command("features", "list", capture=True).stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0] in selected and parts[-1] in {"true", "false"}:
+            features[parts[0]] = parts[-1] == "true"
+    settings_path = state_dir / "app-server-daemon" / "settings.json"
+    settings_path.parent.mkdir(exist_ok=True)
+    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    settings.setdefault("featureOverrides", {}).update(features)
+    temporary = settings_path.with_suffix(".sandbox-tmp")
+    temporary.write_text(json.dumps(settings) + "\n")
+    temporary.replace(settings_path)
+
+    owned_pid = None
+    owned_start = None
+    expected = context(os.getpid())
+    stopping = False
+
+    def request_stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, request_stop)
+
+    try:
+        try:
+            command("remote-control", "start", "--json")
+        finally:
+            if pidfile.exists():
+                record = json.loads(pidfile.read_text())
+                owned_pid = int(record["pid"])
+                owned_start = identity(owned_pid)
+        if owned_start is None or context(owned_pid) != expected:
+            sys.exit("Daemon did not inherit this sandbox, cgroup and CPU affinity; stopping it.")
+        version = json.loads(command("app-server", "daemon", "version", capture=True).stdout)
+        if not version.get("cliVersion") or version.get("cliVersion") != version.get("appServerVersion"):
+            sys.exit("CLI and daemon versions differ; run codex-update from a normal terminal.")
+        saved_metadata = metadata.with_suffix(".tmp")
+        saved_metadata.write_text(json.dumps({
+            "supervisorPid": os.getpid(), "supervisorStartTicks": identity(os.getpid()),
+            "launcher": launcher, "arguments": arguments, "project": project,
+            "workingDirectory": working_directory,
+            "daemonPid": owned_pid, "daemonStartTicks": owned_start,
+            "reserved": expected[1].startswith("0::/benchmark.slice/agent-reserved-"),
+        }) + "\n")
+        saved_metadata.replace(metadata)
+        print(f"Sandbox daemon ready: PID {owned_pid}, CPUs {expected[2]}.", flush=True)
+        print("Keep this pane open. Pair your phone with: codex remote-control pair", flush=True)
+        while not stopping and identity(owned_pid) == owned_start:
+            time.sleep(0.5)
+    finally:
+        if owned_pid is not None and owned_start is not None and identity(owned_pid) == owned_start:
+            command("app-server", "daemon", "stop")
+        if metadata.exists():
+            saved = json.loads(metadata.read_text())
+            if saved.get("supervisorPid") == os.getpid():
+                metadata.unlink()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+        sys.exit(f"Sandbox daemon failed: {exc}")

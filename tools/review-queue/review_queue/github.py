@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from dataclasses import dataclass, replace
+from tempfile import TemporaryDirectory
 
 from .models import ProjectConfig, PullRequest
 
 
 class GitHubError(RuntimeError):
+    pass
+
+
+class PullRequestNotFound(GitHubError):
+    pass
+
+
+class _GitHubJSONError(GitHubError):
     pass
 
 
@@ -130,7 +141,8 @@ class GitHubClient:
                     ):
                         raise ValueError("expected paginated file arrays")
                     files = [file for page in pages for file in page]
-                    if len(files) != count:
+                    # GitHub caps this endpoint at 3000 files, even with pagination.
+                    if len(files) != min(count, 3000):
                         raise ValueError(
                             f"incomplete PR file list: expected {count}, got {len(files)}"
                         )
@@ -143,8 +155,15 @@ class GitHubClient:
                             if not isinstance(file["previous_filename"], str):
                                 raise ValueError("invalid previous PR filename")
                             paths.append(file["previous_filename"])
-                    if len({file["filename"] for file in files}) != count:
+                    if len({file["filename"] for file in files}) != len(files):
                         raise ValueError("duplicate entries in PR file list")
+                    matches = any(path.startswith(project.include_paths) for path in paths)
+                    # One observed match proves inclusion. A capped list cannot
+                    # prove exclusion because the remaining files are unknown.
+                    if len(files) < count and not matches:
+                        raise ValueError(
+                            "PR file list hit GitHub's 3000-file limit without a matching path"
+                        )
                     current = json.loads(
                         await self._run(
                             "gh",
@@ -163,7 +182,6 @@ class GitHubClient:
                         current.get("changedFiles"),
                     ) != (record.head_sha, base, count):
                         raise ValueError("PR changed while checking file paths; retry next poll")
-                    matches = any(path.startswith(project.include_paths) for path in paths)
                 except (json.JSONDecodeError, TypeError, ValueError) as error:
                     raise GitHubError(
                         f"cannot filter {record.repo}#{record.number}: {error}"
@@ -179,10 +197,29 @@ class GitHubClient:
 
     async def _run(self, *command: str) -> str:
         try:
+            return await self._run_once(command)
+        except _GitHubJSONError:
+            # gh caches schema queries across polls. A malformed cached response
+            # can fail forever; retry the same read with a private, empty cache.
+            with TemporaryDirectory(prefix="review-queue-gh-") as cache:
+                env = dict(os.environ, XDG_CACHE_HOME=cache)
+                try:
+                    return await self._run_once(command, env=env)
+                except PullRequestNotFound:
+                    raise
+                except GitHubError as error:
+                    raise GitHubError(f"{error} (fresh GitHub CLI cache retry failed)") from error
+
+    async def _run_once(
+        self, command: tuple[str, ...], *, env: dict[str, str] | None = None
+    ) -> str:
+        label = " ".join(command[:3])
+        try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
         except FileNotFoundError as error:
             raise GitHubError(f"missing command: {command[0]}") from error
@@ -190,14 +227,38 @@ class GitHubClient:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=self.timeout_seconds
             )
-        except TimeoutError as error:
-            process.kill()
+        except (TimeoutError, asyncio.CancelledError) as error:
+            if process.returncode is None:
+                process.kill()
             await process.wait()
-            raise GitHubError(f"command timed out after {self.timeout_seconds}s") from error
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            raise GitHubError(f"{label}: timed out after {self.timeout_seconds}s") from error
         if process.returncode:
             detail = stderr.decode(errors="replace").strip()
-            raise GitHubError(detail or f"{' '.join(command)} exited {process.returncode}")
-        return stdout.decode()
+            # Only this specific lookup failure proves the PR is absent. Repository,
+            # authentication and transport failures must not hide an ambiguous number.
+            if command[:3] == ("gh", "pr", "view") and re.fullmatch(
+                r"GraphQL: Could not resolve to a PullRequest with the number of [0-9]+\. "
+                r"\(repository\.pullRequest\)",
+                detail,
+            ):
+                raise PullRequestNotFound(f"{label}: {detail}")
+            error_type = (
+                _GitHubJSONError
+                if any(
+                    marker in detail
+                    for marker in ("invalid character ", "unexpected end of JSON input")
+                )
+                else GitHubError
+            )
+            raise error_type(f"{label}: {detail or f'exited {process.returncode}'}")
+        try:
+            output = stdout.decode()
+            json.loads(output)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise _GitHubJSONError(f"{label}: invalid JSON response: {error}") from error
+        return output
 
     @staticmethod
     def _from_gh(project: ProjectConfig, item: dict[str, object]) -> PullRequest:

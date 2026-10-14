@@ -9,12 +9,13 @@ import secrets
 import signal
 import time
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 from .database import Database, PollOutcome
-from .github import GitHubClient, GitHubError
+from .github import GitHubClient, GitHubError, PullRequestNotFound
 from .launcher import LauncherClient, LauncherError, failure_details, launcher_environment
-from .models import ProjectConfig, QueueConfig, QueueItem, QueueSnapshot
+from .models import ProjectConfig, PullRequest, QueueConfig, QueueItem, QueueSnapshot
 from .util import (
     atomic_json,
     free_bytes,
@@ -347,7 +348,14 @@ class Scheduler:
                 if await self._cleanup_wrapper_row(candidate):
                     break
             else:
+                blockers = []
+                for candidate in candidates:
+                    current = self.db.wrapper_by_id(int(candidate["id"]))
+                    if current is not None and current["cleanup_error"]:
+                        blockers.append(f"#{current['pr_number']}: {current['cleanup_error']}")
                 self._blocked_reason = "wrapper cap reached; cleanup blocked (retry every 60s)"
+                if blockers:
+                    self._blocked_reason += ": " + "; ".join(blockers)
                 return None
 
         project = self.projects[item.project]
@@ -432,6 +440,7 @@ class Scheduler:
             target_head=row["head_sha"],
             result=result_path,
             token=row["owner_token"],
+            manual_include=bool(row["manual_watch"]),
         )
 
         try:
@@ -658,23 +667,59 @@ class Scheduler:
             pr_priority=pr_priority,
         )
 
-    async def add_manual(self, spec: str) -> None:
-        match = re.search(r"github\.com/([^/]+/[^/]+)/pull/\d+", spec, re.IGNORECASE)
-        if match:
-            repo = match.group(1).lower()
-            project = next(
-                (item for item in self.config.projects if item.repo.lower() == repo),
-                None,
+    async def _resolve_manual_number(self, number: str) -> PullRequest:
+        # Explicit inclusion persists as manual_watch; it does not need the
+        # automatic discovery file-list check to succeed first.
+        results = await asyncio.gather(
+            *(
+                self.github.view(replace(project, include_paths=()), number)
+                for project in self.config.projects
+            ),
+            return_exceptions=True,
+        )
+        matches = []
+        for project, result in zip(self.config.projects, results, strict=True):
+            if isinstance(result, PullRequestNotFound):
+                continue
+            if isinstance(result, GitHubError):
+                raise QueueError(
+                    f"cannot resolve PR #{number} in {project.repo}: {result}; "
+                    "use a full GitHub PR URL to select a repository"
+                ) from result
+            if isinstance(result, BaseException):
+                raise result
+            matches.append(result)
+        # Keep the convenient open-PR preference; fall back to closed PRs when
+        # there are no open matches. URLs always select the repository exactly.
+        matches = [record for record in matches if record.state.upper() == "OPEN"] or matches
+        if not matches:
+            raise QueueError(f"no PR #{number} found in configured projects")
+        if len(matches) > 1:
+            repos = ", ".join(record.repo for record in matches)
+            raise QueueError(
+                f"PR #{number} matches multiple repositories: {repos}; use a full GitHub PR URL"
             )
-            if project is None:
-                raise QueueError(f"PR repository is not configured: {match.group(1)}")
-        elif len(self.config.projects) == 1:
-            project = self.config.projects[0]
+        return matches[0]
+
+    async def add_manual(self, spec: str) -> None:
+        spec = spec.strip()
+        if len(self.config.projects) > 1 and re.fullmatch(r"[0-9]+", spec):
+            record = await self._resolve_manual_number(spec)
         else:
-            raise QueueError("use a full GitHub PR URL when multiple projects are configured")
-        record = await self.github.view(project, spec)
-        if record.is_draft or record.state.upper() != "OPEN":
-            raise QueueError("manual PR must be open and non-draft")
+            match = re.search(r"github\.com/([^/]+/[^/]+)/pull/\d+", spec, re.IGNORECASE)
+            if match:
+                repo = match.group(1).lower()
+                project = next(
+                    (item for item in self.config.projects if item.repo.lower() == repo),
+                    None,
+                )
+                if project is None:
+                    raise QueueError(f"PR repository is not configured: {match.group(1)}")
+            elif len(self.config.projects) == 1:
+                project = self.config.projects[0]
+            else:
+                raise QueueError("enter a PR number or full GitHub PR URL")
+            record = await self.github.view(replace(project, include_paths=()), spec)
         self.db.set_manual_watch(record)
 
     def ignore_pr(self, repo: str, number: int) -> None:

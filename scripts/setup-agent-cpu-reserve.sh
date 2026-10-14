@@ -2,6 +2,14 @@
 # One-time setup for --reserve-cores. Run this outside agent-sandbox.
 set -euo pipefail
 
+INSTALL_SUDOERS=true
+if [[ "${1:-}" == "--no-sudoers" && $# -eq 1 ]]; then
+    INSTALL_SUDOERS=false
+elif [[ $# -ne 0 ]]; then
+    echo "Usage: setup-agent-cpu-reserve.sh [--no-sudoers]" >&2
+    exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE="$SCRIPT_DIR/agent-cpu-reserve"
 DESTINATION="/usr/local/libexec/agent-cpu-reserve"
@@ -20,16 +28,25 @@ fi
 
 sudo install -d -o root -g root -m 0755 "$(dirname "$DESTINATION")"
 sudo install -o root -g root -m 0755 "$SOURCE" "$DESTINATION"
+sudo install -o root -g root -m 0644 "$SCRIPT_DIR/agent-benchmark-profile.py" \
+    "$(dirname "$DESTINATION")/agent-benchmark-profile.py"
 sudo install -o root -g root -m 0755 "$RUN_SOURCE" "$RUN_DESTINATION"
 
+if $INSTALL_SUDOERS; then
 printf '%s ALL=(root) NOPASSWD: %s exec *\n' \
     "$INSTALL_USER" "$DESTINATION" >"$SUDOERS_TEMP"
 sudo visudo -cf "$SUDOERS_TEMP"
 sudo install -o root -g root -m 0440 "$SUDOERS_TEMP" "$SUDOERS_DESTINATION"
+fi
 
 echo "Installed $DESTINATION"
 echo "Installed $RUN_DESTINATION"
-echo "Installed $SUDOERS_DESTINATION for reserved commands only"
+if $INSTALL_SUDOERS; then
+    echo "Installed $SUDOERS_DESTINATION for reserved commands only"
+else
+    echo "Sudoers unchanged; commands use your existing sudo authorization."
+fi
 echo "agent-sandbox --reserve-cores N will ask for sudo when it starts."
 echo "Inside the session, run benchmarks as: agent-reserved-run COMMAND ..."
 echo "Emergency cleanup: sudo $DESTINATION reset"
+echo "Standalone benchmarking: agent-reserved-run --profile stable --cores 24 -- COMMAND ..."

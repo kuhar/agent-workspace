@@ -161,11 +161,12 @@ def test_cleanup_removes_clean_managed_wrapper(managed_wrapper) -> None:
     assert not wrapper.exists()
 
 
-def test_cleanup_removes_ruff_cache(managed_wrapper) -> None:
+@pytest.mark.parametrize("cache_name", [".ruff_cache", ".pytest_cache"])
+def test_cleanup_removes_tool_cache(managed_wrapper, cache_name) -> None:
     wrapper, env = managed_wrapper
-    cache = wrapper / ".ruff_cache" / "0.16.4"
+    cache = wrapper / cache_name / "results"
     cache.mkdir(parents=True)
-    (cache / "123456789").write_bytes(b"cached lint results")
+    (cache / "123456789").write_bytes(b"cached tool results")
     assert check(wrapper, env)["safe"] is True
     subprocess.run([SCRIPT, "queue-cleanup", wrapper], env=env, check=True, capture_output=True)
     assert not wrapper.exists()

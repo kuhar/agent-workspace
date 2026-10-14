@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import fcntl
+import importlib.util
 import json
 import os
 import pathlib
@@ -21,6 +22,7 @@ SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 STATE_PATH = pathlib.Path("/run/agent-cpu-reserve.json")
 LOCK_PATH = pathlib.Path("/run/lock/agent-cpu-reserve.lock")
+WORKLOAD_LOCK_PATH = pathlib.Path("/run/agent-reserved-workload.lock")
 BACKGROUND_UNITS = ("init.scope", "system.slice", "user.slice", "machine.slice")
 SAFE_ROOT_ENV = {
     "HOME": "/root",
@@ -257,8 +259,29 @@ def require_root() -> None:
         fail("this helper must run as root")
 
 
+def ensure_workload_lock() -> None:
+    require_root()
+    try:
+        fd = os.open(WORKLOAD_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        info = WORKLOAD_LOCK_PATH.lstat()
+        if not WORKLOAD_LOCK_PATH.is_file() or WORKLOAD_LOCK_PATH.is_symlink() or info.st_uid != 0 or info.st_mode & 0o022:
+            fail("workload lock must be a root-owned regular file without write access for other users")
+    else:
+        os.fchmod(fd, 0o644)
+        os.close(fd)
+
+
 def reset() -> None:
     require_root()
+    state = read_state()
+    if state and state.get("benchmark_directory"):
+        stop_unit(str(state["guard_unit"]))
+        subprocess.run(
+            [sys.executable, "-I", os.path.realpath(__file__), "benchmark-restore",
+             str(state["benchmark_directory"])], check=True, env=SAFE_ROOT_ENV,
+        )
+        return
     lock = acquire_lock()
     try:
         state = read_state()
@@ -287,6 +310,7 @@ def child(args: argparse.Namespace) -> None:
     environment = caller_environment(args.caller_pid)
     environment["AGENT_SANDBOX_RESERVED_CHILD"] = "1"
     environment["AGENT_SANDBOX_RESERVED_CPUS"] = args.cpus
+    environment["AGENT_RESERVED_CPUS"] = args.cpus
 
     expected_cpus = parse_cpu_list(args.cpus)
     os.sched_setaffinity(0, expected_cpus)
@@ -302,6 +326,9 @@ def child(args: argparse.Namespace) -> None:
     os.chdir(args.working_directory)
     pathlib.Path("/proc/self/oom_score_adj").write_text("1000\n")
     os.initgroups(account.pw_name, args.gid)
+    if args.no_new_privileges:
+        os.setpriority(os.PRIO_PROCESS, 0, 0)
+        set_no_new_privileges()
     os.setgid(args.gid)
     os.setuid(args.uid)
     os.execve(args.command[0], args.command, environment)
@@ -329,6 +356,7 @@ def scope_owner_uids(control_group: str) -> set[int]:
 
 def exec_reserved(args: argparse.Namespace) -> None:
     require_root()
+    ensure_workload_lock()
     try:
         target_uid = int(os.environ["SUDO_UID"])
         target_gid = int(os.environ["SUDO_GID"])
@@ -386,11 +414,15 @@ def exec_reserved(args: argparse.Namespace) -> None:
     if os.getuid() != target_uid or os.geteuid() != target_uid:
         fail("failed to drop root privileges")
     os.chdir(working_directory)
-    os.execve(args.command[0], args.command, environment)
+    # Acquire the workload lock after joining the cgroup and dropping privileges.
+    # The rootless wrapper also handles callers already inside the reservation.
+    wrapper = "/usr/local/bin/agent-reserved-run"
+    os.execve(wrapper, [wrapper, "--wait-lock", str(args.lock_wait), "--", *args.command], environment)
 
 
 def run_reserved(args: argparse.Namespace) -> int:
     require_root()
+    ensure_workload_lock()
     try:
         target_uid = int(os.environ["SUDO_UID"])
         target_gid = int(os.environ["SUDO_GID"])
@@ -499,10 +531,12 @@ def make_parser() -> argparse.ArgumentParser:
     child_parser.add_argument("--caller-pid", type=int, required=True)
     child_parser.add_argument("--working-directory", required=True)
     child_parser.add_argument("--cpus", required=True)
+    child_parser.add_argument("--no-new-privileges", action="store_true")
     child_parser.add_argument("command", nargs=argparse.REMAINDER)
 
     exec_parser = subparsers.add_parser("exec")
     exec_parser.add_argument("--caller-pid", type=int, required=True)
+    exec_parser.add_argument("--lock-wait", type=int, default=0)
     exec_parser.add_argument("command", nargs=argparse.REMAINDER)
 
     plan_parser = subparsers.add_parser("plan")
@@ -512,6 +546,16 @@ def make_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in {
+        "benchmark", "benchmark-plan", "benchmark-guard", "benchmark-restore"
+    }:
+        path = pathlib.Path(__file__).resolve().with_name("agent-benchmark-profile.py")
+        spec = importlib.util.spec_from_file_location("agent_benchmark_profile", path)
+        if spec is None or spec.loader is None:
+            fail(f"cannot load benchmark support from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.main(sys.argv[1:], sys.modules[__name__])
     args = make_parser().parse_args()
     if getattr(args, "cores", 1) <= 0:
         fail("core count must be a positive integer")
@@ -527,6 +571,8 @@ def main() -> int:
         child(args)
         return 0
     if args.action == "exec":
+        if not 0 <= args.lock_wait <= 86400:
+            fail("lock wait must be between 0 and 86400 seconds")
         exec_reserved(args)
         return 0
     return run_reserved(args)

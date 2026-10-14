@@ -258,7 +258,7 @@ def _approvals(item: QueueItem | WrapperView) -> str:
 
 
 def _reviews(count: int) -> str:
-    return "R" * count if count else "·"
+    return f"R{count}" if count else "·"
 
 
 def _phase(status: str, *, width: int) -> str:
@@ -452,6 +452,7 @@ class ReviewQueueApp(App[None]):
         self.activity: deque[str] = deque(maxlen=50)
         self._last_phase_event = 0
         self._seen_failure_ids: set[int] = set()
+        self._poll_errors: dict[str, str] = {}
         self._record_activity(
             f"queue ready · {len(self.snapshot.queue)} waiting · "
             f"{len(self.snapshot.running)} active",
@@ -571,6 +572,20 @@ class ReviewQueueApp(App[None]):
         )
 
     def _track_activity(self, previous: object, current: object) -> None:
+        for health in current.projects:
+            old_error = self._poll_errors.get(health.name)
+            if health.stale:
+                error = health.error or "unknown polling error"
+                if error != old_error:
+                    self._record_activity(
+                        f"× {health.name} GitHub refresh failed · {error} · "
+                        "automatic polling will retry; g retries now",
+                        "red",
+                    )
+                self._poll_errors[health.name] = error
+            elif old_error is not None:
+                self._record_activity(f"✓ {health.name} GitHub refresh recovered", "green")
+                del self._poll_errors[health.name]
         for event in current.phase_events:
             if event.id > self._last_phase_event:
                 self.activity.appendleft(
@@ -808,7 +823,7 @@ class ReviewQueueApp(App[None]):
             elif review_count:
                 marker = "[b green]✓[/]"
                 reviewed = _reviews(review_count)
-                phase = f"[green]complete[/]  ·  {_reviews(review_count)}"
+                phase = "[green]complete[/]"
             else:
                 marker = "[dim]·[/]"
                 reviewed = _reviews(review_count)

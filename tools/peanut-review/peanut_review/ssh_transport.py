@@ -504,7 +504,10 @@ def remote_run(payload: dict[str, Any]) -> int:
     })
     prompt_path = run_dir / "prompt.md"
     persona_path = run_dir / "persona.md"
-    prompt_path.write_text(str(payload["prompt"]))
+    prompt = str(payload["prompt"])
+    if payload["runner"] == "cursor":
+        prompt = launch._cursor_global_instructions() + prompt
+    prompt_path.write_text(prompt)
     persona_path.write_text(str(payload["persona"]))
     prompt_path.chmod(0o600)
     persona_path.chmod(0o600)

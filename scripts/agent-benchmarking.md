@@ -15,13 +15,34 @@ To reproduce the CPU pool used in the CachyOS stability calibration, while runni
 ```bash
 agent-reserved-run --profile stable \
   --reserve-cpus 16-63 --cpus 16-39 \
-  --wait-lock 3600 --timeout 7200 \
+  --wait-lock 3600 --timeout 93600 \
   -- ./your-benchmark
 ```
 
 `--reserve-cpus` names one thread per physical core in the larger reserved pool. Its SMT peers are excluded as well. `--cpus` controls the workload's affinity and must fit inside that pool. Both lists are checked against actual topology. The explicit numbers above apply to this workstation; use `--cores` or inspect topology on other hosts.
 
 ## A session for several commands
+
+To start an agent with the stable profile, use:
+
+```bash
+agent-sandbox codex --daemon --reserve-cores 48 --benchmark
+```
+
+This requests sudo once on the host, starts Bpfland, fixes the reserved cores at
+their nominal frequency, and disables ASLR for the session. It uses the same
+restoration controller as `agent-reserved-run --profile stable`. The profile has
+a 26-hour timeout; exiting the daemon also restores the previous host settings.
+`--memory-limit-gb` remains effective. Ordinary `--reserve-cores` launches retain
+their CPU-isolation-only behavior.
+
+Inside the sandbox, run measurements through `agent-reserved-run COMMAND ...`.
+This takes the shared workload lock and restores nice 0 without sudo, including
+when the agent has lowered the priority of its shell commands. It requires the
+inherited nice limit to permit normal priority; failure is reported before the
+workload starts. Do builds and other CPU-intensive work outside measurement
+intervals, and pin benchmark workers to physical cores away from the agent's
+coordinator.
 
 ```bash
 agent-reserved-run --profile stable \
@@ -45,6 +66,49 @@ agent-reserved-run --profile stable --cores 24 -- bash -lc './benchmark > result
 The wrapper preserves command arguments, working directory, and the caller's environment. It does not set thread-count variables such as `OMP_NUM_THREADS`; the workload controls those. An activated virtual environment or caller-specified runtime variables are carried into the unprivileged workload.
 
 ## Multiple agents
+
+For independently launched agents, start the reservation in a host terminal:
+
+```bash
+agent-reserved-run --profile stable --cores 24 --session -- bash
+```
+
+Leave that shell open. In each agent sandbox, run measurements with:
+
+```bash
+agent-reserved-run --wait-lock 3600 -- ./your-benchmark
+```
+
+Only starting the host session asks for sudo. The stable-profile guard exposes
+an owner-only Unix socket at `/run/agent-cpu-reserve/broker.sock`. The client
+takes the shared workload lock, and the guard admits the connecting process to
+the reservation using kernel peer credentials and a peer pidfd (Linux 6.5 or
+newer). The request contains no command, path, or PID. Commands execute as the
+original user inside the existing sandbox, preserving environment, working
+directory, terminal, and file descriptors. Joined workloads receive the same
+CPU affinity, nice 0, NoNewPrivs, and ASLR policy as the host session.
+
+Run `scripts/setup-agent-cpu-reserve.sh` from a host terminal after updating
+the helpers, then restart existing sandboxes to pick up the socket mount and
+client. Setup installs no sudoers rule. Its tmpfiles configuration creates the
+socket directory and shared lock files at boot, so sandboxes launched before
+a reservation can also connect. The directory mount survives session restarts;
+the socket is closed and removed when the host session ends. Cleanup stops all
+admitted workloads before restoring host settings, including after guard failure.
+
+Each admitted workload has a child cgroup that retains the tightest source
+`memory.max`, `memory.swap.max`, and `pids.max` ceilings. All admitted workloads
+also share the host reservation's `--memory-max` budget and disabled swap. Memory
+accounting moves to the reservation: a source agent's memory ceiling continues
+to cap each workload, but no longer caps the combined memory of its coordinator
+and admitted workload. Use `--memory-max` on the host session for an aggregate
+benchmark budget. Existing memory charges remain with their original cgroup;
+new workload allocations are accounted in the reservation.
+
+The socket is available only for stable profiles started with `--session`.
+CPU-isolation-only `agent-sandbox --reserve-cores` still supports commands
+already inside its reservation. Entry from an unrelated process now requires
+a shared stable host session instead of an automatic sudo invocation.
 
 All sessions share `/run/lock/agent-cpu-reserve.lock` with the existing `agent-cpu-reserve run` / `agent-sandbox --reserve-cores` path. The controller acquires the lock before snapshotting or changing settings and holds it until restoration completes. Even reservations using disjoint CPUs are serialized because scheduler and service changes affect the host.
 
@@ -96,7 +160,9 @@ agent-reserved-run --profile stable --scheduler bpfland \
 
 ## Cleanup and recovery
 
-Normal exit, a failed command, Ctrl-C, termination, or the active-profile timeout stops the workload and restores the snapshot. `--timeout` defaults to 7,200 seconds and limits the active profile, separately from lock waiting and startup. The guard checks settings every second and aborts if clocks, CPU sets, topology, or scheduler identity drift.
+Normal exit, a failed command, Ctrl-C, termination, or the active-profile timeout stops the workload and restores the snapshot. `--timeout` defaults to 93,600 seconds (26 hours) and limits the active profile, separately from lock waiting and startup. The guard checks settings every second and aborts if clocks, CPU sets, topology, or scheduler identity drift.
+
+When a power service is paused, the snapshot includes CPU policies on housekeeping CPUs as well as reserved CPUs. If Power Profiles Daemon is active, `powerprofilesctl` must be available to save its selected profile. Cleanup restarts the services first, then restores the saved profile and exact governor, EPP, clock limits and boost values. It checks for one second of unchanged settings, allowing up to five seconds for delayed service writes to settle. Persistent changes or unreadable settings report incomplete restoration and retain recovery state; cleanup does not silently select a default power mode.
 
 The profile uses a transient systemd guard, an immutable root-owned copy of the helper under `/run`, and an `ExecStopPost` restoration action. Killing the controller cannot skip that restoration action. If the launcher disappears, the guard's timeout still limits the session. Restoration errors retain recovery state and make the invocation fail.
 

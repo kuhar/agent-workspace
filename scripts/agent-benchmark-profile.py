@@ -30,6 +30,8 @@ TIMERS = (
     "apt-daily.timer", "apt-daily-upgrade.timer",
 )
 MAINTENANCE = tuple(u.replace(".timer", ".service") for u in TIMERS)
+FREQUENCY_FIELDS = ("boost", "scaling_max_freq", "scaling_min_freq", "scaling_governor",
+                    "energy_performance_preference")
 
 
 def read(path):
@@ -146,7 +148,7 @@ def plan(args, h):
             "policies": desired, "timeout_seconds": args.timeout,
             "lock_wait_seconds": args.wait_lock,
             "aslr_disabled": not args.keep_aslr, "deep_idle_disabled": not args.keep_deep_idle,
-            "session": args.session}
+            "session": args.session, "memory_max": args.memory_max}
 
 
 def user_manager(h, uid, *argv):
@@ -170,8 +172,6 @@ def snapshot(config, h):
     state = {"config": config, "restored": False,
              "previous": h.snapshot_units(h.parse_cpu_list(config["reserved"])),
              "frequency": {}, "idle": {}, "services": []}
-    for policy, desired in config["policies"].items():
-        state["frequency"][policy] = {name: read(pathlib.Path(policy) / name) for name in desired}
     if config["deep_idle_disabled"]:
         for cpu in h.parse_cpu_list(config["reserved"]):
             for idle in (CPU / f"cpu{cpu}" / "cpuidle").glob("state*"):
@@ -182,6 +182,22 @@ def snapshot(config, h):
             state["services"].append({"unit": unit, "user": False})
     if user_manager(h, config["uid"], "is-active", "plasma-powerdevil.service").stdout.strip() == "active":
         state["services"].append({"unit": "plasma-powerdevil.service", "user": True})
+    units = {entry["unit"] for entry in state["services"]}
+    if "power-profiles-daemon.service" in units:
+        binary = shutil.which("powerprofilesctl", path=h.SAFE_ROOT_ENV["PATH"])
+        if binary is None:
+            h.fail("powerprofilesctl is required to preserve the active power profile")
+        active = command(h, binary, "get").stdout.strip()
+        if not active:
+            h.fail("could not read the active power profile")
+        state["power_profile"] = {"command": binary, "active": active}
+    frequency = {pathlib.Path(policy) for policy in config["policies"]}
+    if units & {"power-profiles-daemon.service", "plasma-powerdevil.service"}:
+        # Restarting a power service can also reset housekeeping CPUs.
+        frequency.update(policy.resolve() for policy in (CPU / "cpufreq").glob("policy*"))
+    for policy in sorted(frequency):
+        state["frequency"][str(policy)] = {name: read(policy / name) for name in FREQUENCY_FIELDS
+                                          if (policy / name).exists()}
     return state
 
 
@@ -247,6 +263,47 @@ def verify(state, h):
         raise RuntimeError("an unexpected sched_ext scheduler attached")
 
 
+def restore_power(state, h):
+    # A desktop service can finish applying its policy after systemctl start
+    # returns. Require a quiet interval before declaring restoration complete.
+    deadline = time.monotonic() + 5
+    stable_since = None
+    while True:
+        changed, errors = [], []
+        profile = state.get("power_profile")
+        if profile:
+            try:
+                if command(h, profile["command"], "get").stdout.strip() != profile["active"]:
+                    command(h, profile["command"], "set", profile["active"])
+                    changed.append("active power profile")
+            except Exception as exc:
+                errors.append(f"power profile: {exc}")
+        for policy, previous in state["frequency"].items():
+            root = pathlib.Path(policy)
+            try:
+                if all(read(root / key) == value for key, value in previous.items()):
+                    continue
+                changed.append(policy)
+                (root / "scaling_min_freq").write_text(read(root / "cpuinfo_min_freq"))
+                for key in FREQUENCY_FIELDS:
+                    if key in previous:
+                        (root / key).write_text(previous[key])
+            except Exception as exc:
+                errors.append(f"{policy}: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        now = time.monotonic()
+        if changed:
+            stable_since = None
+        elif stable_since is None:
+            stable_since = now
+        elif now - stable_since >= 1:
+            return
+        if now >= deadline:
+            raise RuntimeError("power settings did not settle after service restart")
+        time.sleep(.1)
+
+
 def restore(directory, h):
     state_path = directory / "state.json"
     if not state_path.exists():
@@ -254,19 +311,11 @@ def restore(directory, h):
     state = json.loads(state_path.read_text())
     if state["restored"]:
         return
+    if state["config"].get("session"):
+        h.broker_module().SOCKET.unlink(missing_ok=True)
     # Ensure no workload remains while the original policy is restored.
     h.stop_unit(state["config"]["scope"])
     errors = []
-    for policy, previous in state["frequency"].items():
-        root = pathlib.Path(policy)
-        try:
-            (root / "scaling_min_freq").write_text(read(root / "cpuinfo_min_freq"))
-            for key in ("boost", "scaling_max_freq", "scaling_min_freq", "scaling_governor",
-                        "energy_performance_preference"):
-                if key in previous:
-                    (root / key).write_text(previous[key])
-        except Exception as exc:
-            errors.append(str(exc))
     for path, value in state["idle"].items():
         try:
             pathlib.Path(path).write_text(value)
@@ -280,6 +329,12 @@ def restore(directory, h):
             service(h, state, entry, "start")
         except Exception as exc:
             errors.append(str(exc))
+    # Services may overwrite both the profile and raw CPU settings on startup.
+    # Restore these last, including manually selected governor/EPP values.
+    try:
+        restore_power(state, h)
+    except Exception as exc:
+        errors.append(str(exc))
     state["restored"] = not errors
     state["restore_errors"] = errors
     atomic(state_path, state)
@@ -307,6 +362,7 @@ def guard(directory, h):
     scheduler = None
     stopped = False
     lock = None
+    broker = None
     def stop(_signum, _frame):
         nonlocal stopped
         stopped = True
@@ -341,6 +397,8 @@ def guard(directory, h):
                     raise RuntimeError("Bpfland startup interrupted or failed")
                 time.sleep(.1)
         verify(state, h)
+        if config["session"]:
+            broker = h.broker_module().Broker(config, h)
         address = os.environ["NOTIFY_SOCKET"]
         if address.startswith("@"):
             address = "\0" + address[1:]
@@ -351,8 +409,13 @@ def guard(directory, h):
             if scheduler is not None and scheduler.poll() is not None:
                 raise RuntimeError("Bpfland exited")
             verify(state, h)
-            time.sleep(1)
+            if broker is None:
+                time.sleep(1)
+            else:
+                broker.serve()
     finally:
+        if broker is not None:
+            broker.close()
         # Stop the workload before allowing scheduler fallback or clock changes.
         if "config" in locals():
             h.stop_unit(config["scope"])
@@ -393,12 +456,16 @@ def run(args, h):
     config.update(scope=f"agent-reserved-{stamp}.scope", guard=f"agent-benchmark-{stamp}.service")
     helper = directory / "agent-cpu-reserve"
     support = directory / "agent-benchmark-profile.py"
+    broker = directory / "agent-reservation-broker.py"
     shutil.copyfile(h.__file__, helper)
     shutil.copyfile(__file__, support)
+    shutil.copyfile(pathlib.Path(h.__file__).with_name(broker.name), broker)
     helper.chmod(0o700)
     support.chmod(0o600)
+    broker.chmod(0o600)
     config["helper_sha256"] = hashlib.sha256(helper.read_bytes()).hexdigest()
     config["profile_sha256"] = hashlib.sha256(support.read_bytes()).hexdigest()
+    config["broker_sha256"] = hashlib.sha256(broker.read_bytes()).hexdigest()
     config["wrapper_sha256"] = hashlib.sha256(pathlib.Path("/usr/local/bin/agent-reserved-run").read_bytes()).hexdigest()
     if config["scheduler_binary"]:
         config["scheduler_sha256"] = hashlib.sha256(pathlib.Path(config["scheduler_binary"]).read_bytes()).hexdigest()
@@ -429,15 +496,18 @@ def run(args, h):
             workload = ["/usr/bin/setarch", platform.machine(), "-R", *workload]
         if not args.session:
             workload = ["/usr/local/bin/agent-reserved-run", "--wait-lock", str(args.wait_lock), "--", *workload]
+        shared_options = (["--property=Delegate=yes"] if args.session else [])
+        child_options = (["--shared-session"] if args.session else [])
         result = subprocess.run([
             h.SYSTEMD_RUN, "--scope", "--quiet", "--collect", f"--unit={config['scope']}",
             "--slice=benchmark.slice", f"--property=AllowedCPUs={config['cpus']}",
+            f"--property=MemoryMax={config['memory_max']}",
             "--property=MemorySwapMax=0", "--property=OOMPolicy=kill",
             "--property=KillMode=control-group", f"--property=BindsTo={config['guard']}",
-            f"--property=After={config['guard']}", "--", "/usr/bin/python3", "-I", str(helper),
+            f"--property=After={config['guard']}", *shared_options, "--", "/usr/bin/python3", "-I", str(helper),
             "child", f"--uid={uid}", f"--gid={gid}", f"--caller-pid={args.caller_pid}",
             f"--working-directory={os.readlink('/proc/' + str(args.caller_pid) + '/cwd')}",
-            f"--cpus={config['cpus']}", "--no-new-privileges", "--", *workload,
+            f"--cpus={config['cpus']}", "--no-new-privileges", *child_options, "--", *workload,
         ], env=h.SAFE_ROOT_ENV, check=False)
         return 128 + interrupted if interrupted else result.returncode
     finally:
@@ -476,16 +546,17 @@ def main(argv, h):
     parser.add_argument("--reserve-cpus")
     parser.add_argument("--scheduler", choices=("bpfland", "native"), default="bpfland")
     parser.add_argument("--frequency-mhz", type=int)
-    parser.add_argument("--timeout", type=int, default=7200)
+    parser.add_argument("--timeout", type=int, default=93600)
     parser.add_argument("--wait-lock", type=int, default=0)
     parser.add_argument("--keep-aslr", action="store_true")
     parser.add_argument("--keep-deep-idle", action="store_true")
     parser.add_argument("--session", action="store_true")
+    parser.add_argument("--memory-max", default="infinity")
     parser.add_argument("--caller-pid", type=int)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv[1:])
-    if not 1 <= args.timeout <= 86400:
-        h.fail("timeout must be between 1 and 86400 seconds")
+    if not 1 <= args.timeout <= 93600:
+        h.fail("timeout must be between 1 and 93600 seconds")
     if not 0 <= args.wait_lock <= 86400:
         h.fail("lock wait must be between 0 and 86400 seconds")
     if args.frequency_mhz is not None and args.frequency_mhz <= 0:

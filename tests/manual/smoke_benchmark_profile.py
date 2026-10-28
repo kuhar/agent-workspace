@@ -32,6 +32,10 @@ def snapshot():
                  'cachyos-rate-mirrors.timer','apt-daily.timer','apt-daily-upgrade.timer'):
         values[unit] = call(['systemctl','is-active',unit]).stdout.strip()
     values['powerdevil'] = call(['systemctl','--user','is-active','plasma-powerdevil.service']).stdout.strip()
+    if values['power-profiles-daemon.service'] == 'active':
+        profile = call(['powerprofilesctl', 'get'])
+        assert profile.returncode == 0, profile.stdout
+        values['power_profile'] = profile.stdout.strip()
     values['sched_ext'] = Path('/sys/kernel/sched_ext/state').read_text().strip()
     return values
 
@@ -41,6 +45,8 @@ RESULTS = []
 
 
 def restored(name):
+    # Include delayed desktop power-policy writes after a service restart.
+    time.sleep(1)
     after = snapshot()
     diff = {k: [v, after.get(k)] for k,v in BASE.items() if after.get(k) != v}
     if diff:

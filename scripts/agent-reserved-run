@@ -8,7 +8,8 @@ Usage:
   agent-reserved-run [--wait-lock SECONDS] [--] COMMAND [ARGUMENTS...]
   agent-reserved-run --profile stable [OPTIONS] -- COMMAND [ARGUMENTS...]
 
-The first form uses an existing agent CPU reservation, as before.
+The first form joins a shared host reservation without sudo, or uses the
+reservation this process already belongs to.
 The stable profile creates a reservation for one command or interactive shell,
 fixes clocks, and restores prior settings when it ends. It requires normal sudo.
 
@@ -18,7 +19,8 @@ Options before --:
   --reserve-cpus LIST   Optional larger physical-core pool; excludes its SMT peers
   --scheduler NAME      bpfland (default) or native
   --frequency-mhz N     Fixed target; default: each core's nominal frequency
-  --timeout SECONDS     Maximum active profile duration (default: 7200)
+  --timeout SECONDS     Maximum active profile duration (default: 93600)
+  --memory-max SIZE     Scope memory limit (default: infinity)
   --wait-lock SECONDS   Wait for another reservation (default: 0, fail immediately)
   --keep-aslr           Leave address randomization enabled
   --keep-deep-idle      Leave CPU idle settings unchanged
@@ -28,6 +30,8 @@ Options before --:
 Examples:
   agent-reserved-run --profile stable --cpus 16-39 -- ./benchmark
   agent-reserved-run --profile stable --cores 24 --session -- bash
+  # In a separate agent sandbox, while that host shell remains open:
+  agent-reserved-run --wait-lock 3600 -- ./benchmark
   agent-reserved-run --profile stable --scheduler native --cores 24 --plan
 EOF
     exit 0
@@ -44,7 +48,7 @@ if [[ "${1:-}" == "--profile" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --) shift; break ;;
-            --cores|--cpus|--reserve-cpus|--scheduler|--frequency-mhz|--timeout|--wait-lock)
+            --cores|--cpus|--reserve-cpus|--scheduler|--frequency-mhz|--timeout|--wait-lock|--memory-max)
                 if [[ $# -lt 2 ]]; then
                     echo "Error: $1 requires a value" >&2
                     exit 2
@@ -126,7 +130,7 @@ shift
 
 # Commands already in the reserved cgroup need no privileged helper.
 RESERVED_CGROUP="$(cat /proc/self/cgroup)"
-if [[ "$RESERVED_CGROUP" =~ ^0::/benchmark\.slice/agent-reserved-[^/]+\.scope$ ]]; then
+if [[ "$RESERVED_CGROUP" =~ ^0::/benchmark\.slice/agent-reserved-[^/]+\.scope(/(session|workload-[0-9]+-[0-9]+))?$ ]]; then
     AGENT_RESERVED_CPUS="$(cat "/sys/fs/cgroup${RESERVED_CGROUP#0::}/cpuset.cpus.effective")"
     export AGENT_RESERVED_CPUS
     LOCK_FILE=/run/agent-reserved-workload.lock
@@ -162,7 +166,17 @@ if [[ "$RESERVED_CGROUP" =~ ^0::/benchmark\.slice/agent-reserved-[^/]+\.scope$ ]
         fi
         export AGENT_RESERVED_WORKLOAD_LOCK_PID="$$"
     fi
-    "$EXECUTABLE" "$@" <&0 &
+    # Agent harnesses can lower shell priority after entering the reservation.
+    # Restore normal priority for this workload, using the inherited nice limit.
+    /usr/bin/python3 -c '
+import os
+import sys
+try:
+    os.setpriority(os.PRIO_PROCESS, 0, 0)
+except PermissionError:
+    sys.exit("Error: cannot restore nice 0; start a host benchmark session with a sufficient nice limit")
+os.execv(sys.argv[1], sys.argv[1:])
+' "$EXECUTABLE" "$@" <&0 &
     WORKLOAD_PID=$!
     trap 'kill -TERM "$WORKLOAD_PID" 2>/dev/null || true; wait "$WORKLOAD_PID" || true; exit 130' INT
     trap 'kill -TERM "$WORKLOAD_PID" 2>/dev/null || true; wait "$WORKLOAD_PID" || true; exit 143' TERM
@@ -174,7 +188,10 @@ if [[ "$RESERVED_CGROUP" =~ ^0::/benchmark\.slice/agent-reserved-[^/]+\.scope$ ]
     exit "$RESULT"
 fi
 
-sudo -n -- /usr/local/libexec/agent-cpu-reserve exec \
-    --caller-pid "$$" \
-    --lock-wait "$WORKLOAD_WAIT" \
-    -- "$EXECUTABLE" "$@"
+if [[ ! -S /run/agent-cpu-reserve/broker.sock ]]; then
+    echo "Error: no shared host reservation; start outside the sandbox:" >&2
+    echo "  agent-reserved-run --profile stable --cores 24 --session -- bash" >&2
+    exit 1
+fi
+exec /usr/bin/python3 -I /usr/local/libexec/agent-reservation-broker.py \
+    --wait-lock "$WORKLOAD_WAIT" -- "$EXECUTABLE" "$@"

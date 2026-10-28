@@ -322,6 +322,9 @@ def child(args: argparse.Namespace) -> None:
         )
     print(f"  Reserved scope limited to logical CPUs {args.cpus}.", flush=True)
 
+    if args.shared_session:
+        broker_module().prepare_scope()
+
     account = pwd.getpwuid(args.uid)
     os.chdir(args.working_directory)
     pathlib.Path("/proc/self/oom_score_adj").write_text("1000\n")
@@ -339,6 +342,16 @@ def set_no_new_privileges() -> None:
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         error_number = ctypes.get_errno()
         fail(f"cannot set NoNewPrivs: {os.strerror(error_number)}")
+
+
+def broker_module():
+    path = pathlib.Path(__file__).resolve().with_name("agent-reservation-broker.py")
+    spec = importlib.util.spec_from_file_location("agent_reservation_broker", path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot load reservation broker from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def scope_owner_uids(control_group: str) -> set[int]:
@@ -532,6 +545,7 @@ def make_parser() -> argparse.ArgumentParser:
     child_parser.add_argument("--working-directory", required=True)
     child_parser.add_argument("--cpus", required=True)
     child_parser.add_argument("--no-new-privileges", action="store_true")
+    child_parser.add_argument("--shared-session", action="store_true")
     child_parser.add_argument("command", nargs=argparse.REMAINDER)
 
     exec_parser = subparsers.add_parser("exec")

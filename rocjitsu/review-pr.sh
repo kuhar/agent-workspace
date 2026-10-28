@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: review-pr.sh [--no-build] [--no-pytest] [--no-launch] <pr-number|github-pr-url|owner/repo#number>
+Usage: review-pr.sh [--no-build] [--pytest] [--no-launch] <pr-number|github-pr-url|owner/repo#number>
        review-pr.sh queue <protocol|prepare|run|cleanup> [args...]
 
 Checks the PR into the selected review workspace's rocm-systems checkout,
@@ -12,6 +12,7 @@ peanut-review session from that workspace's .peanut-review.json, launches the
 configured reviewers, then waits for every reviewer and the curator to finish.
 The script owns the checkout for its full run; concurrent reviews using the
 same worktree wait for that ownership to be released.
+Pytest is skipped by default; use --pytest to run it.
 
 Environment overrides:
   REVIEW_PARENT       default: invoking ~/rocjitsu/review* directory, or
@@ -39,7 +40,7 @@ EOF
 
 NO_LAUNCH=0
 NO_BUILD=0
-NO_PYTEST=0
+RUN_PYTEST=0
 PR_SPEC=""
 QUEUE_ACTION=""
 QUEUE_ARGS=()
@@ -55,8 +56,8 @@ else
         NO_BUILD=1
         shift
         ;;
-      --no-pytest)
-        NO_PYTEST=1
+      --pytest)
+        RUN_PYTEST=1
         shift
         ;;
       --no-launch)
@@ -418,7 +419,8 @@ setup_rocjitsu_env() {
       libclang_rt.tsan-x86_64.so; do
       rt_path="$(clang++-23 -print-file-name="$rt")"
       if [[ -f "$rt_path" ]]; then
-        rt_dir="$(dirname "$rt_path")"
+        # Compatibility symlinks can live outside the SONAME library directory.
+        rt_dir="$(dirname "$(realpath -- "$rt_path")")"
         case ":${LD_LIBRARY_PATH:-}:" in
           *":$rt_dir:"*) ;;
           *) export LD_LIBRARY_PATH="$rt_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
@@ -654,7 +656,7 @@ phase_end
 phase_start "Python tests"
 PYTEST_STATUS="skipped"
 PYTEST_EXIT_CODE=0
-if [[ "$NO_PYTEST" == 1 ]]; then
+if [[ "$RUN_PYTEST" == 0 ]]; then
   echo "skipped"
 else
   setup_rocjitsu_env
@@ -822,7 +824,7 @@ Base/head: ${BASE_SHA:0:12}...${HEAD_SHA:0:12}
 Config:    $CONFIG
 Source:    $ROCJITSU_SOURCE
 Build presets: ${CMAKE_BUILD_PRESETS[*]}
-Pytest:    $PYTEST_STATUS :: $([[ "$NO_PYTEST" == 1 ]] && echo skipped || echo "$PYTEST_WORKDIR :: ${PYTEST_CMD:-$PYTEST_PYTHON -m pytest $PYTEST_ARGS_SPEC}")
+Pytest:    $PYTEST_STATUS :: $([[ "$RUN_PYTEST" == 0 ]] && echo skipped || echo "$PYTEST_WORKDIR :: ${PYTEST_CMD:-$PYTEST_PYTHON -m pytest $PYTEST_ARGS_SPEC}")
 Session:   $SESSION
 Agents:    $(jq -r '[.agents[].name] | join(", ")' "$SESSION/session.json")
 
@@ -850,7 +852,7 @@ Notes for the next orchestrator:
   - The wrapper waits for every reviewer to finish, then runs Curator if at least half signaled round-done.
   - More than half failing, unfinished reviewers at the wait deadline, or Curator failure/timeout makes the wrapper exit nonzero.
   - RocJITsu builds from $ROCJITSU_SOURCE using the configured CMake preset list.
-  - RocJITsu Python tests run from $PYTEST_WORKDIR with the configured pytest command unless --no-pytest is used.
+  - RocJITsu Python tests are skipped by default; use --pytest to run them.
   - Pytest failures are recorded above but do not block reviewer launch unless PYTEST_REQUIRED=1 is set.
   - The default preset is RelWithDebInfo with CMake's default -DNDEBUG, so assertions are disabled there.
   - The local clang-23-asan-ubsan and clang-23-tsan presets are RelWithDebInfo builds that override the per-config flags to omit -DNDEBUG, so assertions stay enabled.

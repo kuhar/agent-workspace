@@ -48,6 +48,7 @@ Options:
   --airgap, --no-network  Disable shell command networking and Codex web tools
   --memory-limit-gb N     Limit aggregate agent process-tree cgroup memory to N GiB
   --reserve-cores N       Reserve N complete physical cores for this harness
+  --benchmark            Add bpfland and fixed nominal clocks to --reserve-cores
   --daemon               Own a persistent Codex daemon with phone remote control
   -h, --help              Show this help
 
@@ -56,12 +57,15 @@ the system manager through a root helper; other runs use the user manager.
 The configured WORK_ROOT and AGENT_SANDBOX_DEV_ROOT (default /mnt/dev) are
 writable in every sandbox. AGENT_SANDBOX_HARNESS selects the default harness.
 Regular Codex launches use --no-daemon; --daemon explicitly owns a server here.
+--benchmark uses a stable profile with a 26-hour timeout and restores the host
+settings when the session exits. Benchmark commands use agent-reserved-run.
 
 Examples:
   agent-sandbox ~/iree/constraints
   agent-sandbox --harness opencode ~/iree/constraints
   agent-sandbox --memory-limit-gb 16 ~/iree/constraints
   agent-sandbox --reserve-cores 2 ~/rocjitsu/misc
+  agent-sandbox codex --daemon --reserve-cores 48 --benchmark
   agent-sandbox codex ~/iree/constraints -- "fix the build"
   agent-sandbox opencode ~/iree/constraints -- run "fix the build"
 EOF
@@ -77,6 +81,7 @@ MEMORY_LIMIT_GB=""
 MEMORY_LIMIT_SET=false
 RESERVE_CORES=""
 RESERVE_CORES_SET=false
+BENCHMARK=false
 ORIGINAL_ARGS=("$@")
 
 case "$0" in
@@ -107,6 +112,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --daemon)
             CODEX_DAEMON=true
+            shift
+            ;;
+        --benchmark)
+            BENCHMARK=true
             shift
             ;;
         --im-feeling-lucky)
@@ -187,14 +196,22 @@ if $RESERVE_CORES_SET && [[ ! "$RESERVE_CORES" =~ ^[1-9][0-9]*$ ]]; then
     echo "Error: --reserve-cores requires a positive physical-core count, got '$RESERVE_CORES'" >&2
     exit 1
 fi
+if $BENCHMARK && ! $RESERVE_CORES_SET; then
+    echo "Error: --benchmark requires --reserve-cores." >&2
+    exit 1
+fi
 
 RESERVED_CHILD=false
 if [[ "${AGENT_SANDBOX_RESERVED_CHILD:-}" == "1" ]]; then
-    if ! grep -Eq '^0::/benchmark\.slice/agent-reserved-[^/]+\.scope$' /proc/self/cgroup; then
+    if ! grep -Eq '^0::/benchmark\.slice/agent-reserved-[^/]+\.scope(/session)?$' /proc/self/cgroup; then
         echo "Error: reserved child marker is only valid inside benchmark.slice." >&2
         exit 1
     fi
     RESERVED_CHILD=true
+fi
+if $BENCHMARK && $RESERVED_CHILD && [[ "${AGENT_SANDBOX_BENCHMARK_CHILD:-}" != "1" ]]; then
+    echo "Error: start --benchmark from the host, outside the existing reservation." >&2
+    exit 1
 fi
 
 if $RESERVE_CORES_SET && ! $RESERVED_CHILD; then
@@ -208,11 +225,21 @@ if $RESERVE_CORES_SET && ! $RESERVED_CHILD; then
     if $MEMORY_LIMIT_SET; then
         MEMORY_MAX="${MEMORY_LIMIT_GB}G"
     fi
-    sudo -- "$CPU_RESERVE_HELPER" run \
-        --cores "$RESERVE_CORES" \
-        --memory-max "$MEMORY_MAX" \
-        --caller-pid "$$" \
-        -- "$INVOCATION_PATH" "${ORIGINAL_ARGS[@]}"
+    if $BENCHMARK; then
+        sudo -- "$CPU_RESERVE_HELPER" benchmark \
+            --cores "$RESERVE_CORES" \
+            --memory-max "$MEMORY_MAX" \
+            --scheduler bpfland --session \
+            --caller-pid "$$" \
+            -- /usr/bin/env AGENT_SANDBOX_BENCHMARK_CHILD=1 \
+            "$INVOCATION_PATH" "${ORIGINAL_ARGS[@]}"
+    else
+        sudo -- "$CPU_RESERVE_HELPER" run \
+            --cores "$RESERVE_CORES" \
+            --memory-max "$MEMORY_MAX" \
+            --caller-pid "$$" \
+            -- "$INVOCATION_PATH" "${ORIGINAL_ARGS[@]}"
+    fi
     exit $?
 fi
 
@@ -571,7 +598,18 @@ BWRAP_ARGS=(
 # Use the matching helper inside the sandbox without changing the host install.
 if [[ -f /usr/local/bin/agent-reserved-run ]]; then
     RESERVED_RUN_SOURCE="$(dirname "$(readlink -f "$INVOCATION_PATH")")/agent-reserved-run"
-    add_bind_if_exists --ro-bind "$RESERVED_RUN_SOURCE" /usr/local/bin/agent-reserved-run
+    if [[ -r "$RESERVED_RUN_SOURCE" ]]; then
+        BWRAP_ARGS+=(--perms 0755)
+        add_file_data_bind --ro-bind-data "$RESERVED_RUN_SOURCE" /usr/local/bin/agent-reserved-run
+    fi
+fi
+
+# Bind the directory, so existing sandboxes see a socket recreated by a later
+# host session. Setup creates this directory even while no session is active.
+add_bind_if_exists --ro-bind /run/agent-cpu-reserve /run/agent-cpu-reserve
+BROKER_SOURCE="$(dirname "$(readlink -f "$INVOCATION_PATH")")/agent-reservation-broker.py"
+if [[ -r "$BROKER_SOURCE" && -f /usr/local/libexec/agent-reservation-broker.py ]]; then
+    add_file_data_bind --ro-bind-data "$BROKER_SOURCE" /usr/local/libexec/agent-reservation-broker.py
 fi
 
 # Preserve the host locks' inodes: --ro-bind-data would create a private copy and

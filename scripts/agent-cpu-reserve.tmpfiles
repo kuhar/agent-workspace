@@ -1,0 +1,4 @@
+# Keep mount targets and lock inodes available before any reservation starts.
+d /run/agent-cpu-reserve 0755 root root -
+f /run/agent-reserved-workload.lock 0644 root root -
+f /run/lock/agent-cpu-reserve.lock 0644 root root -

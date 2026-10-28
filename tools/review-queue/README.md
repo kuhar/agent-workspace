@@ -241,6 +241,12 @@ RocJITsu reviews build with Clang by default (`default`,
 `clang-23-asan-ubsan`, and `clang-23-tsan`). Set `CMAKE_PRESETS` to override
 the build list explicitly.
 
+The shared RocJITsu presets embed `CCACHE_BASEDIR` (the wrapper root) and
+`CCACHE_NOHASHDIR=true` in the C and C++ compiler launchers. This keeps cache
+keys independent of the wrapper path even for direct Ninja builds without
+direnv or a build preset. Compiler options and source/header contents still
+participate in cache keys.
+
 The queue exports these variables for every operation:
 
 - `REVIEW_QUEUE_PROTOCOL=1`

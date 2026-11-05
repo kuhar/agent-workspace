@@ -192,32 +192,38 @@ replies and then the old local parent. Run the preview again and check that
 the replacement is present and no outgoing reply still targets the retired
 parent.
 
-# Approval
+# Review decision
 
 The curated review must contain at least one author-facing comment for the
-current head. An approval counts. An internal curation note does not.
+current head. Check the full finding history, including imported threads, and
+judge the change on its intended base and in its planned landing order.
 
-Check the full finding history, including imported threads and findings outside
-this pass. Judge substantive concerns against this PR's intended base and head.
-When review of the current head is complete, all substantive findings are
-addressed, and no material disagreement about the change's direction remains,
-approve it. This applies even if every reviewer finding was dropped during
-curation. Optional polish can accompany approval.
+Before blocking, ask: **Will the project suffer materially if this merges
+as-is?** Use a top-level `add-global-comment --category request-changes` only
+when the evidence supports a yes. Say what landing this revision would break
+or commit the project to, who would bear the consequence, and why it matters
+to fix it before merge. For example, silently returning wrong results on one
+supported GPU can justify a block, as can committing callers to an interface
+that would be costly to undo. Point to the smallest change that makes landing
+acceptable. If an existing thread explains the fix, refer to it once.
 
-Record one top-level approval with exactly `LGTM`:
+Approve a completed review when the change is sound to land and there is no
+material disagreement about its direction. Useful improvements that can
+safely follow may accompany approval, even when the author has not made them.
+Record the approval even if all findings were dropped during curation. Use
+one top-level comment whose body is exactly `LGTM`:
 
 `${PR_BIN} --session ${SESSION} add-global-comment --category approve --body "LGTM"`
 
-Reuse this review's existing approval for the current head when it still
-applies. Delete superseded local request-changes comments whose concerns are
-addressed. Preserve imported GitHub review history.
+If a consequential question about the direction or behavior is still open,
+but the evidence does not establish harm from landing, use a regular comment
+to ask what would settle it. If review is incomplete and no blocking harm is established,
+leave a neutral comment stating what remains unverified. Never invent a
+blocker to meet the minimum.
 
-When approval is unwarranted, keep an actionable finding or a focused question
-that explains the outstanding decision. If the only blocker is an existing
-thread, refer to it in the review outcome rather than reopening it or repeating
-the inline discussion. If review is incomplete and there are no findings, use
-one neutral global comment stating what remains unverified. Never invent a nit
-to meet the minimum.
+Reuse this review's existing outcome for the current head when it still
+applies. Remove superseded unpublished local decisions before preparing the
+new outcome. Preserve imported and published review history.
 
 Before signaling completion, use `comments --format json` to identify the
 visible comment or approval that conveys this review's outcome. Reuse it on a

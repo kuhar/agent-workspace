@@ -94,6 +94,40 @@ async def test_poll_errors_and_recovery_are_visible_without_repeated_messages(co
 
 
 @pytest.mark.parametrize("width", [80, 120])
+async def test_pr_indicator_next_to_review_count(config, project, width):
+    scheduler = Scheduler(config)
+    record = PullRequest(
+        project=project.name, repo=project.repo, number=1, title="Test", author="alice",
+        url=f"https://github.com/{project.repo}/pull/1", head_sha="a" * 40,
+        head_ref="topic", updated_at=isoformat(),
+    )
+    scheduler.db.set_manual_watch(record)
+    scheduler.db.create_wrapper(
+        project=project.name, repo=project.repo, number=1, path=project.wrapper_root / "pr-1",
+        token="owned", head_ref="topic",
+    )
+    app = ReviewQueueApp(scheduler)
+    async with app.run_test(size=(width, 30)) as pilot:
+        await pilot.pause()
+        for state, draft, expected in (
+            ("OPEN", True, "[grey62]D[/]"),
+            ("OPEN", False, ""),
+            ("CLOSED", True, "[bold red]C[/]"),
+            ("MERGED", False, "[bold #a371f7]M[/]"),
+        ):
+            scheduler.db.apply_poll(
+                project, [replace(record, state=state, is_draft=draft)], query_numbers=set(),
+                bootstrap_hours=24, push_quiet_seconds=0,
+            )
+            app.refresh_view()
+            for table_id in ("queue-table", "review-table"):
+                table = app.query_one(f"#{table_id}", DataTable)
+                headers = [str(col.label) for col in table.ordered_columns]
+                count_col = headers.index("R" if app.compact else "Reviewed")
+                assert table.get_row_at(0)[count_col + 1] == expected
+
+
+@pytest.mark.parametrize("width", [80, 120])
 async def test_my_approval_is_distinct_from_others_in_both_tables(config, project, width):
     scheduler = Scheduler(config)
     seed(scheduler, project)

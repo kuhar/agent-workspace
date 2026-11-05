@@ -81,6 +81,8 @@ class QueueItem:
     manual_enqueued: bool = False
     approval_viewer: str = ""
     approved_by: tuple[str, ...] = ()
+    pr_state: str = "OPEN"
+    is_draft: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +130,8 @@ class WrapperView:
     review_count: int = 0
     approval_viewer: str = ""
     approved_by: tuple[str, ...] = ()
+    pr_state: str = "OPEN"
+    is_draft: bool = False
 
 
 @dataclass(frozen=True, slots=True)

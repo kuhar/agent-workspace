@@ -214,6 +214,8 @@ class HelpModal(ModalScreen[None]):
 [b]?[/b]            close this help
 [b]q[/b]            quit; active launchers are stopped
 
+Beside the review count: [bold #a371f7]M[/] merged, [bold red]C[/] closed, [grey62]D[/] draft.
+
 [b]Demo clock[/b]
 [b]1 / 2 / 3 / 4[/b]  set 1× / 60× / 300× / 1800× speed
 [b]0[/b]              pause or resume simulated time
@@ -259,6 +261,16 @@ def _approvals(item: QueueItem | WrapperView) -> str:
 
 def _reviews(count: int) -> str:
     return f"R{count}" if count else "·"
+
+
+def _pr_indicator(item: QueueItem | WrapperView) -> str:
+    if item.pr_state == "MERGED":
+        return "[bold #a371f7]M[/]"
+    if item.pr_state == "CLOSED":
+        return "[bold red]C[/]"
+    if item.is_draft:
+        return "[grey62]D[/]"
+    return ""
 
 
 def _phase(status: str, *, width: int) -> str:
@@ -527,6 +539,7 @@ class ReviewQueueApp(App[None]):
             for label, width in (
                 ("Prio", 6),
                 ("R", 5),
+                ("", 1),
                 ("Project / PR", 18),
                 ("Approvals", 14),
                 ("Age", 6),
@@ -536,6 +549,7 @@ class ReviewQueueApp(App[None]):
             for label, width in (
                 ("", 3),
                 ("R", 7),
+                ("", 1),
                 ("Project / PR", 18),
                 ("Approvals", 14),
                 ("Progress", 26),
@@ -546,6 +560,7 @@ class ReviewQueueApp(App[None]):
             for label, width in (
                 ("Prio", 6),
                 ("Reviewed", 9),
+                ("", 1),
                 ("Project / PR", 19),
                 ("Approvals", 14),
                 ("Author", 15),
@@ -556,6 +571,7 @@ class ReviewQueueApp(App[None]):
             for label, width in (
                 ("", 3),
                 ("Reviewed", 10),
+                ("", 1),
                 ("Project / PR", 19),
                 ("Approvals", 14),
                 ("Author", 15),
@@ -744,6 +760,7 @@ class ReviewQueueApp(App[None]):
             values = [
                 f"[b cyan]{item.score:+d}[/]",
                 reviewed,
+                _pr_indicator(item),
                 f"{escape(item.project)}#{item.number}",
                 _approvals(item),
             ]
@@ -835,6 +852,7 @@ class ReviewQueueApp(App[None]):
             values = [
                 marker,
                 reviewed,
+                _pr_indicator(wrapper),
                 f"{escape(wrapper.project)}#{wrapper.number}",
                 _approvals(wrapper),
             ]

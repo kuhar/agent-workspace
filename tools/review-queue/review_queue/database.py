@@ -803,7 +803,7 @@ class Database:
         sql = f"""
             SELECT j.id AS job_id, j.project, j.repo, j.pr_number AS number,
                    pr.url, pr.title, pr.author, j.head_sha, pr.head_ref, pr.updated_at,
-                   pr.approval_viewer, pr.approved_by,
+                   pr.approval_viewer, pr.approved_by, pr.state AS pr_state, pr.is_draft,
                    j.status, j.queued_at, j.quiet_until, j.error, j.source,
                    COALESCE(pp.priority, 0) AS project_priority,
                    COALESCE(a.priority, 0) AS author_priority,
@@ -853,6 +853,8 @@ class Database:
             error=row["error"],
             review_count=row["review_count"],
             manual_enqueued=row["source"] in {"manual", "manual-watch"},
+            pr_state=row["pr_state"],
+            is_draft=bool(row["is_draft"]),
             approval_viewer=row["approval_viewer"],
             approved_by=tuple(json.loads(row["approved_by"])),
         )
@@ -917,6 +919,7 @@ class Database:
                    w.pinned, w.last_used_at, w.size_bytes,
                    COALESCE(w.cleanup_error, latest.error) AS display_error,
                    pr.title, pr.author, pr.approval_viewer, pr.approved_by,
+                   pr.state AS pr_state, pr.is_draft,
                    (SELECT COUNT(*) FROM jobs reviewed
                     WHERE reviewed.repo = w.repo
                       AND reviewed.pr_number = w.pr_number
@@ -945,6 +948,8 @@ class Database:
                 title=row["title"],
                 author=row["author"],
                 review_count=row["review_count"],
+                pr_state=row["pr_state"],
+                is_draft=bool(row["is_draft"]),
                 approval_viewer=row["approval_viewer"],
                 approved_by=tuple(json.loads(row["approved_by"])),
             )

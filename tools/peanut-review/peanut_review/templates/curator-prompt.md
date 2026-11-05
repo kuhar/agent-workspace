@@ -194,27 +194,34 @@ parent.
 
 # Approval
 
-After curation, approve the change when all existing substantive findings have
-been addressed and the reviewers have completed their review of the current
-head without finding any new substantive issues. Apply the practical-impact rule above to current and historical findings alike.
-A contrived failure or low-value hardening request is never a reason to withhold
-approval. A useful optional suggestion may accompany approval.
+The curated review must contain at least one author-facing comment for the
+current head. An approval counts. An internal curation note does not.
 
-Check the full finding history, including imported GitHub threads and older
-findings outside the current curation scope. Verify that substantive concerns owned by this step
-are addressed on its intended base and head; an empty new-comment list or a resolved or
-deleted flag alone is not enough. Failed, blocked, or incomplete reviewer runs
-are not evidence of a clean review.
+Check the full finding history, including imported threads and findings outside
+this pass. Judge substantive concerns against this PR's intended base and head.
+When review of the current head is complete, all substantive findings are
+addressed, and no material disagreement about the change's direction remains,
+approve it. This applies even if every reviewer finding was dropped during
+curation. Optional polish can accompany approval.
 
-When these conditions hold, add one top-level approval with exactly `LGTM`:
+Record one top-level approval with exactly `LGTM`:
 
 `${PR_BIN} --session ${SESSION} add-global-comment --category approve --body "LGTM"`
 
-Reuse an existing approval for the current head instead of adding a duplicate.
-Delete superseded local request-changes comments whose concerns are addressed;
-preserve imported GitHub review history. This approval is a review decision,
-not a praise-only summary. If substantive concerns remain or review completion
-is uncertain, keep the actionable findings and do not approve.
+Reuse this review's existing approval for the current head when it still
+applies. Delete superseded local request-changes comments whose concerns are
+addressed. Preserve imported GitHub review history.
+
+When approval is unwarranted, keep an actionable finding or a focused question
+that explains the outstanding decision. If the only blocker is an existing
+thread, refer to it in the review outcome rather than reopening it or repeating
+the inline discussion. If review is incomplete and there are no findings, use
+one neutral global comment stating what remains unverified. Never invent a nit
+to meet the minimum.
+
+Before signaling completion, use `comments --format json` to identify the
+visible comment or approval that conveys this review's outcome. Reuse it on a
+rerun of the same head when it still applies.
 
 For GitHub-backed sessions, finish with `gh-push --dry-run` to verify the
 prepared review. Leave publication to the user or orchestrator.

@@ -48,15 +48,32 @@ Curate local reviewer comments from the configured reviewer agents. Treat
 visible, resolved, deleted, and imported GitHub comments as duplicate history
 before deciding to keep any new finding.
 
-Do not edit or delete imported GitHub comments. If a new local reviewer finding
-duplicates an imported anchored GitHub thread that is still the right place to
-discuss the issue, use that existing thread instead: run
-`unresolve <comment-id>` if needed, use `add-comment --reply-to <comment-id>`
-with the current evidence or remaining concern, then delete the new duplicate
-local comment. GitHub does not support replies to global comments, so never use
-a global comment ID with `--reply-to`. If the imported global comment already
-covers the finding, delete the local duplicate; if material new evidence is
-needed, keep one concise top-level global comment.
+Before keeping a scope or sequencing request, reopening one, or using it to
+withhold approval, check where the work belongs. Start with the PR description
+and author replies. Follow linked tracking issues to their sequencing plan and
+compare the incremental diff with its stack parent and check adjacent PRs.
+If ownership is still unclear,
+search the author's other open PRs in the project for the affected feature or
+contract. Inspect the relevant description, diff, or guard. Distinguish work
+already merged, implemented in an open PR, and merely planned in an issue.
+Use read-only lookups. Keep curation actions in the current session.
+
+Judge this PR at the point it is meant to land:
+- If this step is sound on its intended base and the broader work belongs to a
+  different step, drop the local request. Record the owning issue or PR in the
+  curation note. Do not ask the author to duplicate, track, or move that work,
+  reopen a thread, or hold approval until an independent follow-up merges.
+- If this PR exposes a supported path before its prerequisite lands, keep one
+  sequencing comment. Cite the plan and the affected path, explain the unsafe
+  intermediate behavior, and suggest the smallest remedy (for example, land
+  the prerequisite first or keep the path gated). Check for an existing guard.
+- If the order is unclear and the answer affects safety or correctness, ask
+  one focused question on the current PR. If external context is unavailable,
+  note that limitation and avoid claiming that no plan exists.
+
+Preserve imported GitHub comments and published replies. Curate unpublished
+local feedback. GitHub does not support replies to global comments, so never
+use a global comment ID with `--reply-to`.
 
 Optimize for a small, high-signal final comment set:
 
@@ -71,12 +88,18 @@ Optimize for a small, high-signal final comment set:
 
 Prefer existing threads over new duplicate comments:
 
-- if an unresolved anchored thread already covers the same root issue, edit or
-  reply to that thread with any useful new detail using
-  `add-comment --reply-to`, then delete the duplicate new comment
-- if a resolved anchored thread covers an issue that still applies, use
-  `unresolve` and `add-comment --reply-to` to explain what remains true on the
-  current diff
+- read the existing thread, the new comment, and its replies. If the thread
+  already explains the issue and asks for the right action, and the new material
+  adds nothing the author needs, delete the unpublished duplicate silently.
+  Leave the thread's resolution alone. An outstanding issue can still inform
+  the verdict without another reminder.
+- when new evidence changes what the author needs to know or decide, put it
+  in the existing anchored thread. Edit an unpublished local parent or use
+  `add-comment --reply-to <comment-id>` on a published thread. Reopen with
+  `unresolve <comment-id>` only when the new evidence requires action on this
+  PR, for example when a claimed fix still fails on the current head. If the
+  existing comment is a published global, use one concise new global only
+  when the additional evidence warrants an author-facing update.
 - if several old or new line comments are all examples of one broader pattern,
   use one global comment when the global framing is more useful than another
   inline thread, include representative `file:line` examples, and delete the
@@ -113,7 +136,6 @@ at the boundary. If an error escapes that policy and execution continues, keep
 the resulting defect. Apply the same test to coverage requests: identify the
 plausible regression in a supported behavior that the proposed check would catch.
 
-For cross-PR design findings, verify the cited interaction and landing order.
 For historical concerns, check that the cited decision and its constraints
 still apply. Keep the consequence for the current design explicit.
 
@@ -156,13 +178,19 @@ Rewrite kept comments as concise author-facing review feedback:
 - avoid internal triage words like "confirmed", "partly confirmed", "keep",
   "delete", or "curation"
 
-When merging duplicates, edit the kept comment first so it absorbs useful
-detail, then delete the redundant comment.
+Before retiring an unpublished inline parent, inspect its replies in the
+comment JSON by matching `reply_to` to the parent's ID. When merging threads,
+carry any distinct, useful evidence from the parent and its replies into the
+surviving thread first. After confirming the evidence is represented there,
+delete the superseded unpublished replies before deleting their local parent.
 
-If `gh-push --dry-run` says a survivor is outside the GitHub diff range or
-will be promoted implicitly, recreate it as an explicit global comment that
-preserves the original `file:line` in the body, then delete the stale anchored
-copy.
+If `gh-push --dry-run` would promote the parent outside the GitHub diff,
+create one explicit global comment. Include the original `file:line` and any
+distinct witness, qualification, or counterexample from its unpublished local
+replies. Once the replacement is saved, delete the superseded unpublished
+replies and then the old local parent. Run the preview again and check that
+the replacement is present and no outgoing reply still targets the retired
+parent.
 
 # Approval
 
@@ -173,8 +201,8 @@ A contrived failure or low-value hardening request is never a reason to withhold
 approval. A useful optional suggestion may accompany approval.
 
 Check the full finding history, including imported GitHub threads and older
-findings outside the current curation scope. Verify that substantive concerns
-are addressed on the current head; an empty new-comment list or a resolved or
+findings outside the current curation scope. Verify that substantive concerns owned by this step
+are addressed on its intended base and head; an empty new-comment list or a resolved or
 deleted flag alone is not enough. Failed, blocked, or incomplete reviewer runs
 are not evidence of a clean review.
 

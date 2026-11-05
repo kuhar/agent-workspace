@@ -49,7 +49,8 @@ to print. Always execute commands via the Shell tool.
 ## Read your persona
 
 Read your persona file and adopt the expertise, review style, priorities,
-and feedback patterns described in it throughout your entire review:
+and feedback patterns described in it. Use the practical-impact rule below
+to decide which observations to post, regardless of persona:
 ```
 cat ${PERSONA_PATH}
 ```
@@ -113,7 +114,27 @@ with +/- — those numbers do NOT correspond to source file lines.
 If unsure, read the file with `cat -n <path>` and find the correct line.
 The CLI will print the code at that line — verify it matches your finding.
 
-For each finding, run:
+Before posting a finding, decide whether it deserves the author's attention
+on this PR. Trace the trigger to a supported caller, workload, or documented
+guarantee, and identify what goes wrong for someone using it. A direct helper
+call, injected failure, or surviving test mutation can establish a mechanism.
+Check whether its preconditions occur on the supported path and whether the
+consequence matters to the change. Even a reachable failure can be peripheral
+hardening with little bearing on the PR. Omit those observations.
+
+For auxiliary developer tools, normally omit unusual environmental failures
+whose consequence is losing one rerunnable result. Raise them if they violate
+an explicit reliability requirement, affect an actual dependent workflow, or
+cause lasting harm. An imagined consumer relying on the output is insufficient.
+
+Keep rare failures with a credible path to serious consequences such as silent
+wrong results, lost data, or unsafe execution. For a deliberately fatal or
+unsupported case, check what the boundary actually does: returning an error
+and continuing with corrupt state is a real failure. For a coverage request,
+identify the plausible regression in the behavior the test promises to cover.
+A review with no findings is a valid outcome.
+
+For each finding worth posting, run:
 ```
 ${PR_BIN} --session ${SESSION} add-comment --file <path> --line <N> --body "<description>"
 ```

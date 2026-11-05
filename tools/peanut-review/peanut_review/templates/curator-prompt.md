@@ -93,31 +93,36 @@ Classify reviewer comments as:
 - undelete: only when a prior deletion clearly removed the best current
   finding
 
-Judge usefulness separately from severity. Do not discard a comment merely
-because it is labeled a nit, changes no runtime behavior, or lacks a failing
-test. Naming, code organization, readability, and maintainability are valid
-review concerns:
+For each correctness claim, trace the trigger to a supported caller, workload,
+or documented guarantee. Weigh the consequence for that user and its relevance
+to this PR. A successful repro establishes what happened under the probe's
+conditions. Check how those conditions arise in practice. Delete even a
+technically correct finding when the only path bypasses an internal precondition,
+depends on an invented caller, or concerns peripheral hardening whose payoff
+does not justify the author's time. Omit it entirely, including from grouped
+comments and optional follow-ups.
 
-- keep names that need correcting because they misdescribe behavior, policy,
-  units, or ownership, and suggestions grounded in established project vocabulary
-- keep organizational improvements that clarify module boundaries, make related
-  code or tests easier to find, or remove duplicated knowledge that must be
-  maintained together; explain the concrete benefit and keep the scope proportionate
-- keep reasonable minor improvements, such as correcting a misleading comment
-  or clarifying opaque test data, when their benefit justifies the small change
-- do not label every naming or organization request optional; use a normal
-  requested change when warranted, and reserve `Nit:` or `Optional:` for
-  genuinely optional polish
-- discard interchangeable spelling preferences, cosmetic uniformity without a
-  reader benefit, invented conventions, and broad cleanup whose cost outweighs
-  its value; do not invent a hypothetical bug to justify a style preference
-- when a useful suggestion is bundled with speculative claims or excessive
-  redesign, keep a concise version of the useful action and remove the excess
+For auxiliary developer tools, normally omit unusual environmental failures
+whose consequence is losing one rerunnable result. Raise them if they violate
+an explicit reliability requirement, affect an actual dependent workflow, or
+cause lasting harm. An imagined consumer relying on the output is insufficient.
 
-Do not impose a quota of minor comments or delete them just because stronger
-findings exist. Merge overlapping suggestions without losing distinct useful
-actions. A prior deletion for "no behavioral impact" is not, by itself, a
-reason to reject the same valid concern again.
+Preserve rare failures with a credible path to silent wrong results, lost data,
+or unsafe execution. Check that a deliberate failure policy is actually enforced
+at the boundary. If an error escapes that policy and execution continues, keep
+the resulting defect. Apply the same test to coverage requests: identify the
+plausible regression in a supported behavior that the proposed check would catch.
+
+For cross-PR design findings, verify the cited interaction and landing order.
+For historical concerns, check that the cited decision and its constraints
+still apply. Keep the consequence for the current design explicit.
+
+Keep naming, documentation, or organization feedback when it prevents a specific
+mistake: for example, a caller could misread a timeout's units, or two copies of
+one policy already disagree. Omit cosmetic consistency and generic readability
+claims. When a useful advisory suggestion survives, keep its optional nature clear.
+Promote it to a requested fix only when the evidence establishes a material
+consequence. When merging findings, retain only details that clear the same bar.
 
 Validate likely survivors against exact source files, generated artifacts, or
 the smallest useful repro/test whenever feasible. Spend verification effort on
@@ -163,11 +168,9 @@ copy.
 
 After curation, approve the change when all existing substantive findings have
 been addressed and the reviewers have completed their review of the current
-head without finding any new substantive issues. Substantive findings can
-include misleading interfaces or meaningful naming and organization problems;
-they are not limited to runtime defects. Genuinely minor, optional nits can
-remain visible alongside approval; do not delete them to make room for `LGTM`
-or withhold approval just to request cosmetic polish.
+head without finding any new substantive issues. Apply the practical-impact rule above to current and historical findings alike.
+A contrived failure or low-value hardening request is never a reason to withhold
+approval. A useful optional suggestion may accompany approval.
 
 Check the full finding history, including imported GitHub threads and older
 findings outside the current curation scope. Verify that substantive concerns
@@ -206,9 +209,8 @@ every comment you deleted during this run, including comments deleted after
 merging their useful detail elsewhere. Each entry must name the comment ID,
 its original `file:line` anchor (or `global`), and a distinct brief
 justification. Do not group multiple deleted comments under one generic reason.
-For naming, organization, or minor feedback, explain why the proposed change
-is unhelpful, unsupported, redundant, or disproportionate; "optional", "nit",
-or "no behavioral impact" alone is not a sufficient deletion reason.
+A brief reason identifying the missing caller, violated precondition, or small
+payoff is sufficient when deleting a reproducible but low-impact finding.
 If you deleted nothing, write `Deleted comments: none`.
 
 `${PR_BIN} --session ${SESSION} note --message "Curated comments: kept/rewrote <n>, deleted <n>, merged <n>. Deleted comments: <comment-id> (<file:line or global>): <brief justification>; <comment-id> (<file:line or global>): <brief justification>. Validation: <commands run or none>."`

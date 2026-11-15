@@ -1,9 +1,9 @@
 ---
 name: rj-performance
-description: Use to interpret RocJITsu timings, diagnose simulator slowdowns, benchmark candidates, or decide whether an optimization should land. Interpret supplied results for analysis questions. Run comparisons for measurement requests.
+description: Use to interpret rocjitsu timings, diagnose simulator slowdowns, benchmark candidates, or decide whether an optimization should land. Interpret supplied results for analysis questions. Run comparisons for measurement requests.
 ---
 
-# RocJITsu performance
+# rocjitsu performance
 
 **Identify the decision.** For a results question, explain what the data supports and which measurement would settle the uncertainty. For a measurement request, reproduce the reported case on its original revisions or compare the candidate with its parent or requested baseline. Record both SHAs, the metric and the deciding workload. For simulator timings, name the host CPU and emulated target. A claim about GPU throughput needs measurements on the named hardware. Respect the requested candidate set and stop condition.
 

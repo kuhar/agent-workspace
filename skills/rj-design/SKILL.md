@@ -1,9 +1,9 @@
 ---
 name: rj-design
-description: Use for RocJITsu feature design when comparing approaches, choosing an interface or ownership model, or testing a design with a prototype. Follow the requested stage, from options or an RFC through implementation.
+description: Use for rocjitsu feature design when comparing approaches, choosing an interface or ownership model, or testing a design with a prototype. Follow the requested stage, from options or an RFC through implementation.
 ---
 
-# Design a RocJITsu change
+# Design a rocjitsu change
 
 Start with the decision and the constraints it must satisfy. Trace a representative caller through the existing path. Which behavior must survive, who owns the state, and which detail can stay private?
 

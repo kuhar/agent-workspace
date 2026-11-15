@@ -1,9 +1,9 @@
 ---
 name: rj-correctness
-description: Use for RocJITsu correctness failures, regression tests, downstream compatibility of fixes, simulator coverage, or AMDGPU instruction audits. Match the investigation to the reported failure or requested architecture scope.
+description: Use for rocjitsu correctness failures, regression tests, downstream compatibility of fixes, simulator coverage, or AMDGPU instruction audits. Match the investigation to the reported failure or requested architecture scope.
 ---
 
-# RocJITsu correctness
+# rocjitsu correctness
 
 1. **Reproduce on the right revision.** For a new develop regression, record the SHA of fresh `origin/develop`. For a downstream report, start with the reported SDK, compiler, target and wave mode. Save the failing test name, input and shortest reproducer. For CI, run the failing configuration on both the PR and its base. For a flake, give failures per attempt on each.
 2. **Find the first wrong decision.** Reduce the workload until competing causes give different results. Trace that difference across the compiler, runtime, decoder or execution boundary. For instruction behavior, use [ISA evidence](references/isa.md). If the PR fails while its base passes under matched conditions, investigate the PR diff. If the reported failure no longer reproduces, check the setup and look for a landed fix.
